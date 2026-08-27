@@ -87,6 +87,14 @@ static volatile bool g_resample_reinit = false;
 static volatile audio_channel_mode_t g_channel_mode = AUDIO_CHANNEL_STEREO;
 static int32_t g_volume_q15 = 32768;  // unity
 
+// Amp idle power-down watchdog (audio_output.h amp_idle_timeout_ms). When the
+// stream is active but produces no PCM frames for the whole timeout (pause or
+// sustained underflow), the amp-enable line is de-asserted to mute/power down
+// the amplifier; it is re-asserted on the next frame.
+static uint32_t g_amp_idle_timeout_ms = 60000;  // 0 = disabled
+static int64_t g_amp_idle_since_us = 0;         // ignored when g_amp_idle_muted
+static bool g_amp_idle_muted = false;           // amp auto-muted by the watchdog
+
 // Live output cursor. output_submitted_frames advances after a successful
 // i2s_channel_write(); output_sent_frames is advanced by the TX DMA completion
 // ISR. Their difference is the audio queued ahead of the next write — the real
@@ -237,6 +245,13 @@ static void playback_task(void *arg) {
 
     size_t frames = audio_receiver_read(pcm, FRAME_SAMPLES + 1);
     if (frames > 0) {
+      // Data is flowing again: cancel any idle power-down and re-assert the
+      // amp if the watchdog had muted it (e.g. resume after a long pause).
+      if (g_amp_idle_muted) {
+        amp_set(true);
+        g_amp_idle_muted = false;
+      }
+      g_amp_idle_since_us = 0;
       int16_t *play_buf = pcm;
       size_t play_frames = frames;
       if (audio_resample_is_active()) {
@@ -254,6 +269,22 @@ static void playback_task(void *arg) {
       // Receiver underflow — output a frame of silence. Block on the DMA write
       // so the write itself paces the loop, instead of a short timeout plus
       // vTaskDelay(1) which produced jittery silence.
+      //
+      // Idle amp power-down: if the stream has been silent for the full
+      // timeout (pause or a sustained stall), de-assert the amp-enable line.
+      if (g_amp_idle_timeout_ms > 0) {
+        if (g_amp_idle_since_us == 0) {
+          g_amp_idle_since_us = esp_timer_get_time();
+        } else if (esp_timer_get_time() - g_amp_idle_since_us >=
+                   (int64_t) g_amp_idle_timeout_ms * 1000LL) {
+          if (!g_amp_idle_muted) {
+            amp_set(false);
+            g_amp_idle_muted = true;
+          }
+        }
+      } else {
+        g_amp_idle_since_us = 0;
+      }
       if (i2s_channel_write(g_tx_handle, silence, (size_t) FRAME_SAMPLES * 2 * sizeof(int16_t), &written,
                             portMAX_DELAY) == ESP_OK) {
         __atomic_add_fetch(&g_submitted_frames, (uint64_t) (written / stride), __ATOMIC_RELAXED);
@@ -278,10 +309,11 @@ void audio_output_set_config(const AudioOutputConfig &config) {
   }
   g_config = config;
   g_output_rate = (config.sample_rate > 0) ? (uint32_t) config.sample_rate : 44100;
+  g_amp_idle_timeout_ms = config.amp_idle_timeout_ms;
   g_config_set = true;
-  ESP_LOGI(TAG, "Config: BCLK=%d LRCK=%d DOUT=%d AMP=%d rate=%d inverted=%d", config.i2s_bclk_gpio,
-           config.i2s_lrclk_gpio, config.i2s_dout_gpio, config.amp_enable_gpio, config.sample_rate,
-           config.amp_enable_inverted ? 1 : 0);
+  ESP_LOGI(TAG, "Config: BCLK=%d LRCK=%d DOUT=%d AMP=%d rate=%d inverted=%d idle_timeout=%u ms",
+           config.i2s_bclk_gpio, config.i2s_lrclk_gpio, config.i2s_dout_gpio, config.amp_enable_gpio,
+           config.sample_rate, config.amp_enable_inverted ? 1 : 0, config.amp_idle_timeout_ms);
 }
 
 esp_err_t audio_output_init(void) {
@@ -356,6 +388,8 @@ void audio_output_start(void) {
   // The DMA has been free-running since the last session, so the cursor carries
   // an arbitrary submitted/sent skew. Start the new session clean.
   cursor_reset();
+  g_amp_idle_since_us = 0;
+  g_amp_idle_muted = false;
   amp_set(true);
   xTaskCreatePinnedToCore(playback_task, "audio_play", 4096, nullptr, AIRPLAY_AUDIO_PLAYBACK_TASK_PRIORITY,
                           &g_playback_task, AIRPLAY_PLAYBACK_CORE);
@@ -370,6 +404,8 @@ void audio_output_stop(void) {
   while (g_playback_task != nullptr && timeout-- > 0) {
     vTaskDelay(pdMS_TO_TICKS(50));
   }
+  g_amp_idle_since_us = 0;
+  g_amp_idle_muted = false;
   amp_set(false);
   if (g_playback_task != nullptr) {
     ESP_LOGW(TAG, "Playback task did not exit within timeout");

@@ -26,10 +26,12 @@ void AirPlayReceiver::setup() {
   oc.amp_enable_gpio = this->amp_enable_pin_;
   oc.sample_rate = this->sample_rate_;
   oc.amp_enable_inverted = this->amp_enable_inverted_;
+  oc.amp_idle_timeout_ms = (this->amp_idle_timeout_s_ > 0) ? (uint32_t) this->amp_idle_timeout_s_ * 1000U : 0;
   audio_output_set_config(oc);
   audio_output_init();
-  ESP_LOGI(TAG, "Audio output init (bclk=%d lrclk=%d dout=%d amp=%d sr=%d)", this->i2s_bclk_pin_,
-           this->i2s_lrclk_pin_, this->i2s_dout_pin_, this->amp_enable_pin_, this->sample_rate_);
+  ESP_LOGI(TAG, "Audio output init (bclk=%d lrclk=%d dout=%d amp=%d sr=%d idle_timeout=%us)", this->i2s_bclk_pin_,
+           this->i2s_lrclk_pin_, this->i2s_dout_pin_, this->amp_enable_pin_, this->sample_rate_,
+           this->amp_idle_timeout_s_);
 
   // Audio receiver + the CryptoModule inject the stream tasks decrypt through.
   audio_receiver_init();

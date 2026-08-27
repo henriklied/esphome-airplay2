@@ -64,6 +64,12 @@ struct AudioOutputConfig {
   int sample_rate = 44100;
   /// True if the amp-enable line is active-LOW (default: active-HIGH).
   bool amp_enable_inverted = false;
+  /// Idle power-down for the amp-enable line. After this many milliseconds
+  /// with no PCM frames produced while the stream is active (pause or
+  /// sustained underflow), the amp-enable GPIO is de-asserted to mute/power
+  /// down the amplifier. It is re-asserted automatically on the next frame.
+  /// 0 disables the watchdog (amp stays on for the whole session).
+  uint32_t amp_idle_timeout_ms = 60000;
 };
 
 /**

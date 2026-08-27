@@ -37,6 +37,9 @@ class AirPlayReceiver : public Component {
   void set_audio_config(int i2s_bclk_pin, int i2s_lrclk_pin, int i2s_dout_pin, int amp_enable_pin,
                         int sample_rate, bool amp_enable_inverted);
 
+  /// Idle power-down for the amp-enable line (seconds, 0 disables). Default 60.
+  void set_amp_idle_timeout(int seconds) { this->amp_idle_timeout_s_ = seconds; }
+
   uint32_t get_buffer_size() const { return this->buffer_size_; }
 
  protected:
@@ -56,6 +59,7 @@ class AirPlayReceiver : public Component {
   int amp_enable_pin_{-1};
   int sample_rate_{44100};
   bool amp_enable_inverted_{false};
+  int amp_idle_timeout_s_{60};  // amp power-down after this many idle seconds (0 = off)
 
   // AirPlay 2 pairing + audio crypto.
   CryptoModule crypto_;

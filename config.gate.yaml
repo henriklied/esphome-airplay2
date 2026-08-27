@@ -45,3 +45,5 @@ airplay_receiver:
   i2s_dout_pin: 16
   amp_enable_pin: 17
   sample_rate: 44100
+  # Amp power-down after this many seconds without audio (pause/idle); 0 disables.
+  amp_idle_timeout: 60

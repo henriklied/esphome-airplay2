@@ -19,6 +19,7 @@ _CONF_I2S_DOUT = "i2s_dout_pin"
 _CONF_AMP_ENABLE = "amp_enable_pin"
 _CONF_SAMPLE_RATE = "sample_rate"
 _CONF_AMP_INVERTED = "amp_enable_inverted"
+_CONF_AMP_IDLE_TIMEOUT = "amp_idle_timeout"
 
 CONFIG_SCHEMA = cv.All(
     cv.Schema(
@@ -34,6 +35,10 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(_CONF_AMP_ENABLE, default=-1): cv.int_,
             cv.Optional(_CONF_SAMPLE_RATE, default=44100): cv.int_,
             cv.Optional(_CONF_AMP_INVERTED, default=False): cv.boolean,
+            # Seconds of no audio (pause/idle) before the amp-enable line is
+            # de-asserted to mute the amplifier. 0 disables the power-down
+            # watchdog (amp stays on for the whole session). Default 60.
+            cv.Optional(_CONF_AMP_IDLE_TIMEOUT, default=60): cv.int_,
         }
     ).extend(cv.COMPONENT_SCHEMA),
     cv.only_with_framework("esp-idf"),
@@ -58,6 +63,7 @@ async def to_code(config):
     cg.add(var.set_audio_config(config[_CONF_I2S_BCLK], config[_CONF_I2S_LRCLK], config[_CONF_I2S_DOUT],
                                 config[_CONF_AMP_ENABLE], config[_CONF_SAMPLE_RATE],
                                 config[_CONF_AMP_INVERTED]))
+    cg.add(var.set_amp_idle_timeout(config[_CONF_AMP_IDLE_TIMEOUT]))
 
 
 def _register_recursive_sources() -> None:
