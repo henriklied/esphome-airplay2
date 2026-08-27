@@ -24,7 +24,7 @@
 // the component's to_code(). Keep the values below in lock-step with the
 // corresponding platform header. When the component is compiled as a native
 // ESP-IDF component (whole tree on the include path) a future task may switch
-// these to #include "platform/<variant>/config.h" instead.
+// these to #include "platform/esp32/config.h" instead.
 #if defined(AIRPLAY_PLATFORM_ESP32S3)
 #ifndef AIRPLAY_ALWAYS_INTERNAL_BYTES
 #define AIRPLAY_ALWAYS_INTERNAL_BYTES 1024

@@ -13,6 +13,12 @@ AirPlayReceiver = airplay_receiver_ns.class_("AirPlayReceiver", cg.Component)
 
 _CONF_NAME = "name"
 _CONF_BUFFER_SIZE = "buffer_size"
+_CONF_I2S_BCLK = "i2s_bclk_pin"
+_CONF_I2S_LRCLK = "i2s_lrclk_pin"
+_CONF_I2S_DOUT = "i2s_dout_pin"
+_CONF_AMP_ENABLE = "amp_enable_pin"
+_CONF_SAMPLE_RATE = "sample_rate"
+_CONF_AMP_INVERTED = "amp_enable_inverted"
 
 CONFIG_SCHEMA = cv.All(
     cv.Schema(
@@ -20,6 +26,14 @@ CONFIG_SCHEMA = cv.All(
             cv.GenerateID(): cv.declare_id(AirPlayReceiver),
             cv.Optional(_CONF_NAME, default="AirPlay2"): cv.string,
             cv.Optional(_CONF_BUFFER_SIZE, default=1000000): cv.int_,
+            # I2S external DAC (PCM5100) + amp-enable wiring. Defaults (-1) leave
+            # the output stage unconfigured until the YAML supplies the pins.
+            cv.Optional(_CONF_I2S_BCLK, default=-1): cv.int_,
+            cv.Optional(_CONF_I2S_LRCLK, default=-1): cv.int_,
+            cv.Optional(_CONF_I2S_DOUT, default=-1): cv.int_,
+            cv.Optional(_CONF_AMP_ENABLE, default=-1): cv.int_,
+            cv.Optional(_CONF_SAMPLE_RATE, default=44100): cv.int_,
+            cv.Optional(_CONF_AMP_INVERTED, default=False): cv.boolean,
         }
     ).extend(cv.COMPONENT_SCHEMA),
     cv.only_with_framework("esp-idf"),
@@ -34,10 +48,16 @@ async def to_code(config):
     # X25519, ChaCha20-Poly1305, SHA-512/HMAC) pulled in as a managed component.
     # mbedtls (SRP bignum + raw-signature AES-CTR) is a built-in IDF component.
     add_idf_component(name="espressif/libsodium", ref="1.0.21")
+    # ALAC/AAC decoding (audio engine) comes from the ESP-ADF codec library.
+    # The decoder slice wraps esp_audio_dec -> decoder/impl/{esp_alac,esp_aac}_dec.h.
+    add_idf_component(name="espressif/esp_audio_codec", ref="^2.5.0")
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     cg.add(var.set_name(config[_CONF_NAME]))
     cg.add(var.set_buffer_size(config[_CONF_BUFFER_SIZE]))
+    cg.add(var.set_audio_config(config[_CONF_I2S_BCLK], config[_CONF_I2S_LRCLK], config[_CONF_I2S_DOUT],
+                                config[_CONF_AMP_ENABLE], config[_CONF_SAMPLE_RATE],
+                                config[_CONF_AMP_INVERTED]))
 
 
 def _register_recursive_sources() -> None:

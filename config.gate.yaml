@@ -39,3 +39,9 @@ airplay_receiver:
   id: airplay_1
   name: "AirPlay2"
   buffer_size: 1000000
+  # Amped-ESP32 (ESP32-S3) I2S PCM5100 + amp-enable wiring.
+  i2s_bclk_pin: 14
+  i2s_lrclk_pin: 15
+  i2s_dout_pin: 16
+  amp_enable_pin: 17
+  sample_rate: 44100

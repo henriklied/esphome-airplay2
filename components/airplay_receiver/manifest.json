@@ -1,27 +1,27 @@
 {
   "name": "airplay_receiver",
-  "version": "0.2.0",
-  "description": "AirPlay 2 receiver for ESP32 / ESP32-S3 with a centralized airplay_* allocator enforcing a PSRAM/internal memory policy. Ported: the AirPlay 2 HomeKit pairing + ChaCha20-Poly1305 crypto slice (SRP-6a 3072-bit / Ed25519 / X25519 / ChaCha20-Poly1305) and the AirPlay 2 transport/control layer (_airplay._tcp mDNS advert + RTSP server on 7000 serving ANNOUNCE/SETUP/RECORD/PAIR-SETUP/PAIR-VERIFY/SET/GET_PARAMETER/TEARDOWN/FLUSH, all heap via airplay_*). The audio decode/output pipeline (decoder/timing/audio) remains a skeleton; the transport exposes an event/callback interface for it.",
+  "version": "0.3.0",
+  "description": "AirPlay 2 receiver for ESP32 / ESP32-S3 with a centralized airplay_* allocator enforcing a PSRAM/internal memory policy. Ported + integrated end-to-end control + audio pipeline: the AirPlay 2 HomeKit pairing + ChaCha20-Poly1305 crypto slice (SRP-6a 3072-bit / Ed25519 / X25519), the transport/control layer (_airplay._tcp mDNS advert + RTSP server on 7000 with ANNOUNCE/SETUP/RECORD/PAIR-SETUP/PAIR-VERIFY/SET/GET_PARAMETER/TEARDOWN/FLUSH), and the audio engine (RTP receive realtime+buffered, CryptoModule decrypt, ALAC/AAC decode via esp_audio_codec, PTP/NTP clock, playout timing, I2S PCM5100 DAC + amp-enable output). AirPlay 1 RSA/FairPlay and AES-CBC are intentionally not ported.",
   "platforms": ["esp32", "esp32s3"],
   "idf": {
     "version": ">=5.5",
-    "targets": ["esp32", "esp32s3"]
-  },
-  "dependencies": {
-    "managed": [
-      "espressif/esp_audio_codec",
-      "espressif/mdns",
-      "espressif/libsodium",
-      "cmake_utilities"
-    ],
-    "notes": [
-      "espressif/libsodium is pulled in from the component's __init__.py via add_idf_component(name=\"espressif/libsodium\", ref=\"1.0.21\") (Ed25519/X25519/ChaCha20-Poly1305/SHA-512+HMA + randombytes). mbedtls is a built-in IDF component (SRP bignum + raw-signature AES-CTR).",
-      "Ported: main/hap/* (HAP pairing: pair-setup SRP-6a 3072-bit, pair-verify Ed25519+X25519+ChaCha20-Poly1305), main/audio/audio_crypto.c ChaCha20-Poly1305 branch. NOT ported: AirPlay 1 RSA auth (main/rtsp/rtsp_rsa.c), AES-CBC audio encryption, FairPlay handshake (main/rtsp/rtsp_fairplay.c)."
-    ],
-    "memory": {
-      "target_part": "ESP32-S3-WROOM-1-N8R8 (8MiB flash, 8MiB octal PSRAM, 512KiB internal SRAM)",
-      "policy": "realtime -> internal DRAM; non-realtime -> PSRAM-first with AIRPLAY_ALWAYS_INTERNAL_BYTES small-allocation threshold",
-      "ring_frames": 1000
+    "targets": ["esp32", "esp32s3"],
+    "dependencies": {
+      "managed": [
+        "espressif/esp_audio_codec",
+        "espressif/mdns",
+        "espressif/libsodium",
+        "cmake_utilities"
+      ],
+      "notes": [
+        "espressif/libsodium and espressif/esp_audio_codec are pulled in from the component's __init__.py via add_idf_component (Ed25519/X25519/ChaCha20-Poly1305/SHA-512 for pairing, ALAC/AAC decode for the audio engine). mbedtls is a built-in IDF component (SRP bignum + raw-signature AES-CTR).",
+        "Ported: main/hap/* (HAP pairing), main/audio/* (receive/decrypt/decode/buffer/timing/output + PTP/NTP clocks), main/rtsp/* control plane, main/network/mdns_airplay.c. NOT ported: AirPlay 1 RSA auth (main/rtsp/rtsp_rsa.c), AES-CBC audio encryption, FairPlay handshake (main/rtsp/rtsp_fairplay.c), BT A2DP, SPDIF/USB outputs."
+      ],
+      "memory": {
+        "target_part": "ESP32-S3-WROOM-1-N8R8 / ESP32-WROVER-N8R8 (8MiB flash, 8MiB PSRAM)",
+        "policy": "realtime -> internal DRAM; non-realtime -> PSRAM-first with AIRPLAY_ALWAYS_INTERNAL_BYTES small-allocation threshold",
+        "ring_frames": 1000
+      }
     }
   }
 }
