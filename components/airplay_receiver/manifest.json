@@ -1,0 +1,27 @@
+{
+  "name": "airplay_receiver",
+  "version": "0.1.0",
+  "description": "AirPlay 2 receiver for ESP32 / ESP32-S3 with a centralized airplay_* allocator enforcing a PSRAM/internal memory policy. Memory-policy foundation + structure slice (allocator, platform profiles, codegen wiring); the protocol/audio logic is ported from rbouteiller/airplay-esp32 in later tasks.",
+  "platforms": ["esp32", "esp32s3"],
+  "idf": {
+    "version": ">=5.5",
+    "targets": ["esp32", "esp32s3"]
+  },
+  "dependencies": {
+    "managed": [
+      "espressif/esp_audio_codec",
+      "espressif/mdns",
+      "espressif/libsodium",
+      "cmake_utilities"
+    ],
+    "notes": [
+      "mbedtls is used by the crypto/HIPairing pipeline; libsodium is used for the Ed25519/SRP pairing exchange (espressif manages both via the component registry).",
+      "The heavy protocol logic (RTSP handlers, HIPairing crypto, audio pipeline) is NOT yet ported — this file is planning metadata only."
+    ],
+    "memory": {
+      "target_part": "ESP32-S3-WROOM-1-N8R8 (8MiB flash, 8MiB octal PSRAM, 512KiB internal SRAM)",
+      "policy": "realtime -> internal DRAM; non-realtime -> PSRAM-first with AIRPLAY_ALWAYS_INTERNAL_BYTES small-allocation threshold",
+      "ring_frames": 1000
+    }
+  }
+}
