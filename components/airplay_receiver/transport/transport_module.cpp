@@ -42,6 +42,9 @@ static const char *const TAG = "airplay_transport";
 #define RTSP_PORT 7000
 #define RTSP_BUFFER_INITIAL 4096
 #define RTSP_BUFFER_LARGE ((size_t)256 * 1024)
+// Idle-header deadline (µs): if a client never delivers a complete
+// \r\n\r\n-terminated RTSP head, close the slot instead of holding it forever.
+#define RTSP_HEADER_IDLE_TIMEOUT_US ((int64_t)10 * 1000 * 1000)
 #define RTSP_CLIENT_STACK_SIZE 8192
 #define RTSP_SERVER_STACK_SIZE 4096
 #define RTSP_EVENT_STACK_SIZE 4096
@@ -359,6 +362,11 @@ static void client_task(void *pv) {
     return;
   }
   size_t buf_len = 0;
+  // A client that connects and sends bytes that never form a complete
+  // \r\n\r\n-terminated RTSP header (e.g. a TLS ClientHello, or raw binary)
+  // would otherwise hold one of the two client slots forever. Force-close the
+  // connection if no complete header has arrived within this window.
+  const int64_t header_deadline_us = esp_timer_get_time() + RTSP_HEADER_IDLE_TIMEOUT_US;
 
   struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
   setsockopt(slot->socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
@@ -412,12 +420,25 @@ static void client_task(void *pv) {
     ssize_t recv_len = recv(slot->socket, buffer + buf_len, buf_capacity - buf_len, 0);
     if (recv_len <= 0) {
       if (recv_len < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+        // No bytes this 1 s window. If we still do not hold a complete RTSP
+        // header and the deadline has passed, close the slot (a silent or
+        // non-RTSP client must not hold it forever).
+        if (buf_len > 0 && esp_timer_get_time() > header_deadline_us) {
+          ESP_LOGW(TAG, "Client slot %d: no complete RTSP header within timeout; closing", slot_idx);
+          break;
+        }
         continue;
       }
       break;
     }
     buf_len += (size_t)recv_len;
     process_rtsp_buffer(slot, buffer, &buf_len);
+    // If the client only ever sends non-RTSP bytes, buf_len grows without a
+    // header appearing; once the deadline passes, stop.
+    if (buf_len > 0 && esp_timer_get_time() > header_deadline_us) {
+      ESP_LOGW(TAG, "Client slot %d: header never completed within timeout; closing", slot_idx);
+      break;
+    }
   }
 
 cleanup:
@@ -470,7 +491,11 @@ static void handle_get(int socket, RtspConn *conn, const RtspRequest *req, const
       pk = zero_pk;
     }
 
-    static uint8_t body[1024];
+    // Per-call (not static): there are two client tasks sharing this handler,
+    // and a shared buffer would let a concurrent GET /info clobber the body
+    // being sent on the other slot. 1024 B on the 8 KiB client-task stack is
+    // fine.
+    uint8_t body[1024];
     size_t body_len = bplist_build_info_response(body, sizeof(body), device_id, s_device_name, pk, 32,
                                                  features, 2);
     if (body_len == 0) {
@@ -1248,6 +1273,9 @@ int rtsp_dispatch(int socket, RtspConn *conn, const uint8_t *raw_request, size_t
   RtspRequest req;
   if (rtsp_request_parse(raw_request, raw_len, &req) < 0) {
     ESP_LOGW(TAG, "Failed to parse RTSP request");
+    // A malformed request would otherwise hang the client waiting for a reply
+    // while holding a speaker/client slot. Reply 400 and let the caller close.
+    rtsp_send_response(socket, conn, 400, "Bad Request", 0, "Content-Type: text/plain\r\n", "Bad Request", 11);
     return -1;
   }
 

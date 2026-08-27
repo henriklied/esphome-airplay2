@@ -531,7 +531,11 @@ static void control_receiver_task(void *pvParameters) {
         packet[1] = 0x56;
         struct sockaddr_in self = {0};
         self.sin_family = AF_INET;
-        self.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        // INADDR_LOOPBACK is already in host byte order; sin_addr.s_addr must
+        // hold it in NETWORK order, so assigning it directly (no htonl) yields
+        // 127.0.0.1. The previous htonl() double-converted it to 1.0.0.127, so
+        // retransmit frames were sent to the wrong address.
+        self.sin_addr.s_addr = INADDR_LOOPBACK;
         self.sin_port = htons(state->data_port);
         sendto(state->data_socket, packet, (size_t) len, 0,
                (struct sockaddr *) &self, sizeof(self));

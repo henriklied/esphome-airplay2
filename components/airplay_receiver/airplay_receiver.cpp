@@ -90,6 +90,12 @@ void AirPlayReceiver::handle_transport_event(TransportEvent event, const Transpo
       strncpy(fmt.codec, codec, sizeof(fmt.codec) - 1);
       fmt.sample_rate = data->audio.sample_rate > 0 ? data->audio.sample_rate : 44100;
       fmt.channels = data->audio.channels > 0 ? data->audio.channels : 2;
+      // DEFENSE: the engine, decoder and resampler are all stereo
+      // (AUDIO_MAX_CHANNELS == 2). Clamp an over-large SDP channel count so a
+      // malformed ANNOUNCE cannot feed a >2ch format downstream.
+      if (fmt.channels > 2) {
+        fmt.channels = 2;
+      }
       fmt.bits_per_sample = data->audio.bits_per_sample > 0 ? data->audio.bits_per_sample : 16;
       // frame_size is samples-per-frame (ALAC 352, AAC 1024), not a byte count.
       fmt.frame_size = data->audio.frame_size > 0 ? data->audio.frame_size : (is_aac ? 1024 : 352);

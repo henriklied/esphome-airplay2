@@ -157,6 +157,15 @@ esp_err_t audio_timeline_init(audio_timeline_t *t, uint16_t capacity,
       (uint16_t)(t->pool_pcm_samples /
                  (AUDIO_TIMELINE_RT_FRAME_SAMPLES * AUDIO_V2_MAX_CHANNELS));
 
+  /* DEFENSE: capacity is the slot count at the CURRENT frame_samples; the
+   * descriptor array above is sized for the SMALLEST frame (352). Guard the
+   * invariant capacity <= max_capacity so slot_index_for_start() can never
+   * index past desc[], even if a caller ever inits with frame_samples < 352.
+   */
+  if (capacity > t->max_capacity) {
+    capacity = t->max_capacity;
+  }
+
   /* Descriptors must stay in internal RAM: they are walked under a spinlock. */
   t->desc =
       (audio_timeline_desc_t *)airplay_calloc(t->max_capacity, sizeof(*t->desc),

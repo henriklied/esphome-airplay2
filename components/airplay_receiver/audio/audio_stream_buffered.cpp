@@ -178,7 +178,10 @@ static void buffered_audio_task(void *pvParameters) {
       }
 
       uint16_t data_len = (uint16_t) ((len_buf[0] << 8) | len_buf[1]);
-      if (data_len < 2 || data_len > BUFFERED_AUDIO_PACKET_SIZE) {
+      // The 2-byte length prefix INCLUDES itself; a real frame has at least a
+      // 12-byte RTP header, so require data_len >= 14 (packet_len >= 12).
+      // Otherwise packet[1..7] would be read from an unread (stale) buffer.
+      if (data_len < 14 || data_len > BUFFERED_AUDIO_PACKET_SIZE) {
         ESP_LOGW(TAG, "Invalid buffered audio packet length: %u", data_len);
         break;
       }

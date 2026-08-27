@@ -220,6 +220,13 @@ int audio_decoder_decode(audio_decoder_t *decoder, const uint8_t *input,
   if (channels <= 0) {
     channels = MAX_FALLBACK_CHANNELS;
   }
+  // DEFENSE: the decode scratch buffer is sized for stereo
+  // (AUDIO_MAX_CHANNELS 2). A malformed SDP can report a larger channel count
+  // that would make frame.len exceed the heap buffer. Clamp here so the ALAC /
+  // AAC output length can never overrun the caller's decode_buffer.
+  if (channels > MAX_FALLBACK_CHANNELS) {
+    channels = MAX_FALLBACK_CHANNELS;
+  }
 
   if (decoder->kind == AUDIO_DECODER_PCM) {
     size_t decoded_samples = input_len / (channels * sizeof(int16_t));

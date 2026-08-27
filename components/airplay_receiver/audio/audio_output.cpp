@@ -101,49 +101,60 @@ static bool g_amp_idle_muted = false;           // amp auto-muted by the watchdo
 // pipeline delay. auto_clear keeps the DMA clocking descriptors during a
 // writer stall, so sent can overtake submitted; the excess (played as silence)
 // is folded into output_lost_frames.
-static uint64_t g_submitted_frames;
-static uint64_t g_sent_frames;
-static uint64_t g_lost_frames;
-static uint32_t g_underruns;
-static int64_t g_sent_us;  // esp_timer time of the last TX DMA completion
+//
+// All counters are 32-bit and monotonic (a task never zeroes the ISR counter).
+// The I2S on_sent ISR is IRAM_ATTR, so it must not call libatomic (64-bit
+// atomics on Xtensa lower to flash-resident library helpers that fetch from
+// flash in an ISR). Everything the ISR touches is a single 32-bit word: on this
+// core an aligned 32-bit load/store is one instruction, so the ISR stays
+// IRAM-safe and lock-free. Session overlap is shifted by a per-start base so
+// the playback task never writes the ISR-owned counter.
+static volatile uint32_t g_submitted_frames;  // playback task (writer)
+static volatile uint32_t g_sent_frames;       // I2S TX DMA ISR (writer), monotonic
+static volatile uint32_t g_lost_frames;       // playback task
+static volatile uint32_t g_underruns;         // playback task
+static volatile uint32_t g_sent_us_lo;        // low 32 bits of esp_timer at last completion (ISR)
+static uint32_t g_sent_base_frames;           // session base (playback task)
 
 static bool IRAM_ATTR on_sent(i2s_chan_handle_t handle, i2s_event_data_t *event, void *user_ctx) {
   (void) handle;
   (void) user_ctx;
   if (event && event->size > 0) {
-    __atomic_add_fetch(&g_sent_frames, (uint64_t) (event->size / (2U * sizeof(int16_t))), __ATOMIC_RELAXED);
-    __atomic_store_n(&g_sent_us, esp_timer_get_time(), __ATOMIC_RELAXED);
+    // 32-bit modulo is exact here: 2^32 frames @44.1 kHz ≈ 27 h and 2^32 µs ≈
+    // 71 min, while the readers consume only differences and outpace the wrap.
+    g_sent_frames += (uint32_t) (event->size / (2U * sizeof(int16_t)));
+    g_sent_us_lo = (uint32_t) esp_timer_get_time();
   }
   return false;
 }
 
 static void cursor_reset() {
-  __atomic_store_n(&g_submitted_frames, 0, __ATOMIC_RELAXED);
-  __atomic_store_n(&g_sent_frames, 0, __ATOMIC_RELAXED);
-  __atomic_store_n(&g_lost_frames, 0, __ATOMIC_RELAXED);
-  __atomic_store_n(&g_sent_us, 0, __ATOMIC_RELAXED);
+  // Zero the task-owned counters and record the ISR monotonic base, so the
+  // playback task never writes the ISR counter (no cross-task read-modify-write).
+  g_submitted_frames = 0;
+  g_lost_frames = 0;
+  g_sent_base_frames = g_sent_frames;
 }
 
-// Frames queued in the DMA ring ahead of the next write. Reads the submitted/
-// lost/sent counters atomically; the rebase below mutates lost + underruns but
-// is only called from the timing engine (audio_output_get_pipeline_us), which
-// is the sole reader of the queue depth.
+// Frames queued in the DMA ring ahead of the next write. Only the playback task
+// runs this (via audio_receiver_read -> get_next_playout_time_ns), so the
+// submitted/lost counters are single-writer and need no atomics.
 static uint32_t queued_frames() {
-  uint64_t submitted = __atomic_load_n(&g_submitted_frames, __ATOMIC_RELAXED);
-  uint64_t lost = __atomic_load_n(&g_lost_frames, __ATOMIC_RELAXED);
-  uint64_t sent = __atomic_load_n(&g_sent_frames, __ATOMIC_RELAXED);
+  const uint32_t submitted = g_submitted_frames;
+  const uint32_t lost = g_lost_frames;
+  const uint32_t sent = g_sent_frames - g_sent_base_frames;  // session-relative
 
-  if (sent > submitted + lost) {
+  if ((int32_t) (sent - (submitted + lost)) > 0) {
     // Ring ran dry: rebase so queued reads 0, remember how much time went out
     // as silence, and count an underrun.
-    __atomic_store_n(&g_lost_frames, sent - submitted, __ATOMIC_RELAXED);
-    g_underruns++;
+    g_lost_frames = sent - submitted;
+    __atomic_add_fetch(&g_underruns, 1, __ATOMIC_RELAXED);
     return 0;
   }
 
-  uint64_t queued = submitted + lost - sent;
-  constexpr uint64_t ring = (uint64_t) I2S_DMA_DESC_NUM * I2S_DMA_FRAME_NUM;
-  return queued > ring ? (uint32_t) ring : (uint32_t) queued;
+  uint32_t queued = submitted + lost - sent;
+  constexpr uint32_t ring = (uint32_t) I2S_DMA_DESC_NUM * I2S_DMA_FRAME_NUM;
+  return queued > ring ? ring : queued;
 }
 
 // ---------------------------------------------------------------------------
@@ -233,10 +244,30 @@ static void playback_task(void *arg) {
   size_t written = 0;
   const size_t stride = 2 * sizeof(int16_t);  // bytes per stereo frame
 
+  // Resample output buffer is sized for the actual up-conversion ratio at
+  // re-init time (see the g_resample_reinit block below), because a fixed cap
+  // silently drops frames when the source is far below the output rate.
+  size_t resample_capacity = MAX_RESAMPLE_FRAMES;
+
   while (g_playback_running) {
     if (g_resample_reinit) {
       g_resample_reinit = false;
       audio_resample_init((uint32_t) g_source_rate, g_output_rate, 2);
+      // Size the output buffer to the worst case for the current ratio so the
+      // resampler never caps mid-stream. audio_resample_max_output() is 0 when
+      // resampling is inactive (rates equal).
+      size_t needed = audio_resample_max_output(FRAME_SAMPLES + 1);
+      if (needed == 0) {
+        needed = MAX_RESAMPLE_FRAMES;
+      }
+      if (needed > resample_capacity) {
+        int16_t *new_buf = static_cast<int16_t *>(airplay_alloc(needed * 2 * sizeof(int16_t), true));
+        if (new_buf != nullptr) {
+          airplay_free(resample_buf);
+          resample_buf = new_buf;
+          resample_capacity = needed;
+        }
+      }
     }
     if (g_flush_requested) {
       g_flush_requested = false;
@@ -258,14 +289,14 @@ static void playback_task(void *arg) {
       int16_t *play_buf = pcm;
       size_t play_frames = frames;
       if (audio_resample_is_active()) {
-        play_frames = audio_resample_process(pcm, frames, resample_buf, MAX_RESAMPLE_FRAMES);
+        play_frames = audio_resample_process(pcm, frames, resample_buf, resample_capacity);
         play_buf = resample_buf;
       }
       apply_volume(play_buf, play_frames * 2);
       apply_channel_mode(play_buf, play_frames);
       if (i2s_channel_write(g_tx_handle, play_buf, play_frames * 2 * sizeof(int16_t), &written,
                             portMAX_DELAY) == ESP_OK) {
-        __atomic_add_fetch(&g_submitted_frames, (uint64_t) (written / stride), __ATOMIC_RELAXED);
+        g_submitted_frames += (uint32_t) (written / stride);
       }
       taskYIELD();
     } else {
@@ -290,7 +321,7 @@ static void playback_task(void *arg) {
       }
       if (i2s_channel_write(g_tx_handle, silence, (size_t) FRAME_SAMPLES * 2 * sizeof(int16_t), &written,
                             portMAX_DELAY) == ESP_OK) {
-        __atomic_add_fetch(&g_submitted_frames, (uint64_t) (written / stride), __ATOMIC_RELAXED);
+        g_submitted_frames += (uint32_t) (written / stride);
       }
     }
   }
@@ -475,13 +506,23 @@ uint32_t audio_output_get_hardware_latency_us(void) {
 }
 
 bool audio_output_get_pipeline_us(int64_t *now_us, uint32_t *pipeline_us) {
+  if (g_output_rate == 0) {
+    // Delay is undefined before the output is configured; treat as empty.
+    if (pipeline_us != nullptr) {
+      *pipeline_us = 0;
+    }
+    if (now_us != nullptr) {
+      *now_us = esp_timer_get_time();
+    }
+    return true;
+  }
   // Sample the queue depth first, then the completion timestamp: any DMA
   // completion that lands between the two pairs a stale (deeper) depth with a
   // fresh timestamp, so the interpolation below subtracts nothing and the
   // result errs in the conservative direction (we believe the pipeline is
   // fuller, i.e. that the next sample plays later, than it really is).
   uint32_t queued = queued_frames();
-  const int64_t sent_us = __atomic_load_n(&g_sent_us, __ATOMIC_RELAXED);
+  const uint32_t sent_us = g_sent_us_lo;
   const int64_t sampled_us = esp_timer_get_time();
 
   // The completion ISR only fires once per descriptor, so a raw depth steps in
@@ -491,8 +532,11 @@ bool audio_output_get_pipeline_us(int64_t *now_us, uint32_t *pipeline_us) {
   // clamp covers a late ISR: past one descriptor the next completion is
   // already due and extrapolating further would invent drain that may not have
   // happened.
-  if (sent_us > 0 && sampled_us > sent_us) {
-    uint64_t drained = ((uint64_t) (sampled_us - sent_us) * g_output_rate) / 1000000ULL;
+  if (sent_us != 0) {
+    // 32-bit wrap arithmetic: the ISR fires far more often than the 71-min
+    // 32-bit microsecond wrap, so the modular difference is exact.
+    const uint32_t elapsed_us = (uint32_t) sampled_us - sent_us;
+    uint64_t drained = ((uint64_t) elapsed_us * g_output_rate) / 1000000ULL;
     if (drained > I2S_DMA_FRAME_NUM) {
       drained = I2S_DMA_FRAME_NUM;
     }

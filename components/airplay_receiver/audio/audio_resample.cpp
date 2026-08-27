@@ -233,6 +233,9 @@ static unsigned long gcd(unsigned long a, unsigned long b);
 Resample *resampleInit(int numChannels, int numTaps, int numFilters,
                        double lowpassRatio, int flags) {
   Resample *cxt = (Resample *) calloc(1, sizeof(Resample));
+  if (cxt == nullptr) {
+    return nullptr;
+  }
   int i;
 
   if (lowpassRatio > 0.0 && lowpassRatio < 1.0) {
@@ -244,12 +247,14 @@ Resample *resampleInit(int numChannels, int numTaps, int numFilters,
 
   if ((numTaps & 3) || numTaps <= 0 || numTaps > 1024) {
     fprintf(stderr, "must 4-1024 filter taps, and a multiple of 4!\n");
-    return NULL;
+    free(cxt);
+    return nullptr;
   }
 
   if (numFilters < 1 || numFilters > 1024) {
     fprintf(stderr, "must be 1-1024 filters!\n");
-    return NULL;
+    free(cxt);
+    return nullptr;
   }
 
   cxt->lowpassRatio = lowpassRatio;
@@ -1552,6 +1557,16 @@ bool audio_resample_init(uint32_t input_rate, uint32_t output_rate, int channels
     active_ = false;
     ESP_LOGI(TAG, "No resampling needed (rate=%lu)", (unsigned long) input_rate);
     return true;
+  }
+
+  // DEFENSE: a zero source rate would make output_rate/input_rate +inf/NaN in
+  // the fixed-ratio math below. Callers normally pass a validated SDP rate, but
+  // guard so a malformed ANNOUNCE can never produce a NaN ratio.
+  if (input_rate == 0 || output_rate == 0) {
+    ESP_LOGW(TAG, "Invalid resample rate in=%lu out=%lu", (unsigned long) input_rate,
+             (unsigned long) output_rate);
+    active_ = false;
+    return false;
   }
 
   current_input_rate_ = input_rate;

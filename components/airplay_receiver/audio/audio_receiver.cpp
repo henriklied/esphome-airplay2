@@ -308,13 +308,17 @@ void audio_receiver_set_format(const audio_format_t *format) {
     return;
   }
 
+  // The decode worker / realtime RX tasks read stream->format and hold
+  // decoder_mutex across the whole decode. Copy the multi-word format struct
+  // INSIDE the same mutex so a concurrent reader never sees a torn
+  // (codec, rate, channels) triple while it is being re-pointed.
+  if (receiver.decoder_mutex) {
+    xSemaphoreTake(receiver.decoder_mutex, portMAX_DELAY);
+  }
   receiver.realtime_stream->format = *format;
   receiver.buffered_stream->format = *format;
 
   // The decode worker task may be inside audio_decoder_decode() right now.
-  if (receiver.decoder_mutex) {
-    xSemaphoreTake(receiver.decoder_mutex, portMAX_DELAY);
-  }
   audio_decoder_destroy(receiver.decoder);
   receiver.decoder = nullptr;
 

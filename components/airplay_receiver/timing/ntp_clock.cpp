@@ -74,6 +74,34 @@ struct NtpState {
 
 NtpState ntp;
 
+// Cross-task publication of the best NTP offset. ntp_task WRITES it; the
+// RTSP task (audio_timing_set_anchor) and playback task read it. int64 is two
+// 32-bit words on Xtensa, so a plain write/read is torn (spurious ±4.29 s step).
+// Publish through a 32-bit seqlock (lock-free, IRAM-safe, no libatomic).
+static volatile uint32_t g_ntp_offset_seq = 0U;
+static volatile uint32_t g_ntp_offset_lo = 0U;
+static volatile uint32_t g_ntp_offset_hi = 0U;
+
+static void ntp_publish_offset(int64_t off) {
+  const uint32_t s = g_ntp_offset_seq;
+  g_ntp_offset_seq = s + 1U;
+  const uint64_t u = (uint64_t) off;
+  g_ntp_offset_lo = (uint32_t) u;
+  g_ntp_offset_hi = (uint32_t) (u >> 32);
+  g_ntp_offset_seq = s + 2U;
+}
+
+static int64_t ntp_read_offset(void) {
+  uint32_t s0, s1, lo, hi;
+  do {
+    s0 = g_ntp_offset_seq;
+    lo = g_ntp_offset_lo;
+    hi = g_ntp_offset_hi;
+    s1 = g_ntp_offset_seq;
+  } while (s0 != s1 || (s0 & 1U) != 0U);
+  return (int64_t) (((uint64_t) hi << 32) | (uint64_t) lo);
+}
+
 // Convert local time (microseconds) to NTP timestamp format (for packet)
 uint64_t local_us_to_ntp(int64_t local_us) {
   // NTP timestamp: upper 32 bits = seconds, lower 32 bits = fraction
@@ -158,6 +186,7 @@ void process_timing_response(const uint8_t *packet, size_t len, int64_t arrival_
   }
 
   ntp.offset_ns = best_offset;
+  ntp_publish_offset(best_offset);
 
   // Consider locked after enough measurements
   if (!ntp.locked && ntp.measurement_count >= kMinMeasurements) {
@@ -292,6 +321,7 @@ esp_err_t ntp_clock_start_client(uint32_t remote_ip, uint16_t remote_port) {
   // Reset state
   ntp.locked = false;
   ntp.offset_ns = 0;
+  ntp_publish_offset(0);
   ntp.measurement_count = 0;
   ntp.measurement_index = 0;
   memset(ntp.measurements, 0, sizeof(ntp.measurements));
@@ -341,7 +371,7 @@ bool ntp_clock_is_locked(void) {
 }
 
 int64_t ntp_clock_get_offset_ns(void) {
-  return ntp.offset_ns;
+  return ntp_read_offset();
 }
 
 }  // namespace airplay_receiver

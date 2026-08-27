@@ -146,6 +146,36 @@ struct PtpState {
 PtpState ptp{};
 }  // namespace
 
+// Cross-task publication of the filtered clock offset. ptp_task WRITES it;
+// the playback task (audio_receiver_read -> audio_receiver_network_offset_ns)
+// and the RTSP task (audio_timing_set_anchor) READ it. On Xtensa an int64 is
+// two 32-bit words, so a plain write/read is a torn read (spurious ±4.29 s
+// clock step). Publish through a 32-bit seqlock so every load/store is a
+// single instruction (lock-free, IRAM-safe, no libatomic).
+static volatile uint32_t g_ptp_offset_seq = 0U;  // even == stable, odd == writing
+static volatile uint32_t g_ptp_offset_lo = 0U;
+static volatile uint32_t g_ptp_offset_hi = 0U;
+
+static void ptp_publish_offset(int64_t off) {
+  const uint32_t s = g_ptp_offset_seq;
+  g_ptp_offset_seq = s + 1U;  // odd: a reader knows a write is in progress
+  const uint64_t u = (uint64_t) off;
+  g_ptp_offset_lo = (uint32_t) u;
+  g_ptp_offset_hi = (uint32_t) (u >> 32);
+  g_ptp_offset_seq = s + 2U;  // even: stable again
+}
+
+static int64_t ptp_read_offset(void) {
+  uint32_t s0, s1, lo, hi;
+  do {
+    s0 = g_ptp_offset_seq;
+    lo = g_ptp_offset_lo;
+    hi = g_ptp_offset_hi;
+    s1 = g_ptp_offset_seq;
+  } while (s0 != s1 || (s0 & 1U) != 0U);
+  return (int64_t) (((uint64_t) hi << 32) | (uint64_t) lo);
+}
+
 // Parse 8-byte clockIdentity (big-endian) from PTP sourcePortIdentity
 // (header bytes 20-27).
 static uint64_t parse_ptp_clock_id(const uint8_t *data) {
@@ -237,6 +267,7 @@ static void update_offset(int64_t new_offset_ns) {
   ptp.previous_offset = smoothed_offset;
   ptp.previous_offset_time_ms = now_ms;
   ptp.filtered_offset_ns = smoothed_offset;
+  ptp_publish_offset(smoothed_offset);  // publish for cross-task (playback/RTSP) readers
 
   // Check lock status: once we have enough samples and the offset is stable,
   // declare lock.  Use the deviation between the raw sample and the smoothed
@@ -579,6 +610,7 @@ void ptp_clock_clear(void) {
   ptp.lock_candidate_start_ms = 0;
   ptp.last_sync_ms = 0;
   ptp.filtered_offset_ns = 0;
+  ptp_publish_offset(0);
   ptp.sample_count = 0;
   ptp.previous_offset = 0;
   ptp.previous_offset_time_ms = 0;
@@ -634,10 +666,10 @@ bool ptp_clock_is_locked(void) {
 
 uint64_t ptp_clock_get_time_ns(void) {
   int64_t local_ns = get_local_time_ns();
-  return (uint64_t)(local_ns + ptp.filtered_offset_ns);
+  return (uint64_t)(local_ns + ptp_read_offset());
 }
 
-int64_t ptp_clock_get_offset_ns(void) { return ptp.filtered_offset_ns; }
+int64_t ptp_clock_get_offset_ns(void) { return ptp_read_offset(); }
 
 void ptp_clock_set_master_clock_id(uint64_t clock_id) {
   if (clock_id == ptp.expected_clock_id) {
@@ -654,6 +686,7 @@ void ptp_clock_set_master_clock_id(uint64_t clock_id) {
   ptp.lock_start_ms = 0;
   ptp.lock_candidate_start_ms = 0;
   ptp.filtered_offset_ns = 0;
+  ptp_publish_offset(0);
   ptp.sample_count = 0;
   ptp.previous_offset = 0;
   ptp.previous_offset_time_ms = 0;
@@ -669,7 +702,7 @@ void ptp_clock_get_stats(ptp_stats_t *stats) {
   // smoothed value — so it could never reveal filter divergence.  Report the
   // genuinely raw sample instead.
   stats->last_offset_ns = ptp.raw_offset_ns;
-  stats->filtered_offset_ns = ptp.filtered_offset_ns;
+  stats->filtered_offset_ns = ptp_read_offset();
   stats->outlier_count = ptp.outlier_count;
 
   if (ptp.locked && ptp.lock_start_ms > 0) {
