@@ -40,6 +40,9 @@ class AirPlayReceiver : public Component {
   /// Idle power-down for the amp-enable line (seconds, 0 disables). Default 60.
   void set_amp_idle_timeout(int seconds) { this->amp_idle_timeout_s_ = seconds; }
 
+  /// Optional I2S MCLK/SCK pin (PCM5100 boards that don't self-strap). -1 = unused.
+  void set_i2s_mclk(int pin) { this->i2s_mclk_pin_ = pin; }
+
   uint32_t get_buffer_size() const { return this->buffer_size_; }
 
  protected:
@@ -56,6 +59,7 @@ class AirPlayReceiver : public Component {
   int i2s_bclk_pin_{-1};
   int i2s_lrclk_pin_{-1};
   int i2s_dout_pin_{-1};
+  int i2s_mclk_pin_{-1};  // optional MCLK/SCK (-1 = unused)
   int amp_enable_pin_{-1};
   int sample_rate_{44100};
   bool amp_enable_inverted_{false};

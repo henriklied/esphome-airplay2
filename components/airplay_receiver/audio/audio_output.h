@@ -54,6 +54,9 @@ typedef enum {
 struct AudioOutputConfig {
   /// BCLK (bit clock) GPIO for the I2S bus.
   int i2s_bclk_gpio = -1;
+  /// MCLK/SCK (system clock) GPIO, -1 to leave unused (DAC derives its clock
+  /// via SCK_CFG strapping). Set it when the PCM5100 requires a master clock.
+  int i2s_mclk_gpio = -1;
   /// LRCK (word/frame clock, "WS") GPIO.
   int i2s_lrclk_gpio = -1;
   /// DOUT (serial data out to the DAC) GPIO.

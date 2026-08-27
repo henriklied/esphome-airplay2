@@ -16,6 +16,7 @@ _CONF_BUFFER_SIZE = "buffer_size"
 _CONF_I2S_BCLK = "i2s_bclk_pin"
 _CONF_I2S_LRCLK = "i2s_lrclk_pin"
 _CONF_I2S_DOUT = "i2s_dout_pin"
+_CONF_I2S_MCLK = "i2s_mclk_pin"
 _CONF_AMP_ENABLE = "amp_enable_pin"
 _CONF_SAMPLE_RATE = "sample_rate"
 _CONF_AMP_INVERTED = "amp_enable_inverted"
@@ -32,6 +33,8 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(_CONF_I2S_BCLK, default=-1): cv.int_,
             cv.Optional(_CONF_I2S_LRCLK, default=-1): cv.int_,
             cv.Optional(_CONF_I2S_DOUT, default=-1): cv.int_,
+            # Optional MCLK/SCK for PCM5100 boards that don't self-strap (-1 = unused).
+            cv.Optional(_CONF_I2S_MCLK, default=-1): cv.int_,
             cv.Optional(_CONF_AMP_ENABLE, default=-1): cv.int_,
             cv.Optional(_CONF_SAMPLE_RATE, default=44100): cv.int_,
             cv.Optional(_CONF_AMP_INVERTED, default=False): cv.boolean,
@@ -64,6 +67,7 @@ async def to_code(config):
                                 config[_CONF_AMP_ENABLE], config[_CONF_SAMPLE_RATE],
                                 config[_CONF_AMP_INVERTED]))
     cg.add(var.set_amp_idle_timeout(config[_CONF_AMP_IDLE_TIMEOUT]))
+    cg.add(var.set_i2s_mclk(config[_CONF_I2S_MCLK]))
 
 
 def _register_recursive_sources() -> None:

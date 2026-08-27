@@ -28,6 +28,8 @@ enum TransportEvent : uint8_t {
   TRANSPORT_EVENT_VOLUME = 6,
   // Playout anchor (SETRATEANCHORTIME) — real-time stream alignment.
   TRANSPORT_EVENT_ANCHOR = 7,
+  // Stream flush (FLUSH / FLUSHBUFFERED). Payload = TransportFlush.
+  TRANSPORT_EVENT_FLUSH = 8,
 };
 
 #define TRANSPORT_METADATA_STRING_MAX 64
@@ -56,6 +58,8 @@ struct TransportAudioConfig {
   int channels = 0;
   int bits_per_sample = 0;
   int64_t codec_type = 0;         // bplist "ct": 2=ALAC, 4=AAC, 8=AAC-ELD
+  int frame_size = 0;             // bplist "spf": samples per frame (ALAC 352, AAC 1024)
+  uint32_t playout_latency_samples = 0;  // bplist "latencyMin" (11025 = 250ms realtime; 0 buffered)
   // ChaCha20-Poly1305 audio key material (AirPlay 2 only). `shk` (per-stream
   // shared secret) is preferred; the engine falls back to ekey/session after.
   bool has_shk = false;
@@ -67,6 +71,11 @@ struct TransportAudioConfig {
   bool has_eiv = false;
   uint8_t eiv[16] = {};
   size_t eiv_len = 0;
+  // Fully-resolved stream encryption key (transport runs the shk/ekey/derive
+  // chain through CryptoModule::configure_audio_encryption before emitting).
+  bool has_encrypt = false;
+  uint8_t encrypt_key[32] = {};
+  size_t encrypt_key_len = 0;
 };
 
 /// Playout anchor carried by TRANSPORT_EVENT_ANCHOR (SETRATEANCHORTIME).
@@ -77,10 +86,18 @@ struct TransportAnchor {
   double rate = 0.0;            // 1.0 = play, 0.0 = paused
 };
 
+/// Stream flush carried by TRANSPORT_EVENT_FLUSH (FLUSH / FLUSHBUFFERED).
+struct TransportFlush {
+  // RTP timestamp to flush up to (deferred flush, FLUSHBUFFERED with
+  // flushUntilTS); 0 = immediate seek-flush (FLUSH).
+  uint32_t flush_until_ts = 0;
+};
+
 union TransportEventData {
   TransportMetadata metadata;     // TRANSPORT_EVENT_METADATA
   TransportAudioConfig audio;     // TRANSPORT_EVENT_AUDIO_CONFIGURED
   TransportAnchor anchor;         // TRANSPORT_EVENT_ANCHOR
+  TransportFlush flush;           // TRANSPORT_EVENT_FLUSH
 };
 
 /// Event callback invoked from RTSP tasks. `data` is valid for the duration of

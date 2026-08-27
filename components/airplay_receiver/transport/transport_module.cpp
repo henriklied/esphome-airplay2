@@ -45,7 +45,8 @@ static const char *const TAG = "airplay_transport";
 #define RTSP_CLIENT_STACK_SIZE 8192
 #define RTSP_SERVER_STACK_SIZE 4096
 #define RTSP_EVENT_STACK_SIZE 4096
-#define RTSP_AP2_AUDIO_BUFFER_SIZE (1 * 1024 * 1024)
+#define RTSP_AP2_AUDIO_BUFFER_SIZE (512 * 1024)        // buffered (type 103) TCP pre-fill
+#define RTSP_AP2_REALTIME_AUDIO_BUFFER_SIZE (1 * 1024 * 1024)  // realtime (type 96) UDP
 
 // ---------------------------------------------------------------------------
 // Static transport state (one AirPlay2Transport instance per device; matches
@@ -710,6 +711,13 @@ static void handle_setup(int socket, RtspConn *conn, const RtspRequest *req, con
   bool is_v1_transport_setup =
       !request_has_streams && (ci_substr((const char *)raw, raw_len, "Transport:") != nullptr);
 
+  // Per-stream dict fields carried into TransportAudioConfig for the audio
+  // engine (codec, samples-per-frame, realtime playout latency). Function
+  // scope so they survive into the stream SETUP block below.
+  int64_t codec_type = 0;  // bplist "ct": 2=ALAC, 4=AAC, 8=AAC-ELD
+  int spf = 0;             // bplist "spf": samples per frame
+  int latency_min = 0;     // bplist "latencyMin": realtime playout latency samples
+
   // AirPlay 2 stream path.
   if (body != nullptr && body_len > 0 && is_bplist && request_has_streams) {
     conn->protocol_version = 2;
@@ -721,20 +729,22 @@ static void handle_setup(int socket, RtspConn *conn, const RtspRequest *req, con
         transport_set_stream_type(stream_type);
       }
 
-      // Stream dict keys: ct (codec type), sr (sample rate), spf, controlPort.
+      // Stream dict keys: ct (codec type), sr (sample rate), spf, latencyMin,
+      // controlPort. Carry the codec/framing/latency into TransportAudioConfig
+      // so the audio engine decodes the right codec and gates/syncs correctly.
       bplist_kv_info_t kv[16];
       size_t kv_count = 0;
       if (bplist_get_stream_kv_info(body, body_len, i, kv, 16, &kv_count)) {
         for (size_t k = 0; k < kv_count; k++) {
           if (kv[k].value_type == BPLIST_VALUE_INT) {
             if (strcmp(kv[k].key, "ct") == 0) {
-              // ct = codec type id (2=ALAC, 4=AAC); handed to the audio engine
-              // through TransportAudioConfig.codec_type in a later refinement.
-              continue;
+              codec_type = (int64_t)kv[k].int_value;
             } else if (strcmp(kv[k].key, "sr") == 0) {
               conn->sample_rate = (int)kv[k].int_value;
             } else if (strcmp(kv[k].key, "spf") == 0) {
-              continue;  // spf carries samples-per-frame, not channels
+              spf = (int)kv[k].int_value;
+            } else if (strcmp(kv[k].key, "latencyMin") == 0) {
+              latency_min = (int)kv[k].int_value;
             } else if (strcmp(kv[k].key, "controlPort") == 0) {
               conn->client_control_port = (uint16_t)kv[k].int_value;
             }
@@ -784,6 +794,22 @@ static void handle_setup(int socket, RtspConn *conn, const RtspRequest *req, con
       audio.has_eiv = true;
       memcpy(audio.eiv, eiv, eiv_len);
       audio.eiv_len = eiv_len;
+    }
+
+    // Resolve the stream key exactly as upstream rtsp_handlers.c does: prefer
+    // shk, else ChaCha20-Poly1305-decrypt ekey with the pair-verify shared
+    // secret, else HKDF-derive the audio key. `conn->hap_session` supplies the
+    // shared secret; configure_audio_encryption handles the shk path even when
+    // the session is not yet established.
+    if (s_crypto != nullptr) {
+      AudioEncrypt enc{};
+      if (s_crypto->configure_audio_encryption(conn->hap_session, ekey_encrypted, ekey_len, eiv, eiv_len,
+                                               shk, shk_len, &enc) == 0 &&
+          enc.type == AudioEncryptType::CHACHA20_POLY1305 && enc.key_len > 0) {
+        audio.has_encrypt = true;
+        audio.encrypt_key_len = std::min<size_t>(enc.key_len, sizeof(audio.encrypt_key));
+        memcpy(audio.encrypt_key, enc.key, audio.encrypt_key_len);
+      }
     }
   }
 
@@ -848,7 +874,12 @@ static void handle_setup(int socket, RtspConn *conn, const RtspRequest *req, con
   audio.control_port = conn->control_port;
   audio.timing_port = conn->timing_port;
   audio.buffered_port = conn->buffered_port;
-  audio.audio_buffer_size = RTSP_AP2_AUDIO_BUFFER_SIZE;
+  audio.codec_type = codec_type;
+  audio.frame_size = spf;
+  // Realtime (type 96) plays out latencyMin samples after the anchor; buffered
+  // (type 103) plays at the anchor (0). 11025 = 250 ms default (upstream).
+  audio.playout_latency_samples = buffered ? 0 : (latency_min > 0 ? latency_min : 11025);
+  audio.audio_buffer_size = buffered ? RTSP_AP2_AUDIO_BUFFER_SIZE : RTSP_AP2_REALTIME_AUDIO_BUFFER_SIZE;
 
   // Hand the fully-configured stream to the audio engine.
   TransportEventData data{};
@@ -857,8 +888,13 @@ static void handle_setup(int socket, RtspConn *conn, const RtspRequest *req, con
 
   if (is_bplist) {
     uint8_t plist_body[256];
-    size_t plist_len = bplist_build_stream_setup(plist_body, sizeof(plist_body), stream_type, conn->data_port,
-                                                 conn->control_port, RTSP_AP2_AUDIO_BUFFER_SIZE);
+    // Advertise the TCP port the sender must connect to: buffered streams use
+    // buffered_port, realtime uses the UDP data_port.
+    uint16_t ad_port = buffered ? conn->buffered_port : conn->data_port;
+    size_t plist_len = bplist_build_stream_setup(plist_body, sizeof(plist_body), stream_type, ad_port,
+                                                 conn->control_port,
+                                                 buffered ? RTSP_AP2_AUDIO_BUFFER_SIZE
+                                                          : RTSP_AP2_REALTIME_AUDIO_BUFFER_SIZE);
     if (plist_len == 0) {
       rtsp_send_response(socket, conn, 500, "Internal Error", req->cseq, nullptr, nullptr, 0);
       return;
@@ -1048,9 +1084,11 @@ static void handle_pause(int socket, RtspConn *conn, const RtspRequest *req, con
 static void handle_flush(int socket, RtspConn *conn, const RtspRequest *req, const uint8_t *raw, size_t raw_len) {
   (void)raw;
   (void)raw_len;
-  // Plain AirPlay 1 FLUSH. The audio engine performs the buffer seek+flush on
-  // the stream it was handed at SETUP; nothing to configure here.
+  // FLUSH — seek + re-preroll the engine. Emit 0 (immediate seek-flush).
   ESP_LOGI(TAG, "FLUSH received");
+  TransportEventData data{};
+  data.flush.flush_until_ts = 0;
+  transport_events_emit(TRANSPORT_EVENT_FLUSH, &data);
   rtsp_send_ok(socket, conn, req->cseq);
 }
 
@@ -1060,22 +1098,26 @@ static void handle_flushbuffered(int socket, RtspConn *conn, const RtspRequest *
   (void)raw_len;
   const uint8_t *body = req->body;
   size_t body_len = req->body_len;
-  bool has_deferred = false;
+  uint32_t flush_until_ts = 0;
   if (body != nullptr && body_len >= 8 && memcmp(body, "bplist00", 8) == 0) {
-    int64_t flush_from_seq = 0, flush_until_ts = 0;
+    int64_t flush_from_seq = 0, until_ts = 0;
     bool got_from = bplist_find_int(body, body_len, "flushFromSeq", &flush_from_seq);
-    bool got_until = bplist_find_int(body, body_len, "flushUntilTS", &flush_until_ts);
-    has_deferred = got_from && got_until;
-    if (has_deferred) {
-      ESP_LOGI(TAG, "FLUSHBUFFERED deferred: fromSeq=%lld untilTS=%lld", (long long)flush_from_seq,
-               (long long)flush_until_ts);
+    bool got_until = bplist_find_int(body, body_len, "flushUntilTS", &until_ts);
+    // A deferred flush (flushFromSeq + flushUntilTS) keeps playing until the
+    // frame at flushUntilTS arrives, then bulk-flushes. Otherwise immediate.
+    if (got_from && got_until) {
+      flush_until_ts = (uint32_t) until_ts;
+      ESP_LOGI(TAG, "FLUSHBUFFERED deferred: fromSeq=%lld untilTS=%llu", (long long) flush_from_seq,
+               (unsigned long long) flush_until_ts);
     } else {
       ESP_LOGI(TAG, "FLUSHBUFFERED immediate");
     }
-  }
-  if (!has_deferred) {
+  } else {
     ESP_LOGI(TAG, "FLUSHBUFFERED immediate/flush");
   }
+  TransportEventData data{};
+  data.flush.flush_until_ts = flush_until_ts;
+  transport_events_emit(TRANSPORT_EVENT_FLUSH, &data);
   rtsp_send_ok(socket, conn, req->cseq);
 }
 

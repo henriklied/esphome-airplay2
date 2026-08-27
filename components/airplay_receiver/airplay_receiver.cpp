@@ -21,6 +21,7 @@ void AirPlayReceiver::setup() {
   // Audio output backend (I2S PCM5100 + amp enable) from YAML wiring.
   AudioOutputConfig oc{};
   oc.i2s_bclk_gpio = this->i2s_bclk_pin_;
+  oc.i2s_mclk_gpio = this->i2s_mclk_pin_;
   oc.i2s_lrclk_gpio = this->i2s_lrclk_pin_;
   oc.i2s_dout_gpio = this->i2s_dout_pin_;
   oc.amp_enable_gpio = this->amp_enable_pin_;
@@ -84,23 +85,28 @@ void AirPlayReceiver::handle_transport_event(TransportEvent event, const Transpo
       }
       // Configure the decoder format from the stream description.
       audio_format_t fmt = {};
-      const char *codec = (data->audio.codec_type == 4 || data->audio.codec_type == 8) ? "AAC" : "AppleLossless";
+      bool is_aac = (data->audio.codec_type == 4 || data->audio.codec_type == 8);
+      const char *codec = is_aac ? "AAC" : "AppleLossless";
       strncpy(fmt.codec, codec, sizeof(fmt.codec) - 1);
       fmt.sample_rate = data->audio.sample_rate > 0 ? data->audio.sample_rate : 44100;
       fmt.channels = data->audio.channels > 0 ? data->audio.channels : 2;
       fmt.bits_per_sample = data->audio.bits_per_sample > 0 ? data->audio.bits_per_sample : 16;
-      fmt.frame_size = (data->audio.sample_rate > 0) ? fmt.channels * 2 : 352;
+      // frame_size is samples-per-frame (ALAC 352, AAC 1024), not a byte count.
+      fmt.frame_size = data->audio.frame_size > 0 ? data->audio.frame_size : (is_aac ? 1024 : 352);
       audio_receiver_set_format(&fmt);
-      ESP_LOGI(TAG, "audio: format codec=%s sr=%d ch=%d bps=%d", fmt.codec, fmt.sample_rate, fmt.channels,
-               fmt.bits_per_sample);
+      // Realtime streams play out latencyMin after the anchor (11025 = 250 ms);
+      // buffered streams play at the anchor (0). Mirrors upstream SETUP.
+      audio_receiver_set_playout_latency_samples(data->audio.playout_latency_samples);
+      ESP_LOGI(TAG, "audio: format codec=%s sr=%d ch=%d bps=%d frame_size=%d latency=%u", fmt.codec, fmt.sample_rate,
+               fmt.channels, fmt.bits_per_sample, fmt.frame_size, data->audio.playout_latency_samples);
 
-      // ChaCha20-Poly1305 key material (shk preferred; ekey/session is derived
-      // inside the receiver from the shared secret when shk is absent).
-      if (data->audio.has_shk && data->audio.shk_len >= 16) {
+      // ChaCha20-Poly1305 stream key, resolved by the transport via the
+      // shk/ekey/derive chain (CryptoModule::configure_audio_encryption).
+      if (data->audio.has_encrypt) {
         AudioEncrypt enc = {};
         enc.type = AudioEncryptType::CHACHA20_POLY1305;
-        size_t n = std::min<size_t>(data->audio.shk_len, sizeof(enc.key));
-        memcpy(enc.key, data->audio.shk, n);
+        size_t n = std::min<size_t>(data->audio.encrypt_key_len, sizeof(enc.key));
+        memcpy(enc.key, data->audio.encrypt_key, n);
         enc.key_len = n;
         audio_receiver_set_encryption(&enc);
       }
@@ -136,6 +142,15 @@ void AirPlayReceiver::handle_transport_event(TransportEvent event, const Transpo
       ESP_LOGI(TAG, "audio: DISCONNECTED");
       audio_receiver_stop();
       audio_output_stop();
+      break;
+    case TRANSPORT_EVENT_FLUSH:
+      if (data != nullptr && data->flush.flush_until_ts > 0) {
+        ESP_LOGI(TAG, "audio: deferred flush until ts=%u", data->flush.flush_until_ts);
+        audio_receiver_set_deferred_flush(data->flush.flush_until_ts);
+      } else {
+        ESP_LOGI(TAG, "audio: seek flush");
+        audio_receiver_seek_flush();
+      }
       break;
     case TRANSPORT_EVENT_METADATA:
     case TRANSPORT_EVENT_CLIENT_CONNECTED:

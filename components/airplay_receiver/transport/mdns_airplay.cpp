@@ -54,9 +54,28 @@ void mdns_airplay_init(const char *device_name, const uint8_t *public_key, size_
     }
   }
 
-  // A bad/missing hostname must not crash the device, so it is logged rather
-  // than ESP_ERROR_CHECK'd.
-  esp_err_t err_host = mdns_hostname_set("airplay2");
+  // Hostname: derive from the device name (upstream settings_device_name_to_hostname);
+  // fall back to "airplay2". A bad/missing hostname must not crash the device,
+  // so it is logged rather than ESP_ERROR_CHECK'd.
+  char hostname[64] = "airplay2";
+  if (device_name != nullptr && device_name[0] != '\0') {
+    size_t o = 0;
+    for (size_t i = 0; device_name[i] != '\0' && o < sizeof(hostname) - 1; i++) {
+      char c = device_name[i];
+      if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') {
+        hostname[o++] = c;
+      } else if (c >= 'A' && c <= 'Z') {
+        hostname[o++] = (char) (c - 'A' + 'a');  // lowercase
+      } else if (c == ' ' || c == '_') {
+        hostname[o++] = '-';
+      }
+    }
+    hostname[o] = '\0';
+    if (o == 0) {
+      strncpy(hostname, "airplay2", sizeof(hostname) - 1);
+    }
+  }
+  esp_err_t err_host = mdns_hostname_set(hostname);
   if (err_host != ESP_OK) {
     ESP_LOGW(TAG, "Failed to set mDNS hostname: %s", esp_err_to_name(err_host));
   }

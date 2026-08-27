@@ -105,12 +105,14 @@ static uint64_t g_submitted_frames;
 static uint64_t g_sent_frames;
 static uint64_t g_lost_frames;
 static uint32_t g_underruns;
+static int64_t g_sent_us;  // esp_timer time of the last TX DMA completion
 
 static bool IRAM_ATTR on_sent(i2s_chan_handle_t handle, i2s_event_data_t *event, void *user_ctx) {
   (void) handle;
   (void) user_ctx;
   if (event && event->size > 0) {
     __atomic_add_fetch(&g_sent_frames, (uint64_t) (event->size / (2U * sizeof(int16_t))), __ATOMIC_RELAXED);
+    __atomic_store_n(&g_sent_us, esp_timer_get_time(), __ATOMIC_RELAXED);
   }
   return false;
 }
@@ -119,6 +121,7 @@ static void cursor_reset() {
   __atomic_store_n(&g_submitted_frames, 0, __ATOMIC_RELAXED);
   __atomic_store_n(&g_sent_frames, 0, __ATOMIC_RELAXED);
   __atomic_store_n(&g_lost_frames, 0, __ATOMIC_RELAXED);
+  __atomic_store_n(&g_sent_us, 0, __ATOMIC_RELAXED);
 }
 
 // Frames queued in the DMA ring ahead of the next write. Reads the submitted/
@@ -348,7 +351,11 @@ esp_err_t audio_output_init(void) {
       .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
       .gpio_cfg =
           {
-              .mclk = I2S_GPIO_UNUSED,
+              // MCLK/SCK: only wired if the user supplies i2s_mclk_pin. Many
+              // PCM5100 breakouts derive the system clock via SCK_CFG strapping
+              // and need no MCLK; those that do (no SCK_CFG) would not lock the
+              // DAC PLL without it. Upstream always drives MCLK.
+              .mclk = (g_config.i2s_mclk_gpio >= 0) ? (gpio_num_t) g_config.i2s_mclk_gpio : I2S_GPIO_UNUSED,
               .bclk = (gpio_num_t) g_config.i2s_bclk_gpio,
               .ws = (gpio_num_t) g_config.i2s_lrclk_gpio,
               .dout = (gpio_num_t) g_config.i2s_dout_gpio,
@@ -468,9 +475,32 @@ uint32_t audio_output_get_hardware_latency_us(void) {
 }
 
 bool audio_output_get_pipeline_us(int64_t *now_us, uint32_t *pipeline_us) {
+  // Sample the queue depth first, then the completion timestamp: any DMA
+  // completion that lands between the two pairs a stale (deeper) depth with a
+  // fresh timestamp, so the interpolation below subtracts nothing and the
+  // result errs in the conservative direction (we believe the pipeline is
+  // fuller, i.e. that the next sample plays later, than it really is).
   uint32_t queued = queued_frames();
+  const int64_t sent_us = __atomic_load_n(&g_sent_us, __ATOMIC_RELAXED);
+  const int64_t sampled_us = esp_timer_get_time();
+
+  // The completion ISR only fires once per descriptor, so a raw depth steps in
+  // I2S_DMA_FRAME_NUM jumps -- 5.8 ms at 44.1 kHz, which swamps a servo trying
+  // to hold sub-millisecond alignment.  The DAC drains at a fixed rate between
+  // interrupts, so charge off the elapsed time since the last completion.  The
+  // clamp covers a late ISR: past one descriptor the next completion is
+  // already due and extrapolating further would invent drain that may not have
+  // happened.
+  if (sent_us > 0 && sampled_us > sent_us) {
+    uint64_t drained = ((uint64_t) (sampled_us - sent_us) * g_output_rate) / 1000000ULL;
+    if (drained > I2S_DMA_FRAME_NUM) {
+      drained = I2S_DMA_FRAME_NUM;
+    }
+    queued = drained < queued ? queued - (uint32_t) drained : 0U;
+  }
+
   if (now_us != nullptr) {
-    *now_us = esp_timer_get_time();
+    *now_us = sampled_us;
   }
   if (pipeline_us != nullptr) {
     *pipeline_us = (uint32_t) (((uint64_t) queued * 1000000ULL) / g_output_rate);
