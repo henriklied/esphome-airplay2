@@ -76,8 +76,10 @@ static int event_listen_socket = -1;
 static TaskHandle_t event_task_handle = nullptr;
 static volatile bool event_task_should_stop = false;
 
-// Device info for /info + pairing.
-static std::string s_device_name{"AirPlay2"};
+// Device info for /info + pairing (fixed buffer — keeps ALL transport heap on
+// the airplay_* path; never a std::string).
+#define AIRPLAY_DEVICE_NAME_MAX 80
+static char s_device_name[AIRPLAY_DEVICE_NAME_MAX] = "AirPlay2";
 
 // ===========================================================================
 // TLV8 + small helpers
@@ -466,7 +468,7 @@ static void handle_get(int socket, RtspConn *conn, const RtspRequest *req, const
     }
 
     static uint8_t body[1024];
-    size_t body_len = bplist_build_info_response(body, sizeof(body), device_id, s_device_name.c_str(), pk, 32,
+    size_t body_len = bplist_build_info_response(body, sizeof(body), device_id, s_device_name, pk, 32,
                                                  features, 2);
     if (body_len == 0) {
       ESP_LOGE(TAG, "Failed to build binary /info response");
@@ -581,14 +583,10 @@ static void handle_post(int socket, RtspConn *conn, const RtspRequest *req, cons
           }
         }
       } else {
-        // Raw (non-TLV8) pair-verify used for audio-key exchange, not RTSP
-        // channel encryption.
-        uint8_t pvs = 0;
-        (void)pvs;
-        // Dispatch by the caller's expected state: M1 when no session state,
-        // M3 otherwise. The CryptoModule tracks the state internally.
+        // Raw (non-TLV8) pair-verify: used for audio-key exchange, not the RTSP
+        // channel. The CryptoModule tracks its internal state; we try M1 first,
+        // then M3 as a fallback for the case where M1 was already consumed.
         err = s_crypto->pair_verify_m1_raw(conn->hap_session, body, body_len, response, response_cap, &response_len);
-        // Try M3 as a fallback if M1 did not fill a response.
         if (err != 0 || response_len == 0) {
           err = s_crypto->pair_verify_m3_raw(conn->hap_session, body, body_len, response, response_cap, &response_len);
         }
@@ -1363,8 +1361,7 @@ void AirPlay2Transport::setup(CryptoModule *crypto, const std::string &device_na
     return;
   }
   s_crypto = crypto;
-  s_device_name = device_name;
-  this->device_name_ = device_name;
+  snprintf(s_device_name, sizeof(s_device_name), "%s", device_name.c_str());
 
   if (crypto != nullptr) {
     // Ensure the device identity is loaded/generated before advertising pk.

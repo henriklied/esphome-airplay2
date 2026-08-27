@@ -63,7 +63,6 @@ class AirPlay2Transport {
 
  private:
   CryptoModule *crypto_{nullptr};
-  std::string device_name_{"AirPlay2"};
   bool started_{false};
 };
 

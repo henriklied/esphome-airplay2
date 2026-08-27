@@ -74,5 +74,4 @@ def _add_memory_policy_flags() -> None:
         cg.add_build_flag("-DAIRPLAY_PLATFORM_ESP32S3")
     else:
         cg.add_build_flag("-DAIRPLAY_PLATFORM_ESP32")
-    cg.add_build_flag("-DUSE_AIRPLAY_HEAP_TRACE")
     cg.add_define("USE_AIRPLAY_HEAP_TRACE")

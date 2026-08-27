@@ -64,8 +64,6 @@ void rtsp_conn_set_volume(RtspConn *conn, float volume_db) {
   conn->volume_db = volume_db;
   conn->volume_q15 = db_to_q15(volume_db);
   transport_set_volume_state(conn->volume_db, conn->volume_q15);
-  TransportEventData data{};
-  (void)data;
   transport_events_emit(TRANSPORT_EVENT_VOLUME, nullptr);
 }
 

@@ -58,7 +58,7 @@ void AirPlayReceiver::handle_transport_event(TransportEvent event, const Transpo
       }
       break;
     case TRANSPORT_EVENT_VOLUME:
-      ESP_LOGI(TAG, "transport: volume db=%.2f q15=%d", transport_volume_db(), transport_volume_q15());
+      ESP_LOGI(TAG, "transport: volume db=%.2f q15=%d", transport_volume_db(), (int) transport_volume_q15());
       break;
     case TRANSPORT_EVENT_PLAYING:
       ESP_LOGI(TAG, "transport: playing");
