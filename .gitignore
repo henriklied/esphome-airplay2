@@ -1,0 +1,13 @@
+# Python / venv
+.venv/
+__pycache__/
+*.pyc
+
+# ESPHome build artifacts
+.esphome/
+
+# Secrets — never commit
+secrets.yaml
+
+# Editor / OS
+.DS_Store
