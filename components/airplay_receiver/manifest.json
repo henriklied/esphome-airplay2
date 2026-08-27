@@ -1,7 +1,7 @@
 {
   "name": "airplay_receiver",
   "version": "0.1.0",
-  "description": "AirPlay 2 receiver for ESP32 / ESP32-S3 with a centralized airplay_* allocator enforcing a PSRAM/internal memory policy. Memory-policy foundation + structure slice (allocator, platform profiles, codegen wiring); the protocol/audio logic is ported from rbouteiller/airplay-esp32 in later tasks.",
+  "description": "AirPlay 2 receiver for ESP32 / ESP32-S3 with a centralized airplay_* allocator enforcing a PSRAM/internal memory policy. Ported so far: the AirPlay 2 HomeKit pairing + ChaCha20-Poly1305 audio crypto slice (SRP-6a 3072-bit / Ed25519 / X25519 / ChaCha20-Poly1305). RTSP/FairPlay/decoder/timing/audio-pipeline slices remain skeletons.",
   "platforms": ["esp32", "esp32s3"],
   "idf": {
     "version": ">=5.5",
@@ -15,8 +15,8 @@
       "cmake_utilities"
     ],
     "notes": [
-      "mbedtls is used by the crypto/HIPairing pipeline; libsodium is used for the Ed25519/SRP pairing exchange (espressif manages both via the component registry).",
-      "The heavy protocol logic (RTSP handlers, HIPairing crypto, audio pipeline) is NOT yet ported — this file is planning metadata only."
+      "espressif/libsodium is pulled in from the component's __init__.py via add_idf_component(name=\"espressif/libsodium\", ref=\"1.0.21\") (Ed25519/X25519/ChaCha20-Poly1305/SHA-512+HMA + randombytes). mbedtls is a built-in IDF component (SRP bignum + raw-signature AES-CTR).",
+      "Ported: main/hap/* (HAP pairing: pair-setup SRP-6a 3072-bit, pair-verify Ed25519+X25519+ChaCha20-Poly1305), main/audio/audio_crypto.c ChaCha20-Poly1305 branch. NOT ported: AirPlay 1 RSA auth (main/rtsp/rtsp_rsa.c), AES-CBC audio encryption, FairPlay handshake (main/rtsp/rtsp_fairplay.c)."
     ],
     "memory": {
       "target_part": "ESP32-S3-WROOM-1-N8R8 (8MiB flash, 8MiB octal PSRAM, 512KiB internal SRAM)",

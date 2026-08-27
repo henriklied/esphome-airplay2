@@ -1,6 +1,7 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import esp32 as esp32_platform
+from esphome.components.esp32 import add_idf_component
 from esphome.components.esp32.const import VARIANT_ESP32, VARIANT_ESP32S3
 from esphome.const import CONF_ID
 
@@ -29,6 +30,10 @@ CONFIG_SCHEMA = cv.All(
 async def to_code(config):
     _register_recursive_sources()
     _add_memory_policy_flags()
+    # The HAP pairing / ChaCha20-Poly1305 audio crypto needs libsodium (Ed25519,
+    # X25519, ChaCha20-Poly1305, SHA-512/HMAC) pulled in as a managed component.
+    # mbedtls (SRP bignum + raw-signature AES-CTR) is a built-in IDF component.
+    add_idf_component(name="espressif/libsodium", ref="1.0.21")
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     cg.add(var.set_name(config[_CONF_NAME]))

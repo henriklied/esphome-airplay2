@@ -78,7 +78,9 @@ self-hosted tree and the protocol logic is not ported.
 
 - [x] Memory-policy foundation (allocator, platform profiles, codegen wiring).
 - [x] Compilable module skeletons.
-- [ ] Protocol logic (RTSP, crypto, decoder, timing, audio pipeline).
+- [x] AirPlay 2 HomeKit pairing + ChaCha20-Poly1305 audio crypto slice (`crypto/`): SRP-6a 3072-bit pair-setup, Ed25519 + X25519 + ChaCha20-Poly1305 pair-verify, ChaCha20-Poly1305 audio key setup/decrypt. AirPlay 1 (RSA auth, AES-CBC) deliberately not ported.
+- [x] libsodium managed component wired (`add_idf_component`) + mbedtls (built-in IDF) — full `esphome compile` is green.
+- [ ] Protocol logic (RTSP, FairPlay, decoder, timing, audio pipeline).
 - [ ] Clean-room license approval or upstream-author permission.
 
 > This document does **not** claim the component is production-ready or
