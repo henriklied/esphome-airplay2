@@ -1,6 +1,6 @@
 {
   "name": "airplay_receiver",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "AirPlay 2 receiver for ESP32 / ESP32-S3 with a centralized airplay_* allocator enforcing a PSRAM/internal memory policy. Ported + integrated end-to-end control + audio pipeline: the AirPlay 2 HomeKit pairing + ChaCha20-Poly1305 crypto slice (SRP-6a 3072-bit / Ed25519 / X25519), the transport/control layer (_airplay._tcp mDNS advert + RTSP server on 7000 with ANNOUNCE/SETUP/RECORD/PAIR-SETUP/PAIR-VERIFY/SET/GET_PARAMETER/TEARDOWN/FLUSH), and the audio engine (RTP receive realtime+buffered, CryptoModule decrypt, ALAC/AAC decode via esp_audio_codec, PTP/NTP clock, playout timing, I2S PCM5100 DAC + amp-enable output). AirPlay 1 RSA/FairPlay and AES-CBC are intentionally not ported.",
   "platforms": ["esp32", "esp32s3"],
   "idf": {

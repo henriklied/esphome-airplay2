@@ -167,9 +167,19 @@ bool audio_stream_process_accepted_frame(audio_receiver_state_t *state,
   }
 
   audio_decode_info_t info = {0};
-  int decoded_samples =
-      audio_decoder_decode(state->decoder, audio_data, audio_len, decode_buffer,
-                           capacity_samples, &info);
+  int decoded_samples = 0;
+  // The decode-worker path (audio_stream_decode_encoded_packet) runs the
+  // decoder behind state->decoder_mutex because a concurrent RTSP SETUP can
+  // call audio_receiver_set_format(), which destroys and recreates the decoder
+  // (use-after-free if a decode is in flight). The realtime RX task decodes
+  // inline, so guard it with the same mutex.
+  if (state->decoder_mutex == nullptr ||
+      xSemaphoreTake(state->decoder_mutex, pdMS_TO_TICKS(500)) != pdTRUE) {
+    return false;
+  }
+  decoded_samples = audio_decoder_decode(state->decoder, audio_data, audio_len,
+                                         decode_buffer, capacity_samples, &info);
+  xSemaphoreGive(state->decoder_mutex);
   if (decoded_samples <= 0) {
     return false;
   }

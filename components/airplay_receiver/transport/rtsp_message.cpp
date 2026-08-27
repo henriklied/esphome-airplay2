@@ -151,7 +151,8 @@ int rtsp_request_parse(const uint8_t *data, size_t len, RtspRequest *req) {
   }
 
   req->cseq = rtsp_parse_cseq((const char *)data);
-  req->content_length = (size_t)rtsp_parse_content_length((const char *)data);
+  int cl = rtsp_parse_content_length((const char *)data);
+  req->content_length = cl > 0 ? (size_t) cl : 0;
 
   const char *ct = strstr((const char *)data, "Content-Type:");
   if (ct == nullptr) {

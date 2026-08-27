@@ -260,7 +260,7 @@ static void stop_event_port_task() {
 
 static uint8_t *grow_buffer(uint8_t *old_buf, size_t old_size, size_t new_size, size_t data_len) {
   (void)old_size;
-  uint8_t *new_buf = static_cast<uint8_t *>(airplay_alloc(new_size, false));
+  uint8_t *new_buf = static_cast<uint8_t *>(airplay_alloc(new_size + 1, false));
   if (new_buf == nullptr) {
     return nullptr;
   }
@@ -345,7 +345,9 @@ static void client_task(void *pv) {
   }
 
   size_t buf_capacity = RTSP_BUFFER_INITIAL;
-  uint8_t *buffer = static_cast<uint8_t *>(airplay_alloc(buf_capacity, false));
+  // +1 spare byte so buffer[total_len]='\0' at the message boundary never steps
+  // one past the allocation when a header+body exactly fills the buffer.
+  uint8_t *buffer = static_cast<uint8_t *>(airplay_alloc(buf_capacity + 1, false));
   if (buffer == nullptr) {
     ESP_LOGE(TAG, "Failed to allocate buffer");
     rtsp_conn_free(conn);

@@ -1267,6 +1267,9 @@ int CryptoModule::audio_decrypt_rtp(const AudioEncrypt *encrypt, const uint8_t *
   const uint8_t *aad = full_packet + 4;
   size_t aad_len = 8;
   size_t ciphertext_len = input_len - 8;
+  if (ciphertext_len > output_capacity) {
+    return -1;
+  }
   unsigned long long decrypted_len = 0;
   int ret = crypto_aead_chacha20poly1305_ietf_decrypt(
       output, &decrypted_len, nullptr, input, ciphertext_len, aad, aad_len, nonce, encrypt->key);
