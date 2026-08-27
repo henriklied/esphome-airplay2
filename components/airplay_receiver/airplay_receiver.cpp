@@ -148,8 +148,12 @@ void AirPlayReceiver::handle_transport_event(TransportEvent event, const Transpo
         ESP_LOGI(TAG, "audio: deferred flush until ts=%u", data->flush.flush_until_ts);
         audio_receiver_set_deferred_flush(data->flush.flush_until_ts);
       } else {
+        // Immediate seek-flush (upstream handle_flush): re-preroll the engine
+        // AND flush the I2S output so the previous track's DMA tail stops and
+        // the cursor resets before the new stream's frames arrive.
         ESP_LOGI(TAG, "audio: seek flush");
         audio_receiver_seek_flush();
+        audio_output_flush();
       }
       break;
     case TRANSPORT_EVENT_METADATA:

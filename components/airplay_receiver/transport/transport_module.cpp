@@ -1100,14 +1100,17 @@ static void handle_flushbuffered(int socket, RtspConn *conn, const RtspRequest *
   size_t body_len = req->body_len;
   uint32_t flush_until_ts = 0;
   if (body != nullptr && body_len >= 8 && memcmp(body, "bplist00", 8) == 0) {
-    int64_t flush_from_seq = 0, until_ts = 0;
-    bool got_from = bplist_find_int(body, body_len, "flushFromSeq", &flush_from_seq);
-    bool got_until = bplist_find_int(body, body_len, "flushUntilTS", &until_ts);
-    // A deferred flush (flushFromSeq + flushUntilTS) keeps playing until the
-    // frame at flushUntilTS arrives, then bulk-flushes. Otherwise immediate.
-    if (got_from && got_until) {
+    int64_t from_seq = 0, from_ts = 0, until_seq = 0, until_ts = 0;
+    bool got_from_seq = bplist_find_int(body, body_len, "flushFromSeq", &from_seq);
+    bool got_from_ts = bplist_find_int(body, body_len, "flushFromTS", &from_ts);
+    bool got_until_seq = bplist_find_int(body, body_len, "flushUntilSeq", &until_seq);
+    bool got_until_ts = bplist_find_int(body, body_len, "flushUntilTS", &until_ts);
+    // A deferred flush keeps playing until the frame at flushUntilTS arrives,
+    // then bulk-flushes. Upstream treats it deferred only when all four fields
+    // are present; otherwise it is an immediate flush.
+    if (got_from_seq && got_from_ts && got_until_seq && got_until_ts) {
       flush_until_ts = (uint32_t) until_ts;
-      ESP_LOGI(TAG, "FLUSHBUFFERED deferred: fromSeq=%lld untilTS=%llu", (long long) flush_from_seq,
+      ESP_LOGI(TAG, "FLUSHBUFFERED deferred: fromSeq=%lld untilTS=%llu", (long long) from_seq,
                (unsigned long long) flush_until_ts);
     } else {
       ESP_LOGI(TAG, "FLUSHBUFFERED immediate");
