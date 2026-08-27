@@ -3,15 +3,10 @@
 //
 // Once PAIR-VERIFY (TLV8) completes, the RTSP control channel is carried as
 // ChaCha20-Poly1305 frames: [2-byte little-endian block length][ciphertext +
-// 16-byte tag]. Encryption/decryption defers to the CryptoModule's
-// established-session session_encrypt/session_decrypt (the per-frame
-// encrypt/decrypt nonce counter is owned by the HAP session).
-//
-// NOTE (gotcha): upstream rtsp_crypto.c passes the 2-byte length prefix as
-// ChaCha20-Poly1305 additional authenticated data; the ported CryptoModule's
-// session_encrypt/decrypt use empty AAD. The pair-verify (TLV8) framing and
-// the encryption keys/nonces are wire-correct; only the AAD is empty. A future
-// audio-engine task that refines on-wire interop should align this.
+// 16-byte tag]. The 2-byte length prefix is passed as ChaCha20-Poly1305
+// additional authenticated data (matching upstream), routed through the
+// CryptoModule's established-session session_encrypt/session_decrypt (the
+// per-frame encrypt/decrypt nonce counter is owned by the HAP session).
 
 #include <cstddef>
 #include <cstdint>

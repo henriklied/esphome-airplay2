@@ -1,5 +1,5 @@
 // airplay_receiver buffered TCP audio stream (C++ port of rbouteiller/airplay-esp32
-// main/audio/audio_stream_buffered.c).
+// main/audio/audio_stream_buffered.c, engine-v2 / PR #130).
 //
 // AirPlay 2 stream type 103 is a *buffered* stream: the source pushes a
 // length-prefixed, ChaCha20-Poly1305-encrypted ALAC/AAC packet stream over a
@@ -15,32 +15,23 @@
 //   * upstream signatures preserved 1:1 (function names, parameter lists and
 //     the audio_stream_ops_t vtable layout are unchanged).
 //
-// DECRYPT INTEGRATION: upstream audio_crypto.c was NOT ported.  Decryption now
-// goes through the injected CryptoModule (crypto/crypto_module.h).  The stream
-// reaches it via state->crypto (audio_receiver_state_t::crypto), injected by
-// the owner (AirPlayReceiver) through audio_receiver_set_crypto_module().  This
-// file calls state->crypto->audio_decrypt_buffered(&stream->encrypt, ...) in
-// place of the upstream audio_crypto_decrypt_buffered(), exactly as
-// audio/audio_stream.h documents.  The per-stream encryption config uses the
-// component's AudioEncrypt (AudioEncryptType::NOT_SET == plaintext, handled
-// inside audio_decrypt_buffered by copying the payload).
+// DECRYPT INTEGRATION (engine-v2): upstream audio_crypto.c was NOT ported.
+// Decryption goes through the injected CryptoModule (crypto/crypto_module.h),
+// reached via state->crypto (audio_receiver_state_t::crypto), injected by the
+// owner (AirPlayReceiver) through audio_receiver_set_crypto_module(). This file
+// calls state->crypto->audio_decrypt_buffered(&stream->encrypt, ...) in place
+// of the upstream audio_crypto_decrypt_buffered(). The per-stream encryption
+// config uses the component's AudioEncrypt (AudioEncryptType::NOT_SET is
+// handled inside audio_decrypt_buffered by copying the 12-byte-stripped
+// payload).
 //
-// This file DEFINES the buffered stream's operations (the *_ops vtable) but
-// does NOT define the base audio_stream API.  The surrounding types and the
-// shared pipeline helpers (audio_stream_t / audio_stream_ops_t /
-// audio_stream_state() / audio_receiver_state_t / audio_stream_accept_timestamp()
-// / audio_stream_process_accepted_frame() / audio_buffer_is_nearly_full()) are
-// supplied by the sibling slices:
-//   * audio/audio_stream.h -> base stream descriptor + ops vtable
-//     (audio_stream_t / audio_stream_ops_t);
-//   * audio/audio_receiver_internal.h -> receiver state, audio_stream_state(),
-//     the RTP gate / decode-and-queue helpers (declarations; the logic lives in
-//     the base audio_stream.cpp).  Included AFTER audio_stream.h, as upstream
-//     does, so the full audio_stream_t is visible before the state struct.
-//   * audio/audio_buffer.h -> PCM ring (audio_buffer_is_nearly_full for
-//     back-pressure);
-//   * crypto/crypto_module.h -> CryptoModule::audio_decrypt_buffered /
-//     AudioEncrypt.
+// DECODE INTEGRATION (engine-v2): unlike the realtime path, the buffered path
+// does NOT decode on the TCP reader. It demuxes each access unit into an
+// audio_encoded_packet_t and hands it to the decode worker
+// (audio_decode_worker_enqueue). The worker task calls
+// audio_stream_decode_encoded_packet() (audio_stream.cpp) to run the decoder
+// and publish PCM onto the engine-v2 timeline. Decoding off the reader keeps
+// the socket draining through decode hiccups instead of dropping packets.
 
 #include "audio_stream.h"
 #include "audio_receiver_internal.h"
@@ -74,6 +65,9 @@
 
 #define BUFFERED_AUDIO_PACKET_SIZE 8192
 #define AUDIO_BUFFERED_STACK_SIZE AIRPLAY_TASK_STACK_AUDIO_BUFFERED
+// Bounded hand-off to the decode worker.  Long enough to ride out a decode
+// hiccup, short enough that a wedged decoder cannot block stream teardown.
+#define BUFFERED_ENQUEUE_TIMEOUT_MS 200U
 
 namespace esphome {
 namespace airplay_receiver {
@@ -89,30 +83,29 @@ static const char *const TAG = "audio_buf";
 #define CONFIG_LWIP_TCP_WND_DEFAULT 32768
 #endif
 
-// Read exactly `len` bytes, but keep waiting on a socket timeout while the
-// stream is paused (the connection stays alive across a pause/resume).
-// Returns: positive = bytes read, 0 = connection closed, -1 = error.
-static ssize_t read_exact(audio_stream_t *stream, audio_receiver_state_t *state, int sock,
-                          uint8_t *buf, size_t len) {
+// Read exact number of bytes, but keep waiting on timeout if paused
+// Returns: positive = bytes read, 0 = connection closed, -1 = error
+static ssize_t read_exact(audio_stream_t *stream, audio_receiver_state_t *state,
+                          int sock, uint8_t *buf, size_t len) {
   size_t total = 0;
   while (total < len && stream->running) {
     ssize_t n = recv(sock, buf + total, len - total, 0);
     if (n > 0) {
       total += (size_t) n;
     } else if (n == 0) {
-      // Connection closed by peer.
+      // Connection closed by peer
       ESP_LOGI(TAG, "Buffered audio connection closed by peer");
       return 0;
     } else {
-      // n < 0: error or timeout.
+      // n < 0: error or timeout
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        // Timeout - if we're paused, keep waiting for resume.
+        // Timeout - if we're paused, keep waiting for resume
         if (!state->timing.playing) {
-          // Still paused: keep the connection alive.
+          // Still paused, keep the connection alive
           vTaskDelay(pdMS_TO_TICKS(100));
           continue;
         }
-        // Playing but timed out - connection may be dead.
+        // Playing but timed out - connection may be dead
         ESP_LOGW(TAG, "Buffered audio timeout while playing");
         return -1;
       }
@@ -123,15 +116,16 @@ static ssize_t read_exact(audio_stream_t *stream, audio_receiver_state_t *state,
   return stream->running ? (ssize_t) total : -1;
 }
 
-static void buffered_audio_task(void *pv_parameters) {
-  audio_stream_t *stream = (audio_stream_t *) pv_parameters;
+static void buffered_audio_task(void *pvParameters) {
+  audio_stream_t *stream = (audio_stream_t *) pvParameters;
   audio_receiver_state_t *state = audio_stream_state(stream);
 
   while (stream->running) {
     struct sockaddr_in client_addr;
     socklen_t addr_len = sizeof(client_addr);
 
-    int client_sock = accept(state->buffered_listen_socket, (struct sockaddr *) &client_addr, &addr_len);
+    int client_sock = accept(state->buffered_listen_socket,
+                             (struct sockaddr *) &client_addr, &addr_len);
     if (client_sock < 0) {
       if (errno != EAGAIN && errno != EWOULDBLOCK && stream->running) {
         ESP_LOGE(TAG, "Buffered audio accept error: %d", errno);
@@ -146,8 +140,11 @@ static void buffered_audio_task(void *pv_parameters) {
     setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     // Socket receive buffer: match lwIP's TCP receive window so the kernel
-    // buffer holds exactly what the TCP window allows in flight (see upstream
-    // comment; CONFIG_LWIP_TCP_WND_DEFAULT ties it to the sdkconfig knob).
+    // buffer can hold exactly what the TCP window allows in flight.  A larger
+    // SO_RCVBUF (e.g. the old 65536) accumulates stale audio data that must
+    // drain through the RTP gates on every track skip, adding transition
+    // latency.  Keeping it at TCP_WND ties both knobs to a single sdkconfig
+    // value (CONFIG_LWIP_TCP_WND_DEFAULT).
     int rcvbuf = CONFIG_LWIP_TCP_WND_DEFAULT;
     setsockopt(client_sock, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
 
@@ -166,9 +163,12 @@ static void buffered_audio_task(void *pv_parameters) {
     }
 
     while (stream->running) {
-      // Back-pressure: if the PCM ring is nearly full, pause reading so TCP
-      // flow control slows the sender and frames stay in order.
-      while (audio_buffer_is_nearly_full(&state->buffer) && stream->running) {
+      // Back-pressure: if the pipeline is nearly full, pause reading to let
+      // TCP flow control slow down the sender. This prevents overflow and
+      // keeps frames in order.
+      while (stream->running &&
+             (audio_decode_worker_is_nearly_full(state->decode_worker) ||
+              audio_engine_v2_is_nearly_full(&state->engine_v2))) {
         vTaskDelay(pdMS_TO_TICKS(10));
       }
 
@@ -184,7 +184,8 @@ static void buffered_audio_task(void *pv_parameters) {
       }
 
       size_t packet_len = (size_t) (data_len - 2);
-      if (read_exact(stream, state, client_sock, packet, packet_len) != (ssize_t) packet_len) {
+      if (read_exact(stream, state, client_sock, packet, packet_len) !=
+          (ssize_t) packet_len) {
         break;
       }
 
@@ -194,11 +195,20 @@ static void buffered_audio_task(void *pv_parameters) {
       uint32_t timestamp = ((uint32_t) packet[4] << 24) | ((uint32_t) packet[5] << 16) |
                            ((uint32_t) packet[6] << 8) | packet[7];
 
-      // Drop stale pre-seek/old-track packets before decrypt and decode.  The
+      // Snapshot the epoch before the gate so a seek that lands between the
+      // gate and the decode invalidates this packet rather than letting it
+      // reach the timeline of the new segment.
+      const uint32_t epoch = audio_epoch_get(&state->engine_v2.epoch);
+      (void) __atomic_add_fetch(&state->engine_v2.diag_rx_packets, 1U,
+                                __ATOMIC_RELAXED);
+
+      // Drop stale pre-seek/old-track packets before AES and AAC work.  The
       // bytes still have to be drained from TCP (done above), but they no
-      // longer consume decode time or enter the PCM ring.
+      // longer consume decoder time or enter the PCM ring buffer.
       if (!audio_stream_accept_timestamp(state, timestamp)) {
         state->stats.packets_dropped++;
+        (void) __atomic_add_fetch(&state->engine_v2.diag_gate_drops, 1U,
+                                  __ATOMIC_RELAXED);
         continue;
       }
 
@@ -216,22 +226,45 @@ static void buffered_audio_task(void *pv_parameters) {
         continue;
       }
 
-      int decrypted_len =
-          state->crypto->audio_decrypt_buffered(&stream->encrypt, packet, packet_len, decrypted, decrypt_capacity);
+      int decrypted_len = state->crypto->audio_decrypt_buffered(
+          &stream->encrypt, packet, packet_len, decrypted, decrypt_capacity);
       if (decrypted_len < 0) {
         state->stats.decrypt_errors++;
         state->stats.packets_dropped++;
         continue;
       }
 
-      state->stats.last_seq = (uint16_t) (seq_no & 0xFFFFu);
+      state->stats.last_seq = (uint16_t) (seq_no & 0xFFFF);
       state->stats.last_timestamp = timestamp;
 
       state->blocks_read++;
       state->blocks_read_in_sequence++;
 
-      if (!audio_stream_process_accepted_frame(state, timestamp, decrypted, (size_t) decrypted_len)) {
+      // Hand the access unit to the decode worker.  Decoding on this task
+      // would stall the TCP reader for the duration of every AAC frame, which
+      // is what previously turned a transient decode hiccup into dropped
+      // packets and a visible gap.
+      const audio_encoded_packet_t encoded = {
+          .epoch = epoch,
+          .rtp_timestamp = timestamp,
+          .payload = decrypted,
+          .payload_len = (size_t) decrypted_len,
+          .prime_mute = audio_stream_aac_prime_mute_wanted(state),
+      };
+
+      const audio_decode_enqueue_result_t enq =
+          audio_decode_worker_enqueue(state->decode_worker, &encoded,
+                                      BUFFERED_ENQUEUE_TIMEOUT_MS);
+      if (enq == AUDIO_DECODE_ENQUEUE_OK) {
+        (void) __atomic_add_fetch(&state->engine_v2.diag_enqueue_ok, 1U,
+                                  __ATOMIC_RELAXED);
+      } else {
         state->stats.packets_dropped++;
+        (void) __atomic_add_fetch(
+            enq == AUDIO_DECODE_ENQUEUE_RETRY
+                ? &state->engine_v2.diag_enqueue_retries
+                : &state->engine_v2.diag_queue_drops,
+            1U, __ATOMIC_RELAXED);
       }
     }
 
@@ -243,7 +276,8 @@ static void buffered_audio_task(void *pv_parameters) {
   vTaskDelete(nullptr);
 }
 
-static bool buffered_wait_for_task_stopped(audio_receiver_state_t *state, int timeout_ticks) {
+static bool buffered_wait_for_task_stopped(audio_receiver_state_t *state,
+                                           int timeout_ticks) {
   while (state->buffered_task_handle && timeout_ticks-- > 0) {
     vTaskDelay(pdMS_TO_TICKS(50));
   }
@@ -265,7 +299,8 @@ static esp_err_t buffered_start(audio_stream_t *stream, uint16_t port) {
   }
 
   uint16_t bound_port = port;
-  state->buffered_listen_socket = socket_utils_bind_tcp_listener(port, 1, true, &bound_port);
+  state->buffered_listen_socket =
+      socket_utils_bind_tcp_listener(port, 1, true, &bound_port);
   if (state->buffered_listen_socket < 0) {
     return ESP_FAIL;
   }
@@ -274,8 +309,9 @@ static esp_err_t buffered_start(audio_stream_t *stream, uint16_t port) {
   stream->running = true;
 
   state->buffered_task_handle = nullptr;
-  BaseType_t task_ret = xTaskCreate(buffered_audio_task, "buff_audio", AUDIO_BUFFERED_STACK_SIZE, stream, 5,
-                                    &state->buffered_task_handle);
+  BaseType_t task_ret =
+      xTaskCreate(buffered_audio_task, "buff_audio", AUDIO_BUFFERED_STACK_SIZE,
+                  stream, 5, &state->buffered_task_handle);
   if (task_ret != pdPASS || !state->buffered_task_handle) {
     ESP_LOGE(TAG, "Failed to create buffered audio task");
     close(state->buffered_listen_socket);
@@ -285,11 +321,14 @@ static esp_err_t buffered_start(audio_stream_t *stream, uint16_t port) {
   }
 
   // Worst-case memory snapshot: buffered streaming is the heaviest concurrent
-  // load (WiFi + lwip + decoder + PCM ring).  Reports go through the airplay_*
-  // allocator so they observe the same memory policy the rest of the component
-  // uses.
-  ESP_LOGI(TAG, "Buffered start: free heap %lu internal (largest block %lu), %lu SPIRAM",
-           (unsigned long) airplay_internal_free(), (unsigned long) airplay_internal_largest_block(),
+  // load (WiFi + lwip + decoder + PCM ring).  Use this to size WiFi/TCP buffers
+  // without risking OOM.  Reports go through the airplay_* allocator so they
+  // observe the same memory policy the rest of the component uses.
+  ESP_LOGI(TAG,
+           "Buffered start: free heap %lu internal (largest block %lu), "
+           "%lu SPIRAM",
+           (unsigned long) airplay_internal_free(),
+           (unsigned long) airplay_internal_largest_block(),
            (unsigned long) airplay_psram_free());
 
   return ESP_OK;
@@ -331,7 +370,9 @@ static uint16_t buffered_get_port(audio_stream_t *stream) {
   return state->buffered_port;
 }
 
-static bool buffered_is_running(audio_stream_t *stream) { return stream->running; }
+static bool buffered_is_running(audio_stream_t *stream) {
+  return stream->running;
+}
 
 static void buffered_destroy(audio_stream_t *stream) {
   if (!stream) {
@@ -347,16 +388,11 @@ static void buffered_destroy(audio_stream_t *stream) {
   airplay_free(stream);
 }
 
-// The base audio_stream slice declares this ops object externally
-// (`extern const audio_stream_ops_t audio_stream_buffered_ops;`) and binds it
+// The base audio_stream slice declares this ops object externally and binds it
 // when it builds the buffered stream via audio_stream_create_buffered().  The
 // vtable field order matches upstream audio_stream.h 1:1.
-//
-// `extern` is intentional: per C++ [basic.link] a const namespace-scope object
-// has INTERNAL linkage unless explicitly declared extern, so declaring it
-// extern guarantees external linkage and matches the base slice's extern
-// declaration portably across compilers (a plain `const ... x = {..}` is
-// compiler-dependent here).
+// `extern` guarantees external linkage (a plain const namespace-scope object
+// would otherwise get internal linkage per C++ [basic.link]).
 extern const audio_stream_ops_t audio_stream_buffered_ops = {
     .start = buffered_start,        // start
     .stop = buffered_stop,          // stop

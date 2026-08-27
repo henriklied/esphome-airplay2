@@ -84,7 +84,8 @@ int rtsp_crypto_read_block(int socket, RtspConn *conn, uint8_t *buffer, size_t b
   }
 
   size_t plaintext_len = 0;
-  if (conn->crypto == nullptr || conn->crypto->session_decrypt(conn->hap_session, encrypted, encrypted_len, buffer,
+  if (conn->crypto == nullptr || conn->crypto->session_decrypt(conn->hap_session, encrypted, encrypted_len,
+                                                               len_buf, sizeof(len_buf), buffer,
                                                                &plaintext_len) != 0) {
     airplay_free(encrypted);
     ESP_LOGE(TAG, "Failed to decrypt control frame");
@@ -119,7 +120,8 @@ int rtsp_crypto_write_frame(int socket, RtspConn *conn, const uint8_t *data, siz
 
     size_t ct_len = 0;
     if (conn->crypto == nullptr ||
-        conn->crypto->session_encrypt(conn->hap_session, data + offset, block_len, encrypted, &ct_len) != 0 ||
+        conn->crypto->session_encrypt(conn->hap_session, data + offset, block_len, len_buf,
+                                      sizeof(len_buf), encrypted, &ct_len) != 0 ||
         ct_len != encrypted_len) {
       ESP_LOGE(TAG, "Failed to encrypt control frame");
       airplay_free(encrypted);

@@ -1,5 +1,5 @@
 // airplay_receiver audio_stream_realtime (C++ port of rbouteiller/airplay-esp32
-// main/audio/audio_stream_realtime.c).
+// main/audio/audio_stream_realtime.c, engine-v2 / PR #130).
 //
 // The UDP RTP realtime receive path for AirPlay 2 stream type 96. It binds a
 // UDP data socket (plus an optional control socket), spawns two FreeRTOS tasks
@@ -18,7 +18,7 @@
 // DECRYPT INTEGRATION: upstream audio_crypto.c was NOT ported. Decryption now
 // goes through the injected CryptoModule (CryptoModule::audio_decrypt_rtp) —
 // see audio_receiver.h. The per-stream encryption config uses the component's
-// AudioEncrypt (NOT_SET == none).
+// AudioEncrypt (AudioEncryptType::NOT_SET == none).
 
 #include "audio_stream.h"
 
@@ -498,8 +498,7 @@ static void control_receiver_task(void *pvParameters) {
         //   [16-19] sync_rtp_timestamp — the RTP frame currently being SENT
         //           (ahead by the stream latency).  Do NOT use as anchor.
         if (len >= 20) {
-          uint32_t rtp_timestamp =
-              nctoh32(packet + 4);  // rtp_timestamp_less_latency
+          uint32_t rtp_timestamp = nctoh32(packet + 4);  // rtp_timestamp_less_latency
           uint64_t ntp_secs = nctoh32(packet + 8);
           uint64_t ntp_frac = nctoh32(packet + 12);
           uint64_t network_time_ns =
@@ -512,6 +511,7 @@ static void control_receiver_task(void *pvParameters) {
         // Format: [4] RTP frame, [8] PTP time ns, [16] RTP frame 2, [20] clock ID
         // The RTP timestamp at [4] is the frame that should play at the
         // PTP time — use it directly (matching the NTP anchor path).
+        // compute_early_us handles hardware latency compensation.
         if (len >= 28) {
           uint32_t frame_1 = nctoh32(packet + 4);
           uint64_t network_time_ns = nctoh64(packet + 8);
@@ -529,7 +529,7 @@ static void control_receiver_task(void *pvParameters) {
            receiver task processes it in the same thread as normal packets.
            This avoids concurrent access to the decoder and decrypt buffer. */
         packet[1] = 0x56;
-        struct sockaddr_in self = {};
+        struct sockaddr_in self = {0};
         self.sin_family = AF_INET;
         self.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         self.sin_port = htons(state->data_port);
@@ -564,8 +564,7 @@ static bool realtime_wait_for_tasks_stopped(audio_receiver_state_t *state,
 static esp_err_t realtime_start(audio_stream_t *stream, uint16_t port) {
   audio_receiver_state_t *state = audio_stream_state(stream);
   if (stream->running) {
-    ESP_LOGI(TAG, "Audio receiver already running on port %u",
-             state->data_port);
+    ESP_LOGI(TAG, "Audio receiver already running on port %u", state->data_port);
     return ESP_OK;
   }
   if (state->task_handle || state->control_task_handle) {
@@ -582,8 +581,7 @@ static esp_err_t realtime_start(audio_stream_t *stream, uint16_t port) {
     return ESP_FAIL;
   }
   // Keep the receive loop awake so resend_retry_if_due() can repeat NACKs
-  // even when no fresh RTP packets arrive. (socket_utils_bind_udp sets a whole
-  // second timeout; override it to 100 ms.)
+  // even when no fresh RTP packets arrive.
   struct timeval tv = {.tv_sec = 0, .tv_usec = 100000};
   setsockopt(state->data_socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
   state->data_port = bound_port;
@@ -688,14 +686,20 @@ static void realtime_destroy(audio_stream_t *stream) {
   airplay_free(stream);
 }
 
-const audio_stream_ops_t audio_stream_realtime_ops = {
+// The base audio_stream slice declares this ops object externally and binds it
+// when it builds the realtime stream via audio_stream_create_realtime(). The
+// vtable field order matches upstream audio_stream.h 1:1.
+// `extern` guarantees external linkage (a plain const namespace-scope object
+// would otherwise get internal linkage per C++ [basic.link]).
+extern const audio_stream_ops_t audio_stream_realtime_ops = {
     .start = realtime_start,
     .stop = realtime_stop,
     .receive_packet = nullptr,
     .decrypt_payload = nullptr,
     .get_port = realtime_get_port,
     .is_running = realtime_is_running,
-    .destroy = realtime_destroy};
+    .destroy = realtime_destroy,
+};
 
 }  // namespace airplay_receiver
 }  // namespace esphome

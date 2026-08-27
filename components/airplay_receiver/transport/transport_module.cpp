@@ -847,6 +847,7 @@ static void handle_setup(int socket, RtspConn *conn, const RtspRequest *req, con
   audio.data_port = conn->data_port;
   audio.control_port = conn->control_port;
   audio.timing_port = conn->timing_port;
+  audio.buffered_port = conn->buffered_port;
   audio.audio_buffer_size = RTSP_AP2_AUDIO_BUFFER_SIZE;
 
   // Hand the fully-configured stream to the audio engine.

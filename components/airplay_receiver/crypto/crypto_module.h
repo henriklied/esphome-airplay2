@@ -155,10 +155,17 @@ class CryptoModule {
                     uint8_t *output, size_t output_capacity, size_t *output_len);
 
   // --- established-session ChaCha20-Poly1305 control channel ------------------
+  /// Encrypt `plaintext` with the session key. `aad` is extra authenticated data
+  /// (the RTSP control channel uses the 2-byte frame-length prefix, matching
+  /// upstream rtsp_crypto.c); pass nullptr/0 for none.
   int session_encrypt(HAPSession *session, const uint8_t *plaintext, size_t plaintext_len,
-                      uint8_t *ciphertext, size_t *ciphertext_len);
+                      const uint8_t *aad, size_t aad_len, uint8_t *ciphertext,
+                      size_t *ciphertext_len);
+  /// Decrypt `ciphertext` with the session key. `aad` must match the AAD used at
+  /// encrypt time.
   int session_decrypt(HAPSession *session, const uint8_t *ciphertext, size_t ciphertext_len,
-                      uint8_t *plaintext, size_t *plaintext_len);
+                      const uint8_t *aad, size_t aad_len, uint8_t *plaintext,
+                      size_t *plaintext_len);
 
   // --- audio encryption setup + decrypt (ChaCha20-Poly1305 only) ---------------
   /// Derive the AirPlay 2 audio encryption key from the pair-verify shared

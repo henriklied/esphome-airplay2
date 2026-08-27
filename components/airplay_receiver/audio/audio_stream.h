@@ -1,32 +1,40 @@
 #pragma once
-// airplay_receiver audio stream base (C++ port of rbouteiller/airplay-esp32
-// main/audio/audio_stream.h).
+// airplay_receiver audio_stream base (C++ port of rbouteiller/airplay-esp32
+// main/audio/audio_stream.h, engine-v2 / PR #130).
 //
 // Defines the audio_stream container + its ops vtable and the upstream
-// audio_stream_* API. The realtime (UDP, type 96) and buffered (TCP, type 103)
-// receiver slices each provide an audio_stream_ops_t table; this base file owns
-// the container creation/destruction and the shared RTP-gated decode+queue
-// entry points that both paths run through.
+// audio_stream_* lifecycle API. The realtime (UDP, type 96) and buffered
+// (TCP, type 103) receiver slices each provide an audio_stream_ops_t table;
+// this base file owns the container creation/destruction and the shared
+// RTP-gate + decode entry points that both paths run through.
 //
 // SHARED CONTRACT (also documented in audio_receiver.h):
 //   * namespace esphome::airplay_receiver
 //   * ALL heap via airplay_alloc/airplay_calloc/airplay_free (../allocator.h)
 //   * logs via esphome/core/log.h + a per-file TAG
-//   * upstream function signatures preserved
+//   * upstream function signatures / struct layouts preserved
 //
 // TYPE SOURCES: audio_stream_type_t / audio_format_t / audio_stats_t live in
 // audio_receiver.h (the public receiver header), which this header pulls in via
-// #include (it forward-declares struct audio_stream). The private receiver state
-// + audio_stream_state() + RTP-gate declarations live in audio_receiver_internal.h,
-// included by audio_stream.cpp / audio_stream_realtime.cpp AFTER this header
-// (matching upstream order). The encryption configuration uses the component's
-// AudioEncrypt / CryptoModule (crypto/crypto_module.h) — audio_crypto.c is NOT
-// ported, so audio enc/decrypt routes through CryptoModule (see
-// audio_stream_realtime.cpp).
+// #include (it forward-declares `struct audio_stream` and typedefs
+// audio_stream_t). The private receiver state + audio_stream_state() + the
+// shared RTP-gate / decode / decode-worker-callback declarations live in
+// audio_receiver_internal.h (owned by the receiver agent), included by
+// audio_stream.cpp / audio_stream_realtime.cpp / audio_stream_buffered.cpp
+// AFTER this header (matching upstream order) so the full audio_stream_t
+// definition is visible before the state struct is parsed.
+//
+// DECRYPT (engine-v2): upstream audio_crypto.c is NOT ported. Per-stream
+// encryption is configured with the component AudioEncrypt (ChaCha20-Poly1305
+// only) and actual decrypt goes through the injected CryptoModule
+// (crypto/crypto_module.h), reached via state->crypto->audio_decrypt_rtp /
+// audio_decrypt_buffered — see audio_stream_realtime.cpp / buffered.cpp.
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+#include "esp_err.h"
 
 #include "audio_receiver.h"
 
@@ -37,9 +45,9 @@ namespace airplay_receiver {
 // `audio_stream_t`; the full definition is provided below.
 
 // Operations vtable for a concrete stream implementation (realtime vs buffered).
-// receive_packet / decrypt_payload are unused by the realtime path (its receive
-// loop is a self-contained FreeRTOS task); they are kept for API symmetry with
-// upstream audio_stream_ops_t.
+// receive_packet / decrypt_payload are unused by both engine-v2 receiver paths
+// (their receive loops are self-contained FreeRTOS tasks); they are kept for
+// API symmetry with upstream audio_stream_ops_t.
 typedef struct {
   esp_err_t (*start)(audio_stream_t *stream, uint16_t port);
   void (*stop)(audio_stream_t *stream);

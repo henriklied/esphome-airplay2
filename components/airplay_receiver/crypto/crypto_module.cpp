@@ -1131,7 +1131,8 @@ int CryptoModule::pair_setup_m5(HAPSession *session, const uint8_t *input, size_
 // Established-session control-channel ChaCha20-Poly1305
 // ---------------------------------------------------------------------------
 int CryptoModule::session_encrypt(HAPSession *session, const uint8_t *plaintext, size_t plaintext_len,
-                                  uint8_t *ciphertext, size_t *ciphertext_len) {
+                                  const uint8_t *aad, size_t aad_len, uint8_t *ciphertext,
+                                  size_t *ciphertext_len) {
   if (session == nullptr || plaintext == nullptr || ciphertext == nullptr ||
       !session->session_established) {
     return -1;
@@ -1139,15 +1140,16 @@ int CryptoModule::session_encrypt(HAPSession *session, const uint8_t *plaintext,
   uint8_t nonce[HAP_CHACHA20_NONCE_SIZE] = {0};
   std::memcpy(nonce + 4, &session->encrypt_nonce, 8);
   unsigned long long ct_len = 0;
-  crypto_aead_chacha20poly1305_ietf_encrypt(ciphertext, &ct_len, plaintext, plaintext_len, nullptr,
-                                            0, nullptr, nonce, session->encrypt_key);
+  crypto_aead_chacha20poly1305_ietf_encrypt(ciphertext, &ct_len, plaintext, plaintext_len, aad,
+                                            aad_len, nullptr, nonce, session->encrypt_key);
   *ciphertext_len = static_cast<size_t>(ct_len);
   session->encrypt_nonce++;
   return 0;
 }
 
 int CryptoModule::session_decrypt(HAPSession *session, const uint8_t *ciphertext, size_t ciphertext_len,
-                                  uint8_t *plaintext, size_t *plaintext_len) {
+                                  const uint8_t *aad, size_t aad_len, uint8_t *plaintext,
+                                  size_t *plaintext_len) {
   if (session == nullptr || ciphertext == nullptr || plaintext == nullptr ||
       !session->session_established) {
     return -1;
@@ -1156,7 +1158,7 @@ int CryptoModule::session_decrypt(HAPSession *session, const uint8_t *ciphertext
   std::memcpy(nonce + 4, &session->decrypt_nonce, 8);
   unsigned long long pt_len = 0;
   if (crypto_aead_chacha20poly1305_ietf_decrypt(plaintext, &pt_len, nullptr, ciphertext,
-                                                ciphertext_len, nullptr, 0, nonce,
+                                                ciphertext_len, aad, aad_len, nonce,
                                                 session->decrypt_key) != 0) {
     return -1;
   }

@@ -145,6 +145,14 @@ uint32_t audio_output_get_hardware_latency_us(void);
 bool audio_output_get_pipeline_us(int64_t *now_us, uint32_t *pipeline_us);
 
 /**
+ * Approximate wall-clock time (ns) at which the sample currently being written
+ * will reach the DAC, taken from the live I2S queue depth.  The audio engine
+ * uses this as the playout anchor so the PTP/clock-map servo can align.
+ * @param now_us  current esp_timer time (us).
+ */
+int64_t audio_output_get_next_playout_time_ns(int64_t now_us);
+
+/**
  * Number of output-underrun episodes since boot.
  */
 uint32_t audio_output_get_underruns(void);

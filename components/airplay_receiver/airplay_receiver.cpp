@@ -104,11 +104,12 @@ void AirPlayReceiver::handle_transport_event(TransportEvent event, const Transpo
       }
 
       audio_receiver_set_stream_type(static_cast<audio_stream_type_t>(data->audio.stream_type));
-      // Realtime (type 96) uses the data+control UDP ports; buffered (type 103)
-      // would use the TCP port handed by a later transport refinement.
-      esp_err_t err = audio_receiver_start_stream(data->audio.data_port, data->audio.control_port, 0);
-      ESP_LOGI(TAG, "audio: start_stream type=%lld data=%u ctrl=%u -> %s", (long long) data->audio.stream_type,
-               data->audio.data_port, data->audio.control_port, esp_err_to_name(err));
+      // Realtime (type 96): data+control UDP ports. Buffered (type 103): the
+      // TCP port handed by the transport.
+      uint16_t tcp_port = (data->audio.stream_type == 103) ? data->audio.buffered_port : 0;
+      esp_err_t err = audio_receiver_start_stream(data->audio.data_port, data->audio.control_port, tcp_port);
+      ESP_LOGI(TAG, "audio: start_stream type=%lld data=%u ctrl=%u tcp=%u -> %s", (long long) data->audio.stream_type,
+               data->audio.data_port, data->audio.control_port, tcp_port, esp_err_to_name(err));
       break;
     }
     case TRANSPORT_EVENT_ANCHOR:

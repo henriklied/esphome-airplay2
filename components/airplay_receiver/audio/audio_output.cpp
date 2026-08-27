@@ -442,6 +442,21 @@ bool audio_output_get_pipeline_us(int64_t *now_us, uint32_t *pipeline_us) {
   return true;
 }
 
+// ~5 ms of scheduling + write delay between this call and the samples reaching
+// the backend.  Mirrors PIPELINE_LATENCY_US in audio_timing.c.
+#define OUTPUT_PIPELINE_LATENCY_US 5000
+
+int64_t audio_output_get_next_playout_time_ns(int64_t now_us) {
+  int64_t sampled_us = 0;
+  uint32_t pipeline_us = 0;
+  if (!audio_output_get_pipeline_us(&sampled_us, &pipeline_us)) {
+    sampled_us = now_us;
+    pipeline_us = audio_output_get_hardware_latency_us();
+  }
+  return (sampled_us + (int64_t) pipeline_us + OUTPUT_PIPELINE_LATENCY_US) *
+         1000LL;
+}
+
 uint32_t audio_output_get_underruns(void) {
   return __atomic_load_n(&g_underruns, __ATOMIC_RELAXED);
 }

@@ -50,6 +50,7 @@ struct TransportAudioConfig {
   uint16_t control_port = 0;      // control (NACK/retransmit) port
   uint16_t event_port = 0;        // server->client event port (AirPlay 2)
   uint16_t timing_port = 0;       // timing port (AirPlay 1)
+  uint16_t buffered_port = 0;     // TCP port for buffered audio (type 103)
   uint32_t audio_buffer_size = 0; // advertised AP2_AUDIO_BUFFER_SIZE
   int sample_rate = 0;
   int channels = 0;
