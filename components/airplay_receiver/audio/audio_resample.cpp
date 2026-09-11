@@ -85,7 +85,8 @@ typedef struct resample {
 //                     Sinc-based Audio Resampling                        //
 //                Copyright (c) 2006 - 2023 David Bryant.                 //
 //                          All Rights Reserved.                          //
-//      Distributed under the BSD Software License (see license.txt)      //
+//            Distributed under the BSD Software License; see             //
+//          licenses/audio-resampler.txt in the repository root.          //
 ////////////////////////////////////////////////////////////////////////////
 
 // resampler.c

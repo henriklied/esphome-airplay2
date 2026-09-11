@@ -1,0 +1,46 @@
+Non-Commercial License
+
+Copyright (c) 2026 Remi Bouteiller
+Copyright (c) 2026 Henrik Lied (ESPHome component port and modifications)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to use,
+copy, modify, and distribute the Software for non-commercial purposes only,
+subject to the following conditions:
+
+1. The Software may not be used for commercial purposes without prior written
+   permission from the copyright holder. For commercial licensing, contact
+   bouteiller.remi@gmail.com.
+
+2. The above copyright notice and this permission notice shall be included in
+   all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+-------------------------------------------------------------------------------
+
+Why this license and not an open-source one
+
+The AirPlay 2 protocol logic in this repository -- HomeKit pairing, the RTSP
+control plane, the audio pipeline and the playout timing engine -- is a port of
+rbouteiller/airplay-esp32 (https://github.com/rbouteiller/airplay-esp32), which
+is published under the Non-Commercial License reproduced above. A derivative
+work cannot grant rights its source did not grant, so this repository carries
+the same terms. It is not OSI-approved open source, and it cannot be
+relicensed under MIT or Apache-2.0 without the upstream author's permission.
+
+Practical consequences:
+
+  * Personal and hobby use, modification and redistribution are permitted.
+  * Commercial use -- selling devices with this firmware, or shipping it in a
+    product -- requires written permission from Remi Bouteiller.
+  * This component cannot be merged into the ESPHome monorepo, which is
+    permissively licensed. See components/airplay_receiver/UPSTREAMING.md.
+
+Third-party components carry their own licenses; see THIRD-PARTY-NOTICES.md.
