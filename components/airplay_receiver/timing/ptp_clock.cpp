@@ -146,6 +146,12 @@ static const char *const TAG = "airplay_ptp";
 #define PTP_UNLOCKED_STATUS_MS     5000
 #define PTP_UNLOCKED_STATUS_BUDGET 6
 
+// How long a ptp_clock_notify_playing_unlocked() call keeps reporting alive.
+// The audio path renews it at render rate (~125/s), so this only has to
+// outlive a render loop that has stopped -- i.e. the stream ending, at which
+// point reporting must lapse back to the budget so an idle board goes quiet.
+#define PTP_STALL_NOTICE_TTL_MS 2000
+
 // PTP state
 namespace {
 struct PtpState {
@@ -202,11 +208,20 @@ struct PtpState {
   uint32_t last_event_packet_ms = 0;
   uint32_t last_general_packet_ms = 0;
   uint32_t socket_rebuilds = 0;
-  uint32_t rebuilds_since_rx = 0;
+  // Rebuilds this port has not yet received anything after, counted per port
+  // and only for the port that was actually silent when the rebuild ran.  A
+  // single shared counter made an ANNOUNCE on a healthy general port announce
+  // recovery of a still-deaf event socket, which it did twice during the
+  // 2026-09-09 incident while the board stayed silent.
+  uint32_t event_rebuilds_since_rx = 0;
+  uint32_t general_rebuilds_since_rx = 0;
   uint32_t last_filter_report_ms = 0;
   uint32_t rejected_at_last_report = 0;
   uint32_t last_status_report_ms = 0;
   uint32_t status_budget = 0;
+  // Written by the audio task, read by ptp_task. A lone 32-bit store, so a
+  // torn read is impossible; the worst a race costs is one report.
+  volatile uint32_t stall_notice_ms = 0;
 };
 PtpState ptp{};
 }  // namespace
@@ -548,19 +563,27 @@ static void rebuild_ptp_sockets(void) {
   ptp.event_socket = create_ptp_socket(PTP_EVENT_PORT);
   ptp.general_socket = create_ptp_socket(PTP_GENERAL_PORT);
   ptp.socket_rebuilds++;
-  ptp.rebuilds_since_rx++;
 }
 
 // Record any datagram, before filtering.  Receiving something proves the join
-// is live, so this is also where a completed recovery is reported: logging it
-// here (rather than at each rebuild) keeps an idle board -- no sender, hence no
-// master, hence no traffic -- from emitting a line every 30 s forever, while
-// still leaving evidence when a rebuild actually fixed something.
+// is live on THAT port, so this is also where a completed recovery is
+// reported: logging it here (rather than at each rebuild) keeps an idle board
+// -- no sender, hence no master, hence no traffic -- from emitting a line
+// every 30 s forever, while still leaving evidence when a rebuild actually
+// fixed something.
+//
+// The port split is the whole point.  SYNC arrives only on the event port and
+// FOLLOW_UP/ANNOUNCE only on the general port, so recovery of one says nothing
+// about the other; claiming it did turned a still-deaf event socket into a
+// "recovered" line every 30 s.
 static void note_ptp_packet(uint32_t now_ms, bool is_event_port) {
-  if (ptp.rebuilds_since_rx > 0) {
-    ESP_LOGI(TAG, "PTP receive path recovered after %lu socket rebuild(s)",
-             (unsigned long) ptp.rebuilds_since_rx);
-    ptp.rebuilds_since_rx = 0;
+  uint32_t &rebuilds_since_rx =
+      is_event_port ? ptp.event_rebuilds_since_rx : ptp.general_rebuilds_since_rx;
+  if (rebuilds_since_rx > 0) {
+    ESP_LOGI(TAG, "PTP %s port receiving again after %lu socket rebuild(s)",
+             is_event_port ? "event" : "general",
+             (unsigned long) rebuilds_since_rx);
+    rebuilds_since_rx = 0;
   }
   if (is_event_port) {
     ptp.last_event_packet_ms = now_ms;
@@ -582,11 +605,23 @@ static void check_ptp_rx_health(uint32_t now_ms) {
   const uint32_t quiet_event_ms = now_ms - ptp.last_event_packet_ms;
   const uint32_t quiet_general_ms = now_ms - ptp.last_general_packet_ms;
 
-  if (!ptp.locked && ptp.status_budget > 0 &&
+  // Reporting is allowed either from the session-start budget or for as long
+  // as the audio path keeps saying it is trying to play without a clock. The
+  // budget alone went dark ~30 s into a wedge that lasted minutes; the notice
+  // alone would say nothing about a session that never reached playback.
+  const uint32_t stall_notice_ms = ptp.stall_notice_ms;
+  const bool playing_unlocked =
+      stall_notice_ms != 0 &&
+      (now_ms - stall_notice_ms) < PTP_STALL_NOTICE_TTL_MS;
+  const bool may_report = ptp.status_budget > 0 || playing_unlocked;
+
+  if (!ptp.locked && may_report &&
       (ptp.last_status_report_ms == 0 ||
        (now_ms - ptp.last_status_report_ms) >= PTP_UNLOCKED_STATUS_MS)) {
     ptp.last_status_report_ms = now_ms;
-    ptp.status_budget--;
+    if (ptp.status_budget > 0) {
+      ptp.status_budget--;
+    }
     // sync=0 announce=0 with a master pinned means the SENDER stopped sending,
     // not that this board went deaf -- the counters are what tell those apart.
     ESP_LOGI(TAG,
@@ -630,11 +665,21 @@ static void check_ptp_rx_health(uint32_t now_ms) {
     return;
   }
 
+  // Credit the rebuild only to the port that was actually silent, so the
+  // recovery report in note_ptp_packet() cannot be raised by traffic on the
+  // port that never stopped.
+  if (quiet_event_ms >= PTP_RX_SILENCE_TIMEOUT_MS) {
+    ptp.event_rebuilds_since_rx++;
+  }
+  if (quiet_general_ms >= PTP_RX_SILENCE_TIMEOUT_MS) {
+    ptp.general_rebuilds_since_rx++;
+  }
+
   // Assume the multicast join is gone on at least one socket; both are rebuilt
   // because they share the group and the cost is trivial.
   // Quiet once the evidence budget is spent, so an idle board does not log a
   // line every 30 s forever.
-  if (ptp.status_budget > 0) {
+  if (may_report) {
     ESP_LOGI(TAG,
              "PTP socket quiet (event=%lu ms general=%lu ms), rebuilding "
              "(rebuild #%lu)",
@@ -893,9 +938,38 @@ void ptp_clock_set_master_clock_id(uint64_t clock_id) {
 
 uint64_t ptp_clock_get_master_clock_id(void) { return ptp.expected_clock_id; }
 
+void ptp_clock_get_health(ptp_health_t *health) {
+  if (health == nullptr) {
+    return;
+  }
+
+  const uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+  // Read through ptp_clock_is_locked() rather than ptp.locked so the caller
+  // sees the same LOCK_TIMEOUT_MS decay the audio path sees; the flag alone
+  // stays true until something asks.
+  health->locked = ptp_clock_is_locked();
+  health->sync_count = ptp.sync_count;
+  health->announce_count = ptp.announce_count;
+  health->rejected_master_count = ptp.rejected_master_count;
+  health->sample_count = ptp.sample_count;
+  health->socket_rebuilds = ptp.socket_rebuilds;
+  health->quiet_event_ms = ptp.last_event_packet_ms == 0
+                               ? UINT32_MAX
+                               : now_ms - ptp.last_event_packet_ms;
+  health->quiet_general_ms = ptp.last_general_packet_ms == 0
+                                 ? UINT32_MAX
+                                 : now_ms - ptp.last_general_packet_ms;
+  health->master_clock_id = ptp.expected_clock_id;
+}
+
 void ptp_clock_notify_session_start(void) {
   ptp.status_budget = PTP_UNLOCKED_STATUS_BUDGET;
   ptp.last_status_report_ms = 0;
+}
+
+void ptp_clock_notify_playing_unlocked(void) {
+  // Called from the audio task at render rate; keep it to one store.
+  ptp.stall_notice_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
 }
 
 void ptp_clock_get_stats(ptp_stats_t *stats) {

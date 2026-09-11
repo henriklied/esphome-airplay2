@@ -290,8 +290,18 @@ static bool buffered_wait_for_task_stopped(audio_receiver_state_t *state,
 static esp_err_t buffered_start(audio_stream_t *stream, uint16_t port) {
   audio_receiver_state_t *state = audio_stream_state(stream);
   if (stream->running) {
-    ESP_LOGI(TAG, "Buffered audio already running, continuing");
-    return ESP_OK;
+    if (state->buffered_port == port) {
+      ESP_LOGI(TAG, "Buffered audio already running on port %u, continuing",
+               (unsigned) port);
+      return ESP_OK;
+    }
+    // Serving a port we are not bound to is the silent-takeover bug: the
+    // sender connects to the advertised port, nothing answers, and the stream
+    // wedges with no audio and no error.  The caller stops the stream before
+    // rebinding; refuse rather than report success on the wrong port.
+    ESP_LOGE(TAG, "Buffered audio bound to %u, asked to serve %u",
+             (unsigned) state->buffered_port, (unsigned) port);
+    return ESP_ERR_INVALID_STATE;
   }
   if (state->buffered_task_handle) {
     ESP_LOGW(TAG, "Buffered audio task still stopping, waiting");

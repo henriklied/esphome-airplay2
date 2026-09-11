@@ -181,6 +181,8 @@ static void audio_receiver_reset_engine_v2(void) {
   (void)audio_engine_v2_begin_epoch(&receiver.engine_v2, esp_timer_get_time());
   receiver.aac_diag_rtp_valid = false;
   receiver.engine_v2_anchor_pending = false;
+  receiver.engine_v2_anchor_pending_since_us = 0;
+  receiver.engine_v2_anchor_local_fallback = false;
 }
 
 // Local -> sender clock offset, and whether that clock is actually locked.
@@ -209,21 +211,92 @@ static int64_t audio_receiver_network_offset_ns(bool *locked) {
                                             : ntp_clock_get_offset_ns();
 }
 
+// How long to wait for a network clock before playing on the board's own.
+// Upstream's audio_timing.c waits one second and then plays via SYNC_MODE_NONE
+// ("use local anchor time"); this port replaced that with an indefinite wait,
+// which is why a sender that stops emitting PTP SYNC silences the speaker for
+// as long as it keeps streaming.  Same budget, same reasoning.
+#define ENGINE_V2_LOCAL_ANCHOR_AFTER_US 1000000
+
+// Publish the pending anchor against the board's own clock.
+//
+// While no clock is locked audio_receiver_network_offset_ns() returns 0, so
+// the scheduler's "network" domain IS the local playout clock.  The sender's
+// anchor timestamp cannot be used in it -- it belongs to a PTP/NTP timeline
+// whose offset is exactly what is missing -- but the local instant the anchor
+// arrived can: treating that instant as the anchor's playout time assumes the
+// anchor described the moment it was received, which is wrong by its lead
+// (normally 200-800 ms) and by nothing else.  That error is added latency, not
+// drift, and the drift servo closes the rest of the loop from there.
+//
+// The cost is group sync for this session: two receivers running on their own
+// crystals will not stay aligned.  A speaker that plays alone and slightly
+// late beats a speaker that plays nothing.
+static bool audio_receiver_arm_local_clock_anchor(void) {
+  if (audio_timeline_count(&receiver.engine_v2.timeline) == 0U) {
+    return false;
+  }
+  const int64_t anchor_local_ns = receiver.timing.anchor_local_time_ns;
+  if (anchor_local_ns <= 0) {
+    return false;
+  }
+  return audio_engine_v2_set_anchor(&receiver.engine_v2,
+                                    receiver.engine_v2_anchor_rtp,
+                                    (uint64_t)anchor_local_ns,
+                                    receiver.engine_v2_playout_offset_ns);
+}
+
 // Publish the pending anchor once a network clock is usable.  Before the first
 // lock the offset is 0, which would place the anchor days away from local time
 // and wrap the int32 RTP delta into a meaningless position.
 // Retried from the playback task; re-arming with identical values is a no-op.
+//
+// The anchor stays pending after a local-clock fallback so that a lock arriving
+// later still replaces it with the sender's own, which is what restores group
+// sync.
 static void audio_receiver_arm_engine_v2_anchor(void) {
   bool locked = false;
   (void)audio_receiver_network_offset_ns(&locked);
-  if (!receiver.engine_v2_anchor_pending || !locked) {
+  if (!receiver.engine_v2_anchor_pending) {
     return;
   }
-  if (audio_engine_v2_set_anchor(&receiver.engine_v2,
-                                 receiver.engine_v2_anchor_rtp,
-                                 receiver.engine_v2_anchor_network_ns,
-                                 receiver.engine_v2_playout_offset_ns)) {
-    receiver.engine_v2_anchor_pending = false;
+
+  if (locked) {
+    if (audio_engine_v2_set_anchor(&receiver.engine_v2,
+                                   receiver.engine_v2_anchor_rtp,
+                                   receiver.engine_v2_anchor_network_ns,
+                                   receiver.engine_v2_playout_offset_ns)) {
+      if (receiver.engine_v2_anchor_local_fallback) {
+        ESP_LOGI(TAG, "Network clock locked: leaving the local-clock anchor");
+      }
+      receiver.engine_v2_anchor_pending = false;
+      receiver.engine_v2_anchor_local_fallback = false;
+    }
+    return;
+  }
+
+  // Unlocked and playing is the state the PTP diagnostics exist for, and the
+  // one their session-start budget used to run out during.
+  if (receiver.timing.playing && receiver.engine_v2_anchor_uses_ptp) {
+    ptp_clock_notify_playing_unlocked();
+  }
+
+  if (receiver.engine_v2_anchor_local_fallback ||
+      receiver.engine_v2_anchor_pending_since_us == 0) {
+    return;
+  }
+  const int64_t waited_us =
+      esp_timer_get_time() - receiver.engine_v2_anchor_pending_since_us;
+  if (waited_us < ENGINE_V2_LOCAL_ANCHOR_AFTER_US) {
+    return;
+  }
+  if (audio_receiver_arm_local_clock_anchor()) {
+    receiver.engine_v2_anchor_local_fallback = true;
+    ESP_LOGW(TAG,
+             "No %s lock after %lld ms: playing on the local clock, "
+             "unsynchronised with other receivers",
+             receiver.engine_v2_anchor_uses_ptp ? "PTP" : "NTP",
+             (long long)(waited_us / 1000));
   }
 }
 
@@ -498,11 +571,19 @@ void audio_receiver_set_anchor_time(uint64_t clock_id, uint64_t network_time_ns,
     receiver.engine_v2_playout_offset_ns =
         ((int64_t)receiver.timing.playout_latency_samples * 1000000000LL) /
         sample_rate;
+    if (!receiver.engine_v2_anchor_pending) {
+      receiver.engine_v2_anchor_pending_since_us = esp_timer_get_time();
+    }
     receiver.engine_v2_anchor_pending = true;
     audio_receiver_arm_engine_v2_anchor();
-    if (receiver.engine_v2_anchor_pending) {
+    if (receiver.engine_v2_anchor_pending &&
+        !receiver.engine_v2_anchor_local_fallback) {
       // No usable clock yet.  Keep the buffered PCM and wait rather than
       // discarding a full pre-buffer.
+      //
+      // Not once a local-clock anchor is running: the sender re-anchors about
+      // once a second, and resetting the clock map on each of those would tear
+      // down the very playback the fallback just started.
       audio_engine_v2_wait_for_anchor(&receiver.engine_v2,
                                       esp_timer_get_time());
     }
@@ -546,6 +627,29 @@ void audio_receiver_set_playing(bool playing) {
 void audio_receiver_reset_timing(void) { audio_timing_reset(&receiver.timing); }
 
 bool audio_receiver_is_playing(void) { return receiver.timing.playing; }
+
+void audio_receiver_get_sched_diag(audio_sched_diag_t *diag) {
+  if (diag == nullptr) {
+    return;
+  }
+
+  if (!engine_v2_active()) {
+    *diag = (audio_sched_diag_t){};
+    diag->state = "n/a";
+    diag->wait_reason = "n/a";
+    return;
+  }
+
+  const audio_engine_v2_t *engine = &receiver.engine_v2;
+  diag->engine_active = true;
+  diag->playing = engine->playing;
+  diag->clock_map_valid = engine->clock_map.valid;
+  diag->state = audio_scheduler_state_name(engine->scheduler.state);
+  diag->wait_reason =
+      audio_scheduler_wait_reason_name(engine->scheduler.wait_reason);
+  diag->conceal_events = engine->conceal_events;
+  diag->concealed_samples = engine->concealed_samples;
+}
 
 void audio_receiver_set_stream_type(audio_stream_type_t type) {
   if (!receiver.realtime_stream || !receiver.buffered_stream) {
@@ -624,9 +728,28 @@ esp_err_t audio_receiver_start_buffered(uint16_t tcp_port) {
     return ESP_FAIL;
   }
 
-  // Buffered streams use a fixed port, no need to restart if running
+  // "Buffered streams use a fixed port" was never true.  The transport
+  // allocates conn->buffered_port per RTSP connection (alloc_stream_port() in
+  // handle_setup), so a second sender that supersedes the first is advertised
+  // a port this board is not listening on: the listener stays bound to the
+  // previous session's port, the new sender's connect is refused, no audio
+  // ever arrives, and the stream sits at blocks=0 with the sender's UI happily
+  // showing "playing".  That is exactly what taking a stream over from another
+  // device did, every time; stopping the first device made it work because
+  // TEARDOWN cleared `running` and the next SETUP could bind.
+  //
+  // A repeat SETUP from the same sender still must not churn the listener --
+  // that would drop a live connection -- so only an unchanged port skips the
+  // restart.  The realtime path has always restarted unconditionally.
   if (receiver.stream->running) {
-    return ESP_OK;
+    if (receiver.buffered_port == tcp_port) {
+      return ESP_OK;
+    }
+    ESP_LOGI(TAG, "Buffered port %u -> %u: restarting the listener",
+             (unsigned)receiver.buffered_port, (unsigned)tcp_port);
+    if (receiver.stream->ops->stop) {
+      receiver.stream->ops->stop(receiver.stream);
+    }
   }
 
   // Starting a stream resets all timing state (including pause tracking)

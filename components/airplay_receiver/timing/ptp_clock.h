@@ -120,6 +120,31 @@ void ptp_clock_set_master_clock_id(uint64_t clock_id);
 uint64_t ptp_clock_get_master_clock_id(void);
 
 /**
+ * Receive-path and master-filter health, in the form the diagnostics surface
+ * needs.  Distinct from ptp_stats_t, which is the upstream API and is about
+ * offset quality; this one is about whether the clock is being fed at all.
+ *
+ * quiet_event_ms / quiet_general_ms are the age of the last datagram on each
+ * socket.  They are tracked separately because SYNC arrives only on the event
+ * port and FOLLOW_UP/ANNOUNCE only on the general port, so a deaf event socket
+ * beside a live general one is the failure a single figure cannot show.
+ * UINT32_MAX means the socket has not been seeded yet.
+ */
+typedef struct {
+  bool locked;
+  uint32_t sync_count;
+  uint32_t announce_count;
+  uint32_t rejected_master_count;
+  uint32_t sample_count;
+  uint32_t socket_rebuilds;
+  uint32_t quiet_event_ms;
+  uint32_t quiet_general_ms;
+  uint64_t master_clock_id;
+} ptp_health_t;
+
+void ptp_clock_get_health(ptp_health_t *health);
+
+/**
  * Tell the clock that an AirPlay session is starting, so that if the lock does
  * not follow, the unlocked-state counters get reported.
  *
@@ -128,6 +153,20 @@ uint64_t ptp_clock_get_master_clock_id(void);
  * else re-arms the diagnostics for a session that reuses an existing clock.
  */
 void ptp_clock_notify_session_start(void);
+
+/**
+ * Tell the clock that the audio path is trying to play and still has no
+ * anchor, which is the one situation where the unlocked-state counters must
+ * keep coming.
+ *
+ * The session-start budget is deliberately finite so an idle board never
+ * accumulates log, but that budget runs out after ~30 s -- and a wedge lasts
+ * far longer than that, so the evidence stopped exactly where it was needed.
+ * The audio path calls this on every render that finds an anchor pending with
+ * no usable clock; reporting stays enabled while those calls keep arriving and
+ * lapses back to the budget as soon as they stop.
+ */
+void ptp_clock_notify_playing_unlocked(void);
 
 }  // namespace airplay_receiver
 }  // namespace esphome

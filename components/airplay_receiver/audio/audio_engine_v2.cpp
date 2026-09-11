@@ -552,6 +552,33 @@ size_t audio_engine_v2_render(audio_engine_v2_t *engine,
              engine->concealed_samples, engine->conceal_events, new_conceals,
              new_underruns, new_decode_fail, new_queue_drops, new_epoch_drops,
              new_pcm_inserted);
+  } else if (engine->playing &&
+             engine->scheduler.state != AUDIO_SCHED_PLAYING &&
+             now_us - engine->last_status_log_us >= 1000000LL) {
+    // The counterpart to `playout:`, for the case that line cannot describe:
+    // the sender says PLAY and the scheduler is rendering silence anyway.
+    // Everything that separates the ways that happens is here, because
+    // `wait_reason` is otherwise reachable only from START STALL -- which is
+    // armed inside audio_engine_v2_set_anchor() and so can never fire for a
+    // wedge that has no anchor. WARN, not INFO: the boards run at INFO and a
+    // silent stream is the one thing worth pushing above the telemetry.
+    //
+    // clock_map=0 with reason=WAIT_CLOCK_MAP is a clock fault (no PTP lock);
+    // clock_map=1 with a preroll/fallback reason is a timeline fault and has
+    // nothing to do with PTP.
+    engine->last_status_log_us = now_us;
+    ESP_LOGW(TAG,
+             "stalled: state=%s reason=%s clock_map=%d epoch=%" PRIu32
+             " wanted_rtp=%" PRIu32 " blocks=%u silent=%" PRIu64
+             " starts=%" PRIu64 " fallbacks=%" PRIu64 " concealed=%" PRIu64,
+             audio_scheduler_state_name(engine->scheduler.state),
+             audio_scheduler_wait_reason_name(engine->scheduler.wait_reason),
+             engine->clock_map.valid ? 1 : 0, engine->scheduler.epoch,
+             engine->scheduler.wanted_rtp,
+             (unsigned)audio_timeline_count(&engine->timeline),
+             engine->scheduler.silent_render_calls,
+             engine->scheduler.start_attempts,
+             engine->scheduler.fallback_attempts, engine->concealed_samples);
   }
   return produced;
 }

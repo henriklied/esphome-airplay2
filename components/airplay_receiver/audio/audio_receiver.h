@@ -129,6 +129,31 @@ void audio_receiver_get_stats(audio_stats_t *stats);
 size_t audio_receiver_read(int16_t *buffer, size_t samples);
 
 /**
+ * Scheduler-side diagnostics, named rather than numeric so a log line or an
+ * HA entity can say WHY a board is quiet.
+ *
+ * `state` and `wait_reason` are the one pair that separates the failure modes:
+ * WAIT_CLOCK_MAP means there is no usable clock (a PTP problem), while a
+ * preroll/fallback reason means the clock is fine and the ring is not
+ * playable.  Both are static strings owned by audio_scheduler.
+ *
+ * Before the engine exists, `engine_active` is false and the names read
+ * "n/a" -- an idle board is not a stalled one, and the two must not look
+ * alike.
+ */
+typedef struct {
+  bool engine_active;
+  bool playing;
+  bool clock_map_valid;
+  const char *state;
+  const char *wait_reason;
+  uint64_t conceal_events;
+  uint64_t concealed_samples;
+} audio_sched_diag_t;
+
+void audio_receiver_get_sched_diag(audio_sched_diag_t *diag);
+
+/**
  * Whether the samples from the last audio_receiver_read() were scheduler
  * silence rather than stream audio.
  *

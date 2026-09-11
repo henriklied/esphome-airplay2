@@ -1044,8 +1044,12 @@ static void handle_setup(int socket, RtspConn *conn, const RtspRequest *req, con
       rtsp_send_response(socket, conn, 500, "Internal Error", req->cseq, nullptr, nullptr, 0);
       return;
     }
-    ESP_LOGI(TAG, "SETUP response: type=%lld dataPort=%u controlPort=%u", (long long)stream_type, conn->data_port,
-             conn->control_port);
+    // Log the port actually advertised, not conn->data_port. For a buffered
+    // stream those differ -- the sender is told buffered_port and connects
+    // there over TCP -- and printing the UDP one sends anybody debugging a
+    // buffered session looking for a connection on the wrong port.
+    ESP_LOGI(TAG, "SETUP response: type=%lld %sPort=%u controlPort=%u", (long long)stream_type,
+             buffered ? "tcpData" : "data", ad_port, conn->control_port);
     rtsp_send_response(socket, conn, 200, "OK", req->cseq, "Content-Type: application/x-apple-binary-plist\r\n",
                        (const char *)plist_body, plist_len);
   } else {

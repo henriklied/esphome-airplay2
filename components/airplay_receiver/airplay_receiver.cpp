@@ -3,6 +3,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <string>
+
+#include "timing/ptp_clock.h"
+
+#include "esphome/components/network/util.h"
 
 #include "esphome/core/log.h"
 
@@ -73,29 +78,46 @@ void AirPlayReceiver::setup() {
 }
 
 void AirPlayReceiver::loop() {
+  this->start_ptp_when_network_up_();
   this->transport_.loop();
 
-  // Media-player state/volume are produced from the RTSP task (via the
-  // transport event callback), so publish them from the main loop here to stay
-  // thread-safe. publish_state() must only run on the loop thread, and the
-  // RTSP task only sets desired_state_/state_dirty_ (see airplay_receiver.h).
-  if (!this->audio_ready_) {
+  // publish_state() must run on the main loop; the RTSP task only sets these.
+  // Without this the HA entity freezes at whatever it last showed, which is
+  // worst precisely when something is wrong and the entity is the record.
+  if (this->state_dirty_) {
+    this->state_dirty_ = false;
+    if (this->desired_state_ != media_player::MEDIA_PLAYER_STATE_NONE) {
+      this->state = this->desired_state_;
+    }
+    this->publish_state();
+  }
+}
+
+void AirPlayReceiver::start_ptp_when_network_up_() {
+  if (this->ptp_started_ || !network::is_connected()) {
     return;
   }
-  if (this->state_dirty_) {
-    this->state = this->desired_state_;
-    this->state_dirty_ = false;
-    this->publish_state();
+  // Upstream starts the PTP clock from main.c at service start. This component
+  // has no app_main, and setup() runs at AFTER_CONNECTION -- after the wifi
+  // component's setup(), but association and DHCP are asynchronous, so the
+  // sockets and their IP_ADD_MEMBERSHIP join would be built without an
+  // address. The first loop pass that sees the network up is the earliest
+  // point where they hold.
+  //
+  // Deferring it to the first RTSP session instead (SETUP/RECORD/SETPEERS)
+  // costs ~3.5 s of the first play after a reboot -- sockets, IGMP join and
+  // waiting for the first SYNC -- and leaves the receive-path watchdog stopped
+  // between sessions, which is exactly when a switch prunes the group.
+  // ensure_ptp_started() stays as it is: it still re-arms the per-session
+  // diagnostics, and ptp_clock_init() is idempotent.
+  const esp_err_t err = ptp_clock_init();
+  if (err == ESP_OK) {
+    this->ptp_started_ = true;
+    ESP_LOGI(TAG, "PTP clock started (network up)");
+  } else if (err == ESP_ERR_INVALID_STATE) {
+    this->ptp_started_ = true;
   }
-  int volume_pct = airplay_audio_get_volume();
-  if (volume_pct < 0) {
-    volume_pct = 0;
-  }
-  float volume = static_cast<float>(volume_pct) / 100.0f;
-  if (volume != this->volume) {
-    this->volume = volume;
-    this->publish_state();
-  }
+  // Anything else means the sockets could not be built yet; retry next loop.
 }
 
 void AirPlayReceiver::dump_config() {
@@ -219,6 +241,65 @@ void AirPlayReceiver::warn_if_dsp_clips_() {
              boost_db, this->dsp_preamp_db_, headroom_db, -boost_db);
   }
 }
+
+bool AirPlayReceiver::diag_is_stalled() {
+  audio_sched_diag_t diag{};
+  audio_receiver_get_sched_diag(&diag);
+  // `playing` is the sender's intent; an idle or paused board is quiet on
+  // purpose and must not read as a fault.
+  return diag.engine_active && diag.playing &&
+         std::string(diag.state) != "PLAYING";
+}
+
+std::string AirPlayReceiver::diag_sched_state() {
+  audio_sched_diag_t diag{};
+  audio_receiver_get_sched_diag(&diag);
+  return diag.state;
+}
+
+std::string AirPlayReceiver::diag_wait_reason() {
+  audio_sched_diag_t diag{};
+  audio_receiver_get_sched_diag(&diag);
+  return diag.wait_reason;
+}
+
+bool AirPlayReceiver::diag_ptp_locked() {
+  ptp_health_t health{};
+  ptp_clock_get_health(&health);
+  return health.locked;
+}
+
+uint32_t AirPlayReceiver::diag_ptp_rejected() {
+  ptp_health_t health{};
+  ptp_clock_get_health(&health);
+  return health.rejected_master_count;
+}
+
+uint32_t AirPlayReceiver::diag_ptp_socket_rebuilds() {
+  ptp_health_t health{};
+  ptp_clock_get_health(&health);
+  return health.socket_rebuilds;
+}
+
+uint32_t AirPlayReceiver::diag_ptp_quiet_event_ms() {
+  ptp_health_t health{};
+  ptp_clock_get_health(&health);
+  return health.quiet_event_ms;
+}
+
+uint32_t AirPlayReceiver::diag_ptp_quiet_general_ms() {
+  ptp_health_t health{};
+  ptp_clock_get_health(&health);
+  return health.quiet_general_ms;
+}
+
+uint32_t AirPlayReceiver::diag_holes() {
+  audio_sched_diag_t diag{};
+  audio_receiver_get_sched_diag(&diag);
+  return (uint32_t) diag.conceal_events;
+}
+
+uint32_t AirPlayReceiver::diag_underruns() { return audio_output_get_underruns(); }
 
 media_player::MediaPlayerTraits AirPlayReceiver::get_traits() {
   auto traits = media_player::MediaPlayerTraits();

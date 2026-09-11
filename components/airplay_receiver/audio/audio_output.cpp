@@ -114,6 +114,11 @@ static int32_t g_volume_q15 = 32768;  // unity
 // outright instead of sliding up to it from the previous session's gain.
 static int32_t g_volume_ramp_q15 = -1;
 
+// Wall-clock of the last frame of real audio handed to I2S, and how long after
+// it the DMA ring can still be holding some. Used to decide whether a flush has
+// anything to purge (see the flush branch in playback_task).
+static int64_t g_last_audio_submit_us = 0;
+
 // Amp idle power-down watchdog (audio_output.h amp_idle_timeout_ms). When the
 // stream is active but produces no PCM frames for the whole timeout (pause or
 // sustained underflow), the amp-enable line is de-asserted to mute/power down
@@ -193,6 +198,30 @@ static void amp_set(bool on) {
   }
   int level = g_config.amp_enable_inverted ? (on ? 0 : 1) : (on ? 1 : 0);
   gpio_set_level((gpio_num_t) g_config.amp_enable_gpio, level);
+}
+
+// ---------------------------------------------------------------------------
+// Flush
+// ---------------------------------------------------------------------------
+// Purging the DMA ring means disabling the I2S channel, which stops BCLK and
+// LRCLK. A PCM5100 driven without MCLK reacts to losing its clocks by muting
+// its output stage and un-mutes when they return, so every purge is an audible
+// click through the amp -- and iOS fires a burst of pause/play/flush while a
+// session is being set up, which is the "click click click" heard on connect.
+//
+// The ring holds ~46 ms, so a flush that arrives when nothing but silence has
+// gone out for longer than that has no stale audio to drop and the click is the
+// entire effect. Erring toward purging costs a click; erring the other way
+// leaves a tail of the previous track, so the guard is generous.
+static constexpr int64_t FLUSH_RING_DRAIN_MARGIN_US = 20000;
+
+static bool ring_may_hold_audio() {
+  if (g_last_audio_submit_us == 0 || g_output_rate == 0) {
+    return false;
+  }
+  const int64_t drain_us =
+      (int64_t) ((uint64_t) I2S_DMA_DESC_NUM * I2S_DMA_FRAME_NUM * 1000000ULL / g_output_rate);
+  return esp_timer_get_time() - g_last_audio_submit_us < drain_us + FLUSH_RING_DRAIN_MARGIN_US;
 }
 
 // ---------------------------------------------------------------------------
@@ -304,9 +333,16 @@ static void playback_task(void *arg) {
       // Biquad state from the old stream position played into the new one is a
       // thump; the filters must restart from rest alongside the resampler.
       audio_dsp_reset();
-      cursor_reset();
-      i2s_channel_disable(g_tx_handle);
-      i2s_channel_enable(g_tx_handle);
+      // Only stop the clocks when there is really a tail to drop (see
+      // ring_may_hold_audio). The cursor reset belongs with the purge: it is
+      // correct precisely because the purge discards submitted-but-unsent
+      // frames, and doing it without one would make the queue read empty while
+      // the DMA still holds frames.
+      if (ring_may_hold_audio()) {
+        cursor_reset();
+        i2s_channel_disable(g_tx_handle);
+        i2s_channel_enable(g_tx_handle);
+      }
     }
 
     size_t frames = audio_receiver_read(pcm, FRAME_SAMPLES + 1);
@@ -327,6 +363,7 @@ static void playback_task(void *arg) {
         g_amp_idle_muted = false;
       }
       g_amp_idle_since_us = 0;
+      g_last_audio_submit_us = esp_timer_get_time();
     } else if (g_amp_idle_timeout_ms > 0) {
       // Silent for the full timeout -- a pause, a sustained stall, or a wedge.
       if (g_amp_idle_since_us == 0) {
@@ -490,6 +527,7 @@ void audio_output_start(void) {
   g_volume_ramp_q15 = -1;
   g_amp_idle_since_us = 0;
   g_amp_idle_muted = false;
+  g_last_audio_submit_us = 0;
   audio_dsp_reset();
   amp_set(true);
   xTaskCreatePinnedToCore(playback_task, "audio_play", 4096, nullptr, AIRPLAY_AUDIO_PLAYBACK_TASK_PRIORITY,
@@ -507,6 +545,7 @@ void audio_output_stop(void) {
   }
   g_amp_idle_since_us = 0;
   g_amp_idle_muted = false;
+  g_last_audio_submit_us = 0;
   amp_set(false);
   if (g_playback_task != nullptr) {
     ESP_LOGW(TAG, "Playback task did not exit within timeout");

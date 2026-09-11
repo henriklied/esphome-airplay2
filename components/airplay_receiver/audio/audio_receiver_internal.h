@@ -117,6 +117,15 @@ typedef struct audio_receiver_state {
   uint32_t engine_v2_anchor_rtp;
   uint64_t engine_v2_anchor_network_ns;
   int64_t engine_v2_playout_offset_ns;
+  // Local time at which the current run of unpublished anchors began. The
+  // sender re-anchors about once a second, so this is set when the run starts
+  // and left alone afterwards; resetting it per anchor would race the
+  // fallback deadline it exists to measure.
+  int64_t engine_v2_anchor_pending_since_us;
+  // The published anchor is the board's own clock, not the sender's, because
+  // no network clock locked in time. Playback is unsynchronised with any other
+  // receiver until a lock arrives and the real anchor replaces it.
+  bool engine_v2_anchor_local_fallback;
 
   audio_stats_t stats;
 

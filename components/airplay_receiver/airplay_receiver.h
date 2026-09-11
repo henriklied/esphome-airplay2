@@ -92,6 +92,38 @@ class AirPlayReceiver : public Component, public media_player::MediaPlayer {
 
   uint32_t get_buffer_size() const { return this->buffer_size_; }
 
+  // ---- Diagnostics, for the HA entities in airplay-diagnostics.yaml ----
+  //
+  // Every one of these is a state that changes rarely or a counter that only
+  // moves during a fault, which is what makes them safe to record: HA writes a
+  // row on change, so a healthy board costs nothing and an incident leaves a
+  // timestamped trail. Do NOT add anything here that varies continuously --
+  // playout error, drift, buffer depth -- that belongs in the log stream.
+
+  /// The fault itself: the sender says play and the scheduler renders silence.
+  /// False while idle or deliberately paused; those are not stalls.
+  bool diag_is_stalled();
+  /// Scheduler state and the reason it is not playing, as short names.
+  /// WAIT_CLOCK_MAP separates a clock fault from a timeline fault.
+  std::string diag_sched_state();
+  std::string diag_wait_reason();
+
+  bool diag_ptp_locked();
+  /// SYNC/FOLLOW_UP dropped by the master filter. Climbs only when the anchor's
+  /// clock_id disagrees with the clock actually on the wire.
+  uint32_t diag_ptp_rejected();
+  /// Multicast re-joins performed by the receive-path watchdog.
+  uint32_t diag_ptp_socket_rebuilds();
+  /// Age of the last datagram on each PTP socket. Tracked apart because a deaf
+  /// event socket beside a live general one is invisible in either alone.
+  uint32_t diag_ptp_quiet_event_ms();
+  uint32_t diag_ptp_quiet_general_ms();
+
+  /// Concealment events (the `holes` figure in the playout line) and I2S
+  /// underruns. Both monotonic; both flat on a healthy board.
+  uint32_t diag_holes();
+  uint32_t diag_underruns();
+
   // ---- media_player::MediaPlayer implementations ----
 
   media_player::MediaPlayerTraits get_traits() override;
@@ -107,7 +139,13 @@ class AirPlayReceiver : public Component, public media_player::MediaPlayer {
   /// MediaPlayer command dispatch (HA service / automations).
   void control(const media_player::MediaPlayerCall &call) override;
 
+  /// Bring the PTP clock up on the first loop pass with a network address,
+  /// rather than on the first RTSP session. Idempotent; retries until the
+  /// sockets bind.
+  void start_ptp_when_network_up_();
+
   uint32_t buffer_size_{1000000};
+  bool ptp_started_{false};
 
   // Audio board wiring (I2S PCM5100 + amp-enable).
   int i2s_bclk_pin_{-1};
