@@ -1,0 +1,108 @@
+# A 20x4 character LCD showing what the board is doing.
+#
+# HD44780 on a PCF8574 I2C backpack — the $3 module, two wires. For an SSD1306
+# OLED instead, swap the `display:` platform for `ssd1306_i2c` and use
+# `it.printf(x, y, id(font), ...)`; everything read out of the component below
+# is the same.
+#
+# What is worth putting on a display, and why:
+#
+#   line 1  track title   the sender pushes DAAP metadata on every track
+#                         change, so this is the one line that moves
+#   line 2  state         idle / playing / paused, mirrored from the sender
+#   line 3  volume        the phone's slider and Home Assistant both land here
+#   line 4  diagnostics   PTP lock and the concealment counter, which is where
+#                         a wifi problem shows up before you can hear it
+#
+# The title comes from airplay_audio_get_track_title(), declared extern "C" in
+# the component's audio/audio_control.h. This ESPHome media_player has no
+# title field of its own, so the audio layer holds it.
+
+esphome:
+  name: airplay-office
+  friendly_name: Office
+  min_version: 2025.1.0
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  cpu_frequency: 240MHz
+  flash_size: 8MB
+  flash_mode: dio
+  flash_frequency: 80MHz
+  framework:
+    type: esp-idf
+    version: recommended
+  toolchain: esp-idf
+  partitions: ../partitions.csv
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+api:
+  # No `encryption:` here, and that is not an oversight. API encryption pulls in
+  # esphome/noise-c, which bundles its own libsodium; the component needs
+  # espressif/libsodium for the pairing crypto, and the IDF component manager
+  # refuses to choose between two components both claiming to provide libsodium.
+  # The build fails at CMake configure with "Can't decide which one to pick".
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+logger:
+  level: INFO
+
+external_components:
+  - source: github://henriklied/airplay2-esphome
+    components: [airplay_receiver]
+
+airplay_receiver:
+  id: airplay
+  name: "Office"
+  i2s_bclk_pin: 14
+  i2s_lrclk_pin: 15
+  i2s_dout_pin: 16
+  amp_enable_pin: 17
+  sample_rate: 44100
+  amp_idle_timeout: 60
+
+i2c:
+  sda: 8
+  scl: 9
+  frequency: 100kHz
+
+display:
+  - platform: lcd_pcf8574
+    id: lcd
+    dimensions: 20x4
+    address: 0x27
+    # Once a second. The character LCD is slow to write and nothing on it
+    # changes faster than that.
+    update_interval: 1s
+    lambda: |-
+      const char *title = airplay_audio_get_track_title();
+      it.printf(0, 0, "%-20.20s", (title != nullptr && title[0] != '\0') ? title : "AirPlay");
+
+      it.printf(0, 1, "%-20.20s", media_player::media_player_state_to_string(id(airplay).state));
+
+      // is_muted() is separate from volume: muting sets the engine gain to 0
+      // but keeps the volume the sender last asked for, so unmute restores it.
+      if (id(airplay).is_muted()) {
+        it.print(0, 2, "Volume  muted");
+      } else {
+        it.printf(0, 2, "Volume  %3d%%", (int) lroundf(id(airplay).volume * 100.0f));
+      }
+
+      // PTP lock is the single most useful thing to see: without it the
+      // scheduler has no timeline and renders silence while the sender still
+      // shows "playing". `holes` counts concealed packets — flat on a healthy
+      // board, climbing on a congested network.
+      it.printf(0, 3, "PTP %-4s holes %5u",
+                id(airplay).diag_ptp_locked() ? "lock" : "----",
+                (unsigned) id(airplay).diag_holes());

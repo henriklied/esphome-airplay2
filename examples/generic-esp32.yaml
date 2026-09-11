@@ -1,0 +1,64 @@
+# Generic ESP32 + PCM5102A breakout — the cheap build.
+#
+# A WROVER-class ESP32 (PSRAM is not optional) and a PCM5102A I2S DAC board,
+# about $10 together. No amplifier, so line-out into powered speakers or an
+# existing amp; `amp_enable_pin` is left unset.
+#
+# The component picks a smaller memory profile automatically on this variant:
+# a 200-frame PCM ring instead of 1000, and a 32 KiB internal reserve. You get
+# less tolerance for wifi hiccups than on an S3, which shows up as occasional
+# concealment on a congested 2.4 GHz network.
+#
+# Wire the PCM5102A as: SCK to GND (it self-generates), FLT/DEMP/XSMT per the
+# breakout's defaults, and VIN to 3V3.
+
+esphome:
+  name: airplay-kitchen
+  friendly_name: Kitchen
+  min_version: 2025.1.0
+
+esp32:
+  board: esp-wrover-kit
+  variant: esp32
+  cpu_frequency: 240MHz
+  framework:
+    type: esp-idf
+    version: recommended
+  toolchain: esp-idf
+  # No `partitions:` here — this config builds to 1.11 MB, 60% of the 1.79 MB
+  # OTA slot in ESPHome's default table for a 4 MB board. An 8 MB board can use
+  # the repo's partitions.csv for more headroom.
+
+psram:
+  mode: quad
+  speed: 40MHz
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+api:
+  # No `encryption:` here, and that is not an oversight. API encryption pulls in
+  # esphome/noise-c, which bundles its own libsodium; the component needs
+  # espressif/libsodium for the pairing crypto, and the IDF component manager
+  # refuses to choose between two components both claiming to provide libsodium.
+  # The build fails at CMake configure with "Can't decide which one to pick".
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+logger:
+  level: INFO
+
+external_components:
+  - source: github://henriklied/airplay2-esphome
+    components: [airplay_receiver]
+
+airplay_receiver:
+  id: airplay
+  name: "Kitchen"
+  i2s_bclk_pin: 26
+  i2s_lrclk_pin: 25
+  i2s_dout_pin: 22
+  sample_rate: 44100

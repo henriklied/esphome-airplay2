@@ -1,0 +1,71 @@
+# Sonocotta Amped-ESP32-S3 — the reference board.
+#
+# ESP32-S3-WROOM-1-N8R8 (8 MB flash, 8 MB octal PSRAM) with an onboard
+# PCM5100 DAC and a TPA311x amplifier. This is the config the component is
+# developed and measured against.
+#
+# Copy it next to your secrets.yaml, fetch partitions.csv from the repo root,
+# and flash. The board appears in Control Center within a few seconds of boot.
+
+esphome:
+  name: airplay-living-room
+  friendly_name: Living Room
+  min_version: 2025.1.0
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  cpu_frequency: 240MHz
+  flash_size: 8MB
+  # N8R8 is quad flash + octal PSRAM. `opi` describes the PSRAM, not the
+  # flash, and setting it here produces a board that does not boot.
+  flash_mode: dio
+  flash_frequency: 80MHz
+  framework:
+    type: esp-idf
+    version: recommended
+  toolchain: esp-idf
+  # The default ESPHome layout leaves too little room for two OTA slots once
+  # the codec and crypto libraries are linked in.
+  partitions: ../partitions.csv
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+api:
+  # No `encryption:` here, and that is not an oversight. API encryption pulls in
+  # esphome/noise-c, which bundles its own libsodium; the component needs
+  # espressif/libsodium for the pairing crypto, and the IDF component manager
+  # refuses to choose between two components both claiming to provide libsodium.
+  # The build fails at CMake configure with "Can't decide which one to pick".
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+logger:
+  # The receiver logs a playout line every second at DEBUG. Useful while
+  # bringing a board up, noisy afterwards.
+  level: INFO
+
+external_components:
+  - source: github://henriklied/airplay2-esphome
+    components: [airplay_receiver]
+
+airplay_receiver:
+  id: airplay
+  # The name senders see in Control Center, and the media_player entity name.
+  name: "Living Room"
+  i2s_bclk_pin: 14
+  i2s_lrclk_pin: 15
+  i2s_dout_pin: 16
+  amp_enable_pin: 17
+  sample_rate: 44100
+  # Drop the amp after a minute of silence. The PCM5100 idles near-silent but
+  # the TPA311x hisses, which is audible in a quiet room at night.
+  amp_idle_timeout: 60

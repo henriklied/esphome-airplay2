@@ -1,0 +1,137 @@
+# Physical transport buttons.
+#
+# Three momentary buttons to ground, on an Amped-ESP32-S3 alongside the DAC
+# pins. Pressing play/pause on the box does the same thing as pressing it in
+# Control Center: the command goes back to the sender over RTSP, so the phone's
+# lock screen follows along.
+#
+# Volume repeats while held rather than stepping once per press, which is what
+# anyone who has used a physical volume button expects.
+#
+# One caution on pin choice: the I2S and amp pins are registered with ESPHome's
+# GPIO conflict detection, so reusing one here fails validation rather than
+# producing a board that half-works. Strapping pins (0, 3, 45, 46 on the S3)
+# are the ones to avoid.
+
+esphome:
+  name: airplay-bedroom
+  friendly_name: Bedroom
+  min_version: 2025.1.0
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  cpu_frequency: 240MHz
+  flash_size: 8MB
+  flash_mode: dio
+  flash_frequency: 80MHz
+  framework:
+    type: esp-idf
+    version: recommended
+  toolchain: esp-idf
+  partitions: ../partitions.csv
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+api:
+  # No `encryption:` here, and that is not an oversight. API encryption pulls in
+  # esphome/noise-c, which bundles its own libsodium; the component needs
+  # espressif/libsodium for the pairing crypto, and the IDF component manager
+  # refuses to choose between two components both claiming to provide libsodium.
+  # The build fails at CMake configure with "Can't decide which one to pick".
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+logger:
+  level: INFO
+
+external_components:
+  - source: github://henriklied/airplay2-esphome
+    components: [airplay_receiver]
+
+airplay_receiver:
+  id: airplay
+  name: "Bedroom"
+  i2s_bclk_pin: 14
+  i2s_lrclk_pin: 15
+  i2s_dout_pin: 16
+  amp_enable_pin: 17
+  sample_rate: 44100
+  amp_idle_timeout: 60
+
+binary_sensor:
+  - platform: gpio
+    id: button_play
+    name: "Play/pause button"
+    entity_category: diagnostic
+    pin:
+      number: 4
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    on_click:
+      # Short press toggles playback. Held for a second, it mutes instead —
+      # the useful thing to reach for when the phone rings.
+      - min_length: 20ms
+        max_length: 600ms
+        then:
+          - media_player.toggle: airplay
+      - min_length: 800ms
+        max_length: 3s
+        then:
+          - if:
+              condition:
+                media_player.is_muted: airplay
+              then:
+                - media_player.unmute: airplay
+              else:
+                - media_player.mute: airplay
+
+  - platform: gpio
+    id: button_volume_up
+    name: "Volume up button"
+    entity_category: diagnostic
+    pin:
+      number: 5
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    on_press:
+      then:
+        - while:
+            condition:
+              binary_sensor.is_on: button_volume_up
+            then:
+              - media_player.volume_up: airplay
+              # One 5% step per 200 ms: about three seconds end to end, which
+              # is fast enough to be useful and slow enough to stop on target.
+              - delay: 200ms
+
+  - platform: gpio
+    id: button_volume_down
+    name: "Volume down button"
+    entity_category: diagnostic
+    pin:
+      number: 6
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    on_press:
+      then:
+        - while:
+            condition:
+              binary_sensor.is_on: button_volume_down
+            then:
+              - media_player.volume_down: airplay
+              - delay: 200ms

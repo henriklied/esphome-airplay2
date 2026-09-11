@@ -2,6 +2,7 @@
 .venv/
 __pycache__/
 *.pyc
+.pytest_cache/
 
 # ESPHome build artifacts
 .esphome/
@@ -9,7 +10,8 @@ __pycache__/
 # Secrets — never commit
 secrets.yaml
 
+# Local validation scratch (examples rewritten to a local component source)
+.check/
+
 # Editor / OS
 .DS_Store
-# Test artifacts
-.pytest_cache/

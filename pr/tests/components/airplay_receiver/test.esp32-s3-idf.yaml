@@ -4,24 +4,24 @@
 #
 # In a real upstream PR this file lives at
 #   esphome/tests/components/airplay_receiver/test.esp32-s3-idf.yaml
-# and the component is imported from the esphome monorepo (esphome/components/) —
-# no external_components block is needed there. Here it is a self-contained,
-# esp32-s3-idf build config that exercises the component for CI.
-#
-# NOTE: This is a codegen/reference config. The full `esphome compile` requires
-# the ESP-IDF toolchain (not installed in the dev workspace); `esphome config`
-# and `esphome compile --only-generate` validate the schema and codegen.
+# and the component is imported from the esphome monorepo (esphome/components/),
+# so no external_components block is needed there. That is also why this file
+# does not validate standalone in this repository -- use config.gate.yaml for
+# that. Upstreaming is blocked on licensing; see
+# components/airplay_receiver/UPSTREAMING.md.
 esphome:
   name: test
   friendly_name: test
-  min_version: 2024.8.0
+  min_version: 2025.1.0
 
 esp32:
   board: esp32-s3-devkitc-1
   variant: esp32s3
   cpu_frequency: 240MHz
   flash_size: 8MB
-  flash_mode: opi
+  # Quad flash on the N8R8 parts; `opi` describes the PSRAM and produces a
+  # board that does not boot if set here.
+  flash_mode: dio
   framework:
     type: esp-idf
     version: recommended

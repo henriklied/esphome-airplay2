@@ -1,7 +1,6 @@
 # CODEOWNERS (PR reference)
 #
-# In a real upstream PR this file is appended to esphome's
-# esphome/CODEOWNERS. Placeholder owner until the maintainer is confirmed.
-# Replace `@your-github-handle` with the actual owner before opening the PR.
-esphome/components/airplay_receiver/ @your-github-handle
-tests/components/airplay_receiver/ @your-github-handle
+# In a real upstream PR this file is appended to esphome's esphome/CODEOWNERS.
+# Upstreaming is blocked on licensing -- see components/airplay_receiver/UPSTREAMING.md.
+esphome/components/airplay_receiver/ @henriklied
+tests/components/airplay_receiver/ @henriklied
