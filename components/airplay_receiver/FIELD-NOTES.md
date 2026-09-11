@@ -5,10 +5,9 @@ Geneva Model M) against iOS and macOS senders. Everything here was measured on
 hardware; where something is inference it says so.
 
 **Read this before debugging audio artefacts.** Several obvious-looking leads
-are dead ends and are listed as such at the bottom. The original long-form
-write-up lives in the deployment repo at `esphome/boston-x90/AIRPLAY-FINDINGS.md`
-(h.lied.dev); this file is the component-local subset that matters to anyone
-working on the component itself.
+are dead ends and are listed as such at the bottom. This file is the subset of a
+longer private deployment log that matters to anyone working on the component
+itself; where a finding depends on evidence not reproduced here, it says so.
 
 ## The five failures that look identical from outside
 

@@ -68,62 +68,15 @@ headers are the *canonical reference* for a native ESP-IDF build; ESPHome's
   `<= AIRPLAY_ALWAYS_INTERNAL_BYTES` (default **1024**) stays in internal DRAM,
   mirroring `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL`.
 
-## YAML usage
+## Configuration
 
-```yaml
-esphome:
-  name: airplay2
-  min_version: 2024.12.0
+The YAML schema, the `dsp:` cascade, the runtime-tuning API, the diagnostics accessors and five
+working example configs are documented in the [repository README](../../README.md). This file covers
+what is specific to the component's internals.
 
-esp32:
-  board: esp32-s3-devkitc-1
-  variant: esp32s3
-  framework:
-    type: esp-idf
-    version: recommended
-
-psram:
-  mode: octal
-  speed: 80MHz
-
-external_components:
-  - source:
-      type: local
-      path: components
-    components:
-      - airplay_receiver
-
-# I2S PCM5100 DAC + amp-enable wiring (Amped-ESP32 example).
-# You MUST supply the three I2S pins — without them audio output is
-# unconfigured and you will get silence.
-airplay_receiver:
-  id: airplay_1
-  name: "AirPlay2"
-  buffer_size: 1000000
-  i2s_bclk_pin: 14
-  i2s_lrclk_pin: 15
-  i2s_dout_pin: 16
-  amp_enable_pin: 17
-  sample_rate: 44100
-  amp_idle_timeout: 60
-  # Optional: only for PCM5100 boards that don't self-strap (default -1 = unused).
-  # i2s_mclk_pin: -1
-```
-
-Options:
-
-| Key                  | Type    | Default      | Description                                                                 |
-| -------------------- | ------- | ------------ | --------------------------------------------------------------------------- |
-| `name`               | str     | `"AirPlay2"` | Display name of the receiver.                                               |
-| `buffer_size`        | int     | `1000000`    | Buffer size (bytes) for the stream.                                         |
-| `i2s_bclk_pin`       | int     | `-1`         | I2S bit-clock (BCLK) GPIO — **required** for audio output.                  |
-| `i2s_lrclk_pin`      | int     | `-1`         | I2S word/frame clock (LRCK/WS) GPIO — **required** for audio output.        |
-| `i2s_dout_pin`       | int     | `-1`         | I2S serial data out (DOUT) GPIO — **required** for audio output.            |
-| `i2s_mclk_pin`       | int     | `-1`         | I2S master clock (MCLK/SCK) GPIO; `-1` for DACs that self-strap.            |
-| `amp_enable_pin`     | int     | `-1`         | Amp/PA enable GPIO. `-1` disables the amp line.                             |
-| `sample_rate`        | int     | `44100`      | Output sample rate in Hz (e.g. 44100, 48000).                               |
-| `amp_enable_inverted`| bool    | `false`      | True if the amp-enable line is active-LOW.                                   |
-| `amp_idle_timeout`   | int     | `60`         | Seconds of no audio (pause/idle) before the amp line is de-asserted. `0` disables the power-down watchdog. |
+Audio output is unconfigured until you supply `i2s_bclk_pin`, `i2s_lrclk_pin` and `i2s_dout_pin`.
+A receiver without them pairs and plays silently, which is occasionally useful for testing pairing
+on a board with no DAC attached, and confusing if you did not mean it.
 
 > **Requires ESP-IDF.** This component is `only_on_esp32` and
 > `only_with_framework("esp-idf")`; the Arduino framework is not supported.
@@ -142,13 +95,20 @@ that repository.
 
 * **Implemented:** HomeKit pairing + ChaCha20-Poly1305 audio crypto, RTSP
   control plane + mDNS, RTP audio engine (ALAC/AAC decode), playout timing,
-  I2S PCM5100 output + amp enable, centralized allocator + platform profiles.
+  the output biquad cascade, I2S PCM5100 output + amp enable, centralized
+  allocator + platform profiles.
 * **Not implemented:** AirPlay 1 / RAOP (RSA auth, FairPlay handshake, AES-CBC
   audio encryption), Bluetooth A2DP, SPDIF/USB outputs.
 * **Known caveat:** the two board classes use *different* memory profiles and
   PSRAM wiring — pick the `esp32`/`esp32s3` variant and `psram:` block that
   match your actual board.
+* **Multi-room works**, including two boards as a stereo pair via
+  `audio_channel_mode: left` / `right`. The local-anchor fallback gives up
+  group sync by design: a board that loses its network clock keeps playing on
+  its own clock instead of going silent, and drifts from the group until it
+  re-locks. That is the trade, not a bug.
 
-> **Licensing note:** the upstream logic is **Non-Commercial** licensed. Be
-> aware of the implications before shipping or upstreaming — see
-> [`UPSTREAMING.md`](UPSTREAMING.md).
+> **Licensing note:** the upstream logic is **Non-Commercial** licensed, and so
+> is this repository — see [`../../LICENSE`](../../LICENSE) and
+> [`UPSTREAMING.md`](UPSTREAMING.md). It cannot be relicensed permissively here,
+> which is also why it cannot be merged into ESPHome.

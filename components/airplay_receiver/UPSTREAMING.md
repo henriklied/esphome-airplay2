@@ -18,6 +18,13 @@ That repository is licenced under a **Non-Commercial License**:
 > purposes only..."* — `rbouteiller/airplay-esp32` LICENSE (Copyright (c) 2026
 > Remi Bouteiller)
 
+The same terms are reproduced verbatim in this repository's
+[`LICENSE`](../../LICENSE), which is what this tree is distributed under. That
+grant does permit publishing this repository publicly — it covers distribution,
+and a public repository is non-commercial distribution — provided the copyright
+and permission notice travel with it. What it does not permit is relaxing the
+terms downstream.
+
 ESPHome is **permissively licensed** (MIT-style, Apache-2.0 for the ESPHome
 core; components generally follow the same permissive model). Mixing a
 non-commercial source with a permissive project is a **hard blocker**: the
@@ -40,8 +47,9 @@ non-commercial obligation on every ESPHome user.
    the upstream author's call; contact `bouteiller.remi@gmail.com` for
    commercial licensing.
 
-This document assumes the project continues under option 2 unless/until a
-clean-room reimplementation (option 1) is done.
+The project is on **option 2**: published publicly under the upstream's
+Non-Commercial terms, self-hosted as an `external_components` source, not
+upstreamed. Option 1 or 3 would be needed to change that.
 
 ## What an ESPHome PR would need (checklist)
 
@@ -61,7 +69,7 @@ FairPlay handshake, AES-CBC) is deliberately not ported.
       * `AUTO_LOAD` for the audio / network pieces it needs,
       * a `CODEOWNERS` entry.
 - [ ] Ship `tests/components/airplay_receiver/test.esp32-s3-idf.yaml` (a
-      minimal build config) — see [`pr/tests/components/airplay_receiver/`](pr/tests/components/airplay_receiver/).
+      minimal build config) — see [`pr/tests/components/airplay_receiver/`](../../pr/tests/components/airplay_receiver/).
 - [ ] Reach **clang-format** compliance on every `.cpp`/`.h` (the repo uses
       `.clang-format`; run `clang-format -i` and confirm `git clang-format` is
       clean).

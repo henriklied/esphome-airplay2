@@ -52,7 +52,7 @@ logger:
   level: INFO
 
 external_components:
-  - source: github://henriklied/airplay2-esphome
+  - source: github://henriklied/esphome-airplay2
     components: [airplay_receiver]
 
 airplay_receiver:

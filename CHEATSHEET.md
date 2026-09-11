@@ -8,12 +8,17 @@ ESPHome **external component** named `airplay_receiver`. It makes an ESP32-S3 (w
 AirPlay 2 audio destination to iOS/macOS/Home Assistant, decoding ALAC/AAC and playing over I2S to a
 PCM5100-class DAC. AirPlay 1 (RAOP) is intentionally **not** ported.
 
-Target hardware reference: **Sonocotta Amped-ESP32** / **Sendspin** board (ESP32-S3, PSRAM).
+Target hardware reference: **Sonocotta Amped-ESP32-S3** (ESP32-S3-WROOM-1-N8R8, octal PSRAM,
+onboard PCM5100 + TPA311x). A WROVER-class plain ESP32 with a PCM5102A breakout also works, on a
+smaller memory profile selected automatically from the build target.
+
+Licensed **Non-Commercial**, inherited from upstream — see `LICENSE` and `THIRD-PARTY-NOTICES.md`
+before adding or relicensing anything.
 
 ## Drop it in
 ```yaml
 external_components:
-  - source: {type: local, path: components}
+  - source: github://henriklied/esphome-airplay2
     components: [airplay_receiver]
 
 airplay_receiver:
@@ -96,27 +101,43 @@ id(airplay).set_dsp_enabled(false);
 ```
 
 ## Board pin reference
-- **Amped-S3:** BCLK=GPIO14, LRCLK=GPIO15, DOUT=GPIO16, amp-enable=GPIO17 (PCM5100/5122 + TPA311x).
-- **Sendspin:**  BCLK=GPIO26, LRCLK=GPIO25, DOUT=GPIO22, amp-enable=GPIO13.
+- **Amped-ESP32-S3:** BCLK=GPIO14, LRCLK=GPIO15, DOUT=GPIO16, amp-enable=GPIO17 (PCM5100/5122 + TPA311x).
+- **Generic ESP32 + PCM5102A:** BCLK=GPIO26, LRCLK=GPIO25, DOUT=GPIO22, no amp-enable (line out).
+
+`examples/` carries a validated, compiled config for each: `amped-s3.yaml`, `generic-esp32.yaml`,
+`dsp-speaker-correction.yaml`, `buttons.yaml`, `display.yaml`.
 
 ## Build / verify on this host
 ```bash
-cd /path/to/airplay2-esphome && source .venv/bin/activate
+cd /path/to/esphome-airplay2 && source .venv/bin/activate
 esphome config config.gate.yaml            # schema validation   (expect: "Configuration is valid!")
 esphome compile config.gate.yaml           # full C++ build      (expect: "Successfully compiled program.")
 ```
-Requirements: ESPHome ≥ **2025.1.0** (verified against 2026.6.5), `framework: {type: esp-idf}`, ESP32-S3.
-Flash config: `flash_mode: dio` for the N8R8 (quad flash + octal PSRAM — `opi` is not valid); a
-`partitions.csv` (8MB OTA layout) is provided in `examples/`.
+Requirements: ESPHome ≥ **2025.1.0** (verified against 2026.8.2), `framework: {type: esp-idf}`, ESP32-S3.
+Flash config: `flash_mode: dio` for the N8R8 (quad flash + octal PSRAM — `opi` describes the PSRAM
+and produces a board that does not boot if set on the flash); `partitions.csv` (8MB OTA layout) is
+in the repository root, and the examples reference it as `../partitions.csv`.
+
+To validate the examples, which point at `github://` rather than the local tree, rewrite the source
+into `.check/` (gitignored) and build from there:
+
+```bash
+mkdir -p .check && cp examples/secrets.example.yaml .check/secrets.yaml   # or write your own
+for f in examples/*.yaml; do
+  sed 's|source: github://henriklied/esphome-airplay2|source: {type: local, path: ../components}|' \
+    "$f" > ".check/$(basename "$f")"
+done
+cd .check && esphome compile amped-s3.yaml
+```
 
 ## Key files (where the action is)
 - `__init__.py` — DOMAIN/CONFIG_SCHEMA (pins validated via `pins.internal_gpio_*`), `to_code`,
   `register_media_player`, `_add_memory_policy_flags()` (emits `-DAIRPLAY_PLATFORM_*`),
   `_add_lwip_requirements()` (socket count + UDP receive mbox depth),
   `_register_recursive_sources()`, `CONFLICTS_WITH=["sendspin","i2s_audio"]`.
-- `FIELD-NOTES.md` — what hardware taught us: the failures that look identical from outside, how
-  to read the 1Hz `playout:` / `resend:` / `rxpath:` telemetry, and the dead-ends list. Read
-  before debugging any artefact.
+- `FIELD-NOTES.md` — what hardware taught us: five distinct faults that look identical from
+  outside, how to read the 1Hz `playout:` / `resend:` / `rxpath:` telemetry, and the dead-ends
+  list. Read before debugging any artefact.
 - `airplay_receiver.{h,cpp}` — the component class (`: cg.Component, media_player::MediaPlayer`),
   setup/loop, transport-event handling (incl. the METADATA → track-title wiring), media_player callbacks.
 - `transport/` — RTSP server/control + Bonjour/mDNS glue + binary-plist + sockets. The sender's
@@ -136,7 +157,7 @@ Flash config: `flash_mode: dio` for the N8R8 (quad flash + octal PSRAM — `opi`
 - `platform/{esp32,esp32s3}/config.h` — reference tuning values.
 
 ## Agent-to-agent contract (do not break this)
-`airplay_receiver.cpp` / the media_player glue drive the audio engine through **`audio_control.h`**. Keep these signatures exact (declared `extern "C"`):
+`airplay_receiver.cpp` / the media_player glue drive the audio engine through **`audio_control.h`**. Keep these eight signatures exact (declared `extern "C"`, global scope — which is also what makes them reachable from a YAML lambda):
 ```c
 bool airplay_audio_set_volume(uint8_t volume);   // 0-100
 bool airplay_audio_play(void);
@@ -151,6 +172,11 @@ The RTSP `TRANSPORT_EVENT_METADATA` handler calls `airplay_audio_set_track_title
 media_player has no title/artist fields, so the title is held here and logged).
 
 ## Pitfalls / gotchas (already handled, don't regress)
+- **`api:` must not enable `encryption:`.** It pulls `esphome/noise-c`, which brings its own
+  `libsodium`; the pairing crypto needs `espressif/libsodium`, and the IDF component manager
+  refuses to choose ("Requirement espressif__libsodium and requirement libsodium are both added as
+  project_managed_components"). It fails at CMake configure, before compilation. A plain `api:`
+  block works and is what every example uses.
 - **lwIP sizing is set by the component, not the board YAML.** `_add_lwip_requirements()` in
   `__init__.py` sets `CONFIG_LWIP_MAX_SOCKETS=24` and `CONFIG_LWIP_UDP_RECVMBOX_SIZE=32`. The IDF
   defaults (10 and 6) are both too small and **both fail silently** — the RTSP socket survives, so
@@ -176,6 +202,13 @@ media_player has no title/artist fields, so the title is held here and logged).
 - All I2S/amp pins use `pins.internal_gpio_output_pin_number` (validated, cross-component GPIO conflict detection); `-1` sentinel means "unused".
 
 ## Current status
-All items from both integration reviews have been fixed and the component builds cleanly
-(`esphome config` valid; `esphome compile` exit 0, no warnings) against ESPHome 2026.6.5 on ESP32-S3.
-See `UPSTREAMING.md` for the roadmap/PR checklist and licensing notes.
+The component builds cleanly (`esphome config` valid; `esphome compile` exit 0, no warnings) against
+ESPHome 2026.8.2 on ESP32-S3, at roughly 33% RAM and 28% flash. Every config in `examples/` is
+validated and compiled.
+
+Multi-room works well, including two boards as a stereo pair (`audio_channel_mode: left` / `right`).
+Note that the local-anchor fallback gives up group sync by design: a board that loses its network
+clock keeps playing on its own clock instead of going silent, and drifts from the group until it
+re-locks. That is the trade, not a bug.
+
+See `components/airplay_receiver/UPSTREAMING.md` for the PR checklist and the licensing blocker.
