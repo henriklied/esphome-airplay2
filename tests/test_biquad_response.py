@@ -59,7 +59,13 @@ def response_db(coeffs: tuple[float, ...], freq: float) -> float:
     b0, b1, b2, a1, a2 = coeffs
     z = cmath.exp(-2j * math.pi * freq / FS)
     h = (b0 + b1 * z + b2 * z * z) / (1.0 + a1 * z + a2 * z * z)
-    return 20.0 * math.log10(abs(h))
+    mag = abs(h)
+    # Exact null (a notch/high-pass zero sits on the unit circle): magnitude is
+    # 0.0, so log10(0) is undefined. Return a finite floor -- the probe uses
+    # tol=None ("at most expected") for these, so a very negative value passes.
+    if mag == 0.0:
+        return -1000.0
+    return 20.0 * math.log10(mag)
 
 
 CASES = [
