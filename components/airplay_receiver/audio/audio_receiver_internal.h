@@ -110,6 +110,10 @@ typedef struct audio_receiver_state {
   // the sender supplied. PTP and NTP are unrelated absolute timelines, so
   // reading the offset from the other one puts the anchor decades away.
   bool engine_v2_anchor_uses_ptp;
+  // Set on every audio_receiver_read(): true when the samples handed back were
+  // scheduler silence rather than stream audio. See
+  // audio_receiver_last_read_was_silence().
+  bool last_read_was_silence;
   uint32_t engine_v2_anchor_rtp;
   uint64_t engine_v2_anchor_network_ns;
   int64_t engine_v2_playout_offset_ns;
@@ -143,6 +147,23 @@ typedef struct audio_receiver_state {
   uint16_t resend_window_first;
   uint64_t resend_missing_mask;
   int64_t resend_last_request_time_us;
+  // Retransmission effectiveness, summarised once a second. Per-event logging
+  // from the receive path is what this is avoiding: it runs on the audio core.
+  uint32_t resend_sent_count;       // NACK requests actually sent
+  uint32_t resend_recovered_count;  // retransmits that arrived in time
+  uint32_t resend_stale_count;      // retransmits that arrived too late
+  // Same two outcomes for packets that arrive with a backward sequence but no
+  // retransmit payload type -- a resend the 0x56 check did not recognise.
+  uint32_t resend_late_recovered_count;
+  uint32_t resend_late_stale_count;
+  int64_t resend_stats_log_us;
+  // RX-path accounting, also once a second. lwIP counts udp.recv before the
+  // socket's receive mbox, so the delta against packets_received is what was
+  // dropped between the stack and this task -- loss the sequence-gap counters
+  // cannot separate from loss on air. See rxpath_log_stats().
+  uint32_t rxpath_prev_udp_recv;
+  uint32_t rxpath_prev_packets_received;
+  int64_t rxpath_log_us;
 
   // Post-seek RTP gates (logic in audio_receiver.cpp): a window
   // [discard_before_rtp, discard_above_rtp] around the new anchor. Frames

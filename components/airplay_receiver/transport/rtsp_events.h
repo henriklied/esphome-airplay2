@@ -53,6 +53,10 @@ struct TransportAudioConfig {
   uint16_t event_port = 0;        // server->client event port (AirPlay 2)
   uint16_t timing_port = 0;       // timing port (AirPlay 1)
   uint16_t buffered_port = 0;     // TCP port for buffered audio (type 103)
+  // Where to send NACK resend requests. The engine arms retransmission only
+  // when both are non-zero; without them a lost RTP packet is simply concealed.
+  uint32_t client_ip = 0;             // sender address, network byte order
+  uint16_t client_control_port = 0;   // sender's control port
   uint32_t audio_buffer_size = 0; // advertised AP2_AUDIO_BUFFER_SIZE
   int sample_rate = 0;
   int channels = 0;

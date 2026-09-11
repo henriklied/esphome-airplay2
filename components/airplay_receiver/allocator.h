@@ -15,6 +15,158 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+// ---------------------------------------------------------------------------
+// Platform memory-policy profile
+// ---------------------------------------------------------------------------
+// The canonical values for every knob live in the platform profile headers
+//   platform/esp32s3/config.h   (ESP32-S3 target, 8MiB octal PSRAM)
+//   platform/esp32/config.h     (generic ESP32)
+//
+// ESPHome's external-component build copies only top-level (and one-level
+// subdir) sources into the generated tree; the two-level platform/*/config.h
+// headers are NOT copied, so the SAME values are inlined here as a
+// self-contained, header-carried profile. This header (allocator.h) is
+// included by every module in the component, so each translation unit sees the
+// profile that matches the target and no consumer depends on the un-copied
+// config.h. The active profile is selected by the AIRPLAY_PLATFORM_ESP32S3 /
+// AIRPLAY_PLATFORM_ESP32 build flag emitted from the component's __init__.py
+// (_add_memory_policy_flags). Keep the values below in lock-step with the
+// corresponding platform header; when the component is compiled as a native
+// ESP-IDF component (whole tree on the include path) the platform headers
+// remain the canonical reference.
+#if defined(AIRPLAY_PLATFORM_ESP32S3)
+#ifndef AIRPLAY_RING_FRAMES
+#define AIRPLAY_RING_FRAMES 1000
+#endif
+#ifndef AIRPLAY_ALWAYS_INTERNAL_BYTES
+#define AIRPLAY_ALWAYS_INTERNAL_BYTES 1024
+#endif
+#ifndef AIRPLAY_INTERNAL_RESERVE_BYTES
+#define AIRPLAY_INTERNAL_RESERVE_BYTES 65536
+#endif
+#ifndef AIRPLAY_TASK_STACK_RTSP_CLIENT
+#define AIRPLAY_TASK_STACK_RTSP_CLIENT 8192
+#endif
+#ifndef AIRPLAY_TASK_STACK_RTSP_SERVER
+#define AIRPLAY_TASK_STACK_RTSP_SERVER 4096
+#endif
+#ifndef AIRPLAY_TASK_STACK_AUDIO_RECV
+#define AIRPLAY_TASK_STACK_AUDIO_RECV 12288
+#endif
+#ifndef AIRPLAY_TASK_STACK_AUDIO_CTRL
+#define AIRPLAY_TASK_STACK_AUDIO_CTRL 4096
+#endif
+#ifndef AIRPLAY_TASK_STACK_AUDIO_BUFFERED
+#define AIRPLAY_TASK_STACK_AUDIO_BUFFERED 4096
+#endif
+#ifndef AIRPLAY_TASK_STACK_PLAYBACK
+#define AIRPLAY_TASK_STACK_PLAYBACK 4096
+#endif
+#ifndef AIRPLAY_TASK_STACK_NTP
+#define AIRPLAY_TASK_STACK_NTP 3072
+#endif
+#ifndef AIRPLAY_CORE_AFFINITY_AUDIO
+#define AIRPLAY_CORE_AFFINITY_AUDIO 1
+#endif
+#ifndef AIRPLAY_CORE_AFFINITY_RTSP
+#define AIRPLAY_CORE_AFFINITY_RTSP 0
+#endif
+#ifndef AIRPLAY_DECODER_IN_PSRAM
+#define AIRPLAY_DECODER_IN_PSRAM 1
+#endif
+#ifndef AIRPLAY_BT_ENABLED
+#define AIRPLAY_BT_ENABLED 0
+#endif
+#elif defined(AIRPLAY_PLATFORM_ESP32)
+#ifndef AIRPLAY_RING_FRAMES
+#define AIRPLAY_RING_FRAMES 200
+#endif
+#ifndef AIRPLAY_ALWAYS_INTERNAL_BYTES
+#define AIRPLAY_ALWAYS_INTERNAL_BYTES 1024
+#endif
+#ifndef AIRPLAY_INTERNAL_RESERVE_BYTES
+#define AIRPLAY_INTERNAL_RESERVE_BYTES 32768
+#endif
+#ifndef AIRPLAY_TASK_STACK_RTSP_CLIENT
+#define AIRPLAY_TASK_STACK_RTSP_CLIENT 8192
+#endif
+#ifndef AIRPLAY_TASK_STACK_RTSP_SERVER
+#define AIRPLAY_TASK_STACK_RTSP_SERVER 4096
+#endif
+#ifndef AIRPLAY_TASK_STACK_AUDIO_RECV
+#define AIRPLAY_TASK_STACK_AUDIO_RECV 12288
+#endif
+#ifndef AIRPLAY_TASK_STACK_AUDIO_CTRL
+#define AIRPLAY_TASK_STACK_AUDIO_CTRL 4096
+#endif
+#ifndef AIRPLAY_TASK_STACK_AUDIO_BUFFERED
+#define AIRPLAY_TASK_STACK_AUDIO_BUFFERED 4096
+#endif
+#ifndef AIRPLAY_TASK_STACK_PLAYBACK
+#define AIRPLAY_TASK_STACK_PLAYBACK 4096
+#endif
+#ifndef AIRPLAY_TASK_STACK_NTP
+#define AIRPLAY_TASK_STACK_NTP 3072
+#endif
+#ifndef AIRPLAY_CORE_AFFINITY_AUDIO
+#define AIRPLAY_CORE_AFFINITY_AUDIO 1
+#endif
+#ifndef AIRPLAY_CORE_AFFINITY_RTSP
+#define AIRPLAY_CORE_AFFINITY_RTSP 0
+#endif
+#ifndef AIRPLAY_DECODER_IN_PSRAM
+#define AIRPLAY_DECODER_IN_PSRAM 1
+#endif
+#ifndef AIRPLAY_BT_ENABLED
+#define AIRPLAY_BT_ENABLED 1
+#endif
+#else
+// No/profile fallback: identical to the ESP32-S3 target so out-of-the-box
+// behaviour matches the primary board.
+#ifndef AIRPLAY_RING_FRAMES
+#define AIRPLAY_RING_FRAMES 1000
+#endif
+#ifndef AIRPLAY_ALWAYS_INTERNAL_BYTES
+#define AIRPLAY_ALWAYS_INTERNAL_BYTES 1024
+#endif
+#ifndef AIRPLAY_INTERNAL_RESERVE_BYTES
+#define AIRPLAY_INTERNAL_RESERVE_BYTES 65536
+#endif
+#ifndef AIRPLAY_TASK_STACK_RTSP_CLIENT
+#define AIRPLAY_TASK_STACK_RTSP_CLIENT 8192
+#endif
+#ifndef AIRPLAY_TASK_STACK_RTSP_SERVER
+#define AIRPLAY_TASK_STACK_RTSP_SERVER 4096
+#endif
+#ifndef AIRPLAY_TASK_STACK_AUDIO_RECV
+#define AIRPLAY_TASK_STACK_AUDIO_RECV 12288
+#endif
+#ifndef AIRPLAY_TASK_STACK_AUDIO_CTRL
+#define AIRPLAY_TASK_STACK_AUDIO_CTRL 4096
+#endif
+#ifndef AIRPLAY_TASK_STACK_AUDIO_BUFFERED
+#define AIRPLAY_TASK_STACK_AUDIO_BUFFERED 4096
+#endif
+#ifndef AIRPLAY_TASK_STACK_PLAYBACK
+#define AIRPLAY_TASK_STACK_PLAYBACK 4096
+#endif
+#ifndef AIRPLAY_TASK_STACK_NTP
+#define AIRPLAY_TASK_STACK_NTP 3072
+#endif
+#ifndef AIRPLAY_CORE_AFFINITY_AUDIO
+#define AIRPLAY_CORE_AFFINITY_AUDIO 1
+#endif
+#ifndef AIRPLAY_CORE_AFFINITY_RTSP
+#define AIRPLAY_CORE_AFFINITY_RTSP 0
+#endif
+#ifndef AIRPLAY_DECODER_IN_PSRAM
+#define AIRPLAY_DECODER_IN_PSRAM 1
+#endif
+#ifndef AIRPLAY_BT_ENABLED
+#define AIRPLAY_BT_ENABLED 0
+#endif
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif

@@ -119,5 +119,15 @@ void ptp_clock_set_master_clock_id(uint64_t clock_id);
  */
 uint64_t ptp_clock_get_master_clock_id(void);
 
+/**
+ * Tell the clock that an AirPlay session is starting, so that if the lock does
+ * not follow, the unlocked-state counters get reported.
+ *
+ * Call this on every session start, including when the PTP task is already
+ * running -- that case is precisely the one worth reporting, because nothing
+ * else re-arms the diagnostics for a session that reuses an existing clock.
+ */
+void ptp_clock_notify_session_start(void);
+
 }  // namespace airplay_receiver
 }  // namespace esphome

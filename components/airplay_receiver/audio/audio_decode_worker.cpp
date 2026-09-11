@@ -49,6 +49,14 @@ static const char *const TAG = "audio_decode";
  * task, and on ESP32 core 0 is already shared with WiFi, BT and lwIP. */
 #define AUDIO_DECODE_TASK_PRIORITY 6
 
+// Same core as the playback task (audio_output.cpp) so the whole audio path
+// stays off core 0, which serves WiFi and the ESPHome main loop.
+#if CONFIG_FREERTOS_UNICORE
+#define AUDIO_DECODE_TASK_CORE 0
+#else
+#define AUDIO_DECODE_TASK_CORE 1
+#endif
+
 // Worker handle (opaque outside this file).  Matches the upstream layout: the
 // state pointer, the job pointer queue, the task handle and the two volatile
 // generation/running flags.  Defined in the named namespace so it matches the
@@ -160,9 +168,12 @@ esp_err_t audio_decode_worker_create(audio_receiver_state_t *state,
   }
 
   worker->running = true;
-  BaseType_t ok =
-      xTaskCreate(decode_task, "audio_decode", AUDIO_DECODE_TASK_STACK, worker,
-                  AUDIO_DECODE_TASK_PRIORITY, &worker->task);
+  // Pin decode to the audio core. Left unpinned it floats onto core 0, where
+  // it outranks the ESPHome main loop (priority 1) and starves it: the API
+  // connection drops with EOF, OTA handshakes time out mid-stream, and decode
+  // ends up contending with the WiFi stack for the same core.
+  BaseType_t ok = xTaskCreatePinnedToCore(decode_task, "audio_decode", AUDIO_DECODE_TASK_STACK, worker,
+                                          AUDIO_DECODE_TASK_PRIORITY, &worker->task, AUDIO_DECODE_TASK_CORE);
   if (ok != pdPASS || !worker->task) {
     worker->running = false;
     vQueueDelete(worker->queue);

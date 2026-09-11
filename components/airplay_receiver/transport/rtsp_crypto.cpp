@@ -27,7 +27,14 @@ static int send_all(int socket, const uint8_t *data, size_t len) {
 }
 
 int rtsp_crypto_read_block(int socket, RtspConn *conn, uint8_t *buffer, size_t buffer_size) {
+  // Clear stale errno up front: recv() returns 0 on a clean close without
+  // setting errno, so a caller branching on `errno != EAGAIN` could otherwise
+  // keep a stale EAGAIN (left over from the timeout loop) and spin instead of
+  // tearing the session down. Forcing errno to 0 on every terminal return makes
+  // a clean close always look like a real error to that caller.
+  errno = 0;
   if (conn == nullptr || conn->hap_session == nullptr || !conn->encrypted_mode) {
+    errno = 0;
     return -1;
   }
 
@@ -44,6 +51,7 @@ int rtsp_crypto_read_block(int socket, RtspConn *conn, uint8_t *buffer, size_t b
       continue;
     }
     if (r == 0) {
+      errno = 0;  // clean close -> teardown, not EAGAIN spin
       return -1;
     }
     if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
@@ -73,6 +81,7 @@ int rtsp_crypto_read_block(int socket, RtspConn *conn, uint8_t *buffer, size_t b
       continue;
     }
     if (r == 0) {
+      errno = 0;  // clean close -> teardown, not EAGAIN spin
       airplay_free(encrypted);
       return -1;
     }

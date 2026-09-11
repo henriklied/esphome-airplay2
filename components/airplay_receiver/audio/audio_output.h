@@ -65,6 +65,12 @@ struct AudioOutputConfig {
   int amp_enable_gpio = -1;
   /// Output sample rate in Hz (e.g. 44100, 48000).
   int sample_rate = 44100;
+  /// I2S peripheral port for the DAC. -1 (default) selects the platform
+  /// default (AIRPLAY_I2S_PORT): I2S_NUM_1 on ESP32-S3 (avoids clashing with
+  /// the vendor Sendspin media firmware that drives I2S_NUM_0), I2S_NUM_0 on
+  /// plain ESP32. Set >= 0 to pin an explicit port and never leave it
+  /// hardcoded to I2S_NUM_0.
+  int i2s_port = -1;
   /// True if the amp-enable line is active-LOW (default: active-HIGH).
   bool amp_enable_inverted = false;
   /// Idle power-down for the amp-enable line. After this many milliseconds
@@ -85,6 +91,13 @@ void audio_output_set_config(const AudioOutputConfig &config);
  * Initialize the I2S PCM5100 output backend.
  */
 esp_err_t audio_output_init(void);
+
+/**
+ * True once the output backend has been configured and its I2S channel
+ * created (i.e. audio_output_init() succeeded). The control surface uses this
+ * to refuse play() before audio is wired up, avoiding a null channel write.
+ */
+bool audio_output_is_ready(void);
 
 /**
  * Start the audio playback task (drains the feed FIFO to I2S).

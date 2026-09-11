@@ -48,7 +48,8 @@ clean-room reimplementation (option 1) is done.
 Assuming the licensing issue is resolved (clean-room), the following is the
 minimum a reviewable ESPHome PR requires. This repo is **not yet in that
 shape** — the component lives under `components/airplay_receiver/` in a
-self-hosted tree and the protocol logic is not ported.
+self-hosted tree. AirPlay 2 is implemented end-to-end; AirPlay 1 (RSA auth,
+FairPlay handshake, AES-CBC) is deliberately not ported.
 
 - [ ] Move the component into `esphome/components/airplay_receiver/` and add
       `__init__.py` with:
@@ -64,9 +65,10 @@ self-hosted tree and the protocol logic is not ported.
 - [ ] Reach **clang-format** compliance on every `.cpp`/`.h` (the repo uses
       `.clang-format`; run `clang-format -i` and confirm `git clang-format` is
       clean).
-- [ ] Implement the protocol logic (RTSP/FairPlay, HIPairing crypto, decoder,
-      timing, audio output) as separate slices; this repo's module skeletons are
-      the planned structure.
+- [x] Implement the protocol logic (RTSP control plane, HIPairing crypto,
+      decoder, timing, audio output) as the ported slices in `transport/`,
+      `crypto/`, `decoder/`, `timing/` and `audio/`. AirPlay 1 (RSA auth,
+      FairPlay handshake, AES-CBC) is intentionally not ported.
 - [ ] Confirm the full `esphome compile` builds for `esp32-s3-idf` (and keep
       `esphome config` + `esphome compile --only-generate` green).
 - [ ] Wire up the managed components (`espressif/esp_audio_codec`,
@@ -77,11 +79,19 @@ self-hosted tree and the protocol logic is not ported.
 ## Status
 
 - [x] Memory-policy foundation (allocator, platform profiles, codegen wiring).
-- [x] Compilable module skeletons.
-- [x] AirPlay 2 HomeKit pairing + ChaCha20-Poly1305 audio crypto slice (`crypto/`): SRP-6a 3072-bit pair-setup, Ed25519 + X25519 + ChaCha20-Poly1305 pair-verify, ChaCha20-Poly1305 audio key setup/decrypt. AirPlay 1 (RSA auth, AES-CBC) deliberately not ported.
+- [x] AirPlay 2 HomeKit pairing + ChaCha20-Poly1305 audio crypto slice (`crypto/`): SRP-6a 3072-bit pair-setup, Ed25519 + X25519 + ChaCha20-Poly1305 pair-verify, ChaCha20-Poly1305 audio key setup/decrypt.
+- [x] Transport/control (`transport/`): `_airplay._tcp` mDNS + RTSP server on port 7000 (ANNOUNCE/SETUP/RECORD/PAIR-SETUP/PAIR-VERIFY/SET_PARAMETER/GET_PARAMETER/TEARDOWN/FLUSH + OPTIONS/GET/POST/PAUSE/SETRATEANCHORTIME/SETPEERS).
+- [x] Audio engine (`audio/`): RTP receive (realtime + buffered), CryptoModule decrypt, ALAC/AAC decode via `esp_audio_codec`, PTP/NTP clocks, playout timing, I2S PCM5100 DAC + amp-enable output.
 - [x] libsodium managed component wired (`add_idf_component`) + mbedtls (built-in IDF) — full `esphome compile` is green.
-- [ ] Protocol logic (RTSP, FairPlay, decoder, timing, audio pipeline).
+- [x] AirPlay 2 only: AirPlay 1 (RSA auth, FairPlay handshake, AES-CBC) deliberately not ported.
 - [ ] Clean-room license approval or upstream-author permission.
+- [ ] **Justify the global sdkconfig writes to reviewers.** `_add_lwip_requirements()` raises
+  `CONFIG_LWIP_MAX_SOCKETS` (10 → 24) and `CONFIG_LWIP_UDP_RECVMBOX_SIZE` (6 → 32), which are
+  firmware-wide, not component-local, and cost RAM every other component also pays for. Both are
+  load-bearing — the defaults fail silently and the mbox default alone cost 931 concealment events
+  in 75s on hardware (see `FIELD-NOTES.md`) — but a reviewer will reasonably ask why a media
+  component is resizing the IP stack. Have the measurement ready, and expect to argue mbox depth
+  as a documented prerequisite rather than a silent override if they push back.
 
 > This document does **not** claim the component is production-ready or
 > upstreamable today. It states the blocker plainly and lists what a future PR

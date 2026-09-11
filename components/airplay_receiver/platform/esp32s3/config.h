@@ -1,11 +1,13 @@
 #pragma once
 // airplay_receiver platform profile: ESP32-S3.
 //
-// This header is included in the generated build only when the component is
-// compiled as a native ESP-IDF component whose whole tree is on the include
-// path. In the ESPHome external-component build only top-level (and one-level
-// subdir) sources are copied, so allocator.cpp inlines the SAME values -- keep
-// this file in lock-step with allocator.cpp's AIRPLAY_PLATFORM_ESP32S3 branch.
+// This header is the canonical reference for the ESP32-S3 tuning. In the
+// ESPHome external-component build only top-level (and one-level subdir)
+// sources are copied, so the two-level platform/*/config.h headers are NOT
+// copied into the generated tree; allocator.h therefore inlines the SAME
+// values (selected by the AIRPLAY_PLATFORM_ESP32S3 / AIRPLAY_PLATFORM_ESP32
+// build flag emitted from __init__.py). Keep this file in lock-step with
+// allocator.h's AIRPLAY_PLATFORM_ESP32S3 branch.
 //
 // Target part: ESP32-S3-WROOM-1-N8R8 (8 MiB flash, 8 MiB octal PSRAM, 512 KiB
 // internal SRAM). The ESP32-S3 has no Classic Bluetooth controller, so

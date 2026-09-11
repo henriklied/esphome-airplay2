@@ -128,6 +128,18 @@ void audio_receiver_get_stats(audio_stats_t *stats);
  */
 size_t audio_receiver_read(int16_t *buffer, size_t samples);
 
+/**
+ * Whether the samples from the last audio_receiver_read() were scheduler
+ * silence rather than stream audio.
+ *
+ * The scheduler reports "nothing to play" by filling the caller's buffer with
+ * zeros and returning the FULL sample count, not by returning 0 -- so a frame
+ * count alone cannot distinguish a healthy stream from a wedged one (no
+ * anchor, no clock map, paused). Anything that must tell those apart, such as
+ * the output stage's idle amp power-down, has to ask.
+ */
+bool audio_receiver_last_read_was_silence(void);
+
 /** Check if audio data is available. */
 bool audio_receiver_has_data(void);
 

@@ -154,6 +154,10 @@ class CryptoModule {
   int pair_setup_m5(HAPSession *session, const uint8_t *input, size_t input_len,
                     uint8_t *output, size_t output_capacity, size_t *output_len);
 
+  /// True if the session's pair-setup is the transient (basic/auto) flow, which
+  /// establishes the encrypted control channel at M4 and never reaches M5.
+  bool is_pair_setup_transient(HAPSession *session) const;
+
   // --- established-session ChaCha20-Poly1305 control channel ------------------
   /// Encrypt `plaintext` with the session key. `aad` is extra authenticated data
   /// (the RTSP control channel uses the 2-byte frame-length prefix, matching

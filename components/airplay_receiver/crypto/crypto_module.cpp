@@ -820,7 +820,18 @@ int CryptoModule::pair_verify_m3_raw(HAPSession *session, const uint8_t *input, 
   crypto_hash_sha512_final(&state, hash);
   std::memcpy(aes_iv, hash, sizeof(aes_iv));
 
-  uint8_t client_signature[64];
+  // Decrypt the client's payload. It is a stream cipher so the length can be
+  // less than a block. The raw M3 payload is the AES-CTR-encrypted
+  // [client Ed25519 public key (32) | Ed25519 signature (64)] = 96 bytes; some
+  // senders carry only the 64-byte signature. Decrypt whatever is present.
+  uint8_t client_payload[96];
+  size_t payload_len = (input_len >= 68) ? input_len - 4 : input_len;
+  if (payload_len < 64 || payload_len > sizeof(client_payload)) {
+    ESP_LOGE(TAG, "Raw pair-verify M3 payload length invalid: %zu", payload_len);
+    return -1;
+  }
+
+  std::memset(client_payload, 0, sizeof(client_payload));
   mbedtls_aes_context aes_ctx;
   mbedtls_aes_init(&aes_ctx);
   mbedtls_aes_setkey_enc(&aes_ctx, aes_key, 128);
@@ -828,11 +839,32 @@ int CryptoModule::pair_verify_m3_raw(HAPSession *session, const uint8_t *input, 
   size_t nc_off = 0;
   uint8_t nonce_counter[16];
   std::memcpy(nonce_counter, aes_iv, sizeof(nonce_counter));
-  mbedtls_aes_crypt_ctr(&aes_ctx, sizeof(client_signature), &nc_off, nonce_counter, stream_block,
-                        encrypted_sig, client_signature);
+  mbedtls_aes_crypt_ctr(&aes_ctx, payload_len, &nc_off, nonce_counter, stream_block,
+                        encrypted_sig, client_payload);
   mbedtls_aes_free(&aes_ctx);
 
-  ESP_LOGW(TAG, "Skipping signature verification (transient pairing)");
+  // Verify the peer's Ed25519 signature so that anyone on the LAN cannot play.
+  // The device signs session_public_key || client_public_key in M1; the client
+  // signs the same 64-byte blob. The verification key is the client's Ed25519
+  // public key carried in the payload when present (96-byte layout), else the
+  // peer public key held in the session.
+  const uint8_t *peer_signature = client_payload;
+  const uint8_t *peer_public_key = session->client_public_key;
+  if (payload_len >= 96) {
+    peer_public_key = client_payload;         // client Ed25519 public key
+    peer_signature = client_payload + 32;     // client Ed25519 signature (64)
+  }
+
+  uint8_t signed_data[64];
+  std::memcpy(signed_data, session->session_public_key, 32);
+  std::memcpy(signed_data + 32, session->client_public_key, 32);
+
+  if (crypto_sign_verify_detached(peer_signature, signed_data, sizeof(signed_data),
+                                  peer_public_key) != 0) {
+    ESP_LOGE(TAG, "Peer Ed25519 signature verification failed; rejecting session");
+    return -1;
+  }
+  ESP_LOGI(TAG, "Peer Ed25519 signature verified");
 
   hap_hkdf_sha512(reinterpret_cast<const uint8_t *>("Control-Salt"), 12, session->shared_secret,
                   HAP_X25519_KEY_SIZE, reinterpret_cast<const uint8_t *>("Control-Read-Encryption-Key"),
@@ -1125,6 +1157,10 @@ int CryptoModule::pair_setup_m5(HAPSession *session, const uint8_t *input, size_
   session->encrypt_nonce = 0;
   session->decrypt_nonce = 0;
   return 0;
+}
+
+bool CryptoModule::is_pair_setup_transient(HAPSession *session) const {
+  return session != nullptr && session->pair_setup_transient;
 }
 
 // ---------------------------------------------------------------------------

@@ -2,6 +2,7 @@
   "name": "airplay_receiver",
   "version": "0.5.3",
   "description": "AirPlay 2 receiver for ESP32 / ESP32-S3 with a centralized airplay_* allocator enforcing a PSRAM/internal memory policy. Ported + integrated end-to-end control + audio pipeline: the AirPlay 2 HomeKit pairing + ChaCha20-Poly1305 crypto slice (SRP-6a 3072-bit / Ed25519 / X25519), the transport/control layer (_airplay._tcp mDNS advert + RTSP server on 7000 with ANNOUNCE/SETUP/RECORD/PAIR-SETUP/PAIR-VERIFY/SET/GET_PARAMETER/TEARDOWN/FLUSH), and the audio engine (RTP receive realtime+buffered, CryptoModule decrypt, ALAC/AAC decode via esp_audio_codec, PTP/NTP clock, playout timing, I2S PCM5100 DAC + amp-enable output). AirPlay 1 RSA/FairPlay and AES-CBC are intentionally not ported.",
+  "min_version": "2025.1.0",
   "platforms": ["esp32", "esp32s3"],
   "idf": {
     "version": ">=5.5",
@@ -14,7 +15,7 @@
         "cmake_utilities"
       ],
       "notes": [
-        "espressif/libsodium and espressif/esp_audio_codec are pulled in from the component's __init__.py via add_idf_component (Ed25519/X25519/ChaCha20-Poly1305/SHA-512 for pairing, ALAC/AAC decode for the audio engine). mbedtls is a built-in IDF component (SRP bignum + raw-signature AES-CTR).",
+        "espressif/libsodium (ref ^1.0.21, Espressif Component Registry) and espressif/esp_audio_codec (ref ^2.5.0) are pulled in from the component's __init__.py via add_idf_component (Ed25519/X25519/ChaCha20-Poly1305/SHA-512 for pairing, ALAC/AAC decode for the audio engine). mbedtls is a built-in IDF component (SRP bignum + raw-signature AES-CTR). esp_driver_i2s is re-enabled via include_builtin_idf_component so audio/audio_output.cpp's #include <driver/i2s_std.h> links.",
         "Ported: main/hap/* (HAP pairing), main/audio/* (receive/decrypt/decode/buffer/timing/output + PTP/NTP clocks), main/rtsp/* control plane, main/network/mdns_airplay.c. NOT ported: AirPlay 1 RSA auth (main/rtsp/rtsp_rsa.c), AES-CBC audio encryption, FairPlay handshake (main/rtsp/rtsp_fairplay.c), BT A2DP, SPDIF/USB outputs."
       ],
       "memory": {

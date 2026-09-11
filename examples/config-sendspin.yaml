@@ -1,0 +1,35 @@
+# Sendspin board (PCM5100 + amp on GPIO13) — drop-in. Add wifi/savvies.
+esphome:
+  name: airplay2
+  friendly_name: AirPlay2
+  min_version: 2025.1.0
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  cpu_frequency: 240MHz
+  flash_size: 8MB
+  # N8R8: quad flash (8MB) + octal PSRAM. dio is valid; opi is not.
+  flash_mode: dio
+  framework: {type: esp-idf, version: recommended}
+  toolchain: esp-idf
+  partitions: partitions.csv
+
+psram: {mode: octal, speed: 80MHz}
+
+logger:
+
+external_components:
+  - source: {type: local, path: components}
+    components: [airplay_receiver]
+
+airplay_receiver:
+  id: airplay_1
+  name: "AirPlay2"
+  i2s_bclk_pin: 26
+  i2s_lrclk_pin: 25
+  i2s_dout_pin: 22
+  amp_enable_pin: 13
+  sample_rate: 44100
+  amp_idle_timeout: 60
+  # audio_channel_mode: stereo   # stereo | mono | left | right

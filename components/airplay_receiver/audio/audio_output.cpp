@@ -26,6 +26,7 @@
 
 #include "audio_output.h"
 
+#include "audio_dsp.h"
 #include "audio_resample.h"
 #include "../allocator.h"
 #include "esphome/core/log.h"
@@ -39,6 +40,27 @@
 #include <inttypes.h>
 #include <cstdlib>
 
+// ---------------------------------------------------------------------------
+// I2S peripheral port selection
+// ---------------------------------------------------------------------------
+// The peripheral is never a hardcoded constant. Both this AirPlay component
+// and a vendor "Sendspin" media firmware can drive the I2S bus in the same
+// build; if both pick I2S_NUM_0 the second i2s_new_channel() fails at runtime
+// with only an ESP_LOGE and no audio. So:
+//   * The default avoids the common clash. ESP32-S3 (the Sendspin target)
+//     defaults to I2S_NUM_1, leaving I2S_NUM_0 for the vendor firmware; plain
+//     ESP32 defaults to I2S_NUM_0 (no clash context there).
+//   * It is overridable per-build with -DAIRPLAY_I2S_PORT=<n>, and the value
+//     is not baked in: AudioOutputConfig::i2s_port (>=0) pins an explicit port
+//     at runtime and wins over the macro.
+#ifndef AIRPLAY_I2S_PORT
+#if defined(AIRPLAY_PLATFORM_ESP32S3)
+#define AIRPLAY_I2S_PORT I2S_NUM_1
+#else
+#define AIRPLAY_I2S_PORT I2S_NUM_0
+#endif
+#endif
+
 namespace esphome {
 namespace airplay_receiver {
 
@@ -48,6 +70,7 @@ static const char *const TAG = "audio_output";
 // intentionally do not include here); the definition lives in audio_receiver.cpp
 // and is resolved at link time.
 size_t audio_receiver_read(int16_t *buffer, size_t samples);
+bool audio_receiver_last_read_was_silence(void);
 
 // Playback frame granularity and resampling headroom. The playback task reads
 // up to FRAME_SAMPLES + 1 frames from the receiver ring per iteration.
@@ -86,6 +109,10 @@ static volatile int g_source_rate = 44100;
 static volatile bool g_resample_reinit = false;
 static volatile audio_channel_mode_t g_channel_mode = AUDIO_CHANNEL_STEREO;
 static int32_t g_volume_q15 = 32768;  // unity
+// Gain actually applied to the last sample, chased toward g_volume_q15 by
+// apply_volume(). -1 means "no session yet": the next frame adopts the target
+// outright instead of sliding up to it from the previous session's gain.
+static int32_t g_volume_ramp_q15 = -1;
 
 // Amp idle power-down watchdog (audio_output.h amp_idle_timeout_ms). When the
 // stream is active but produces no PCM frames for the whole timeout (pause or
@@ -176,24 +203,26 @@ static void amp_set(bool on) {
 // current amplitude (the classic volume "zipper" click). Step once per stereo
 // frame so both channels always carry the same gain.
 static void apply_volume(int16_t *buf, size_t samples) {
-  if (g_volume_q15 == 32768) {
+  int32_t target = g_volume_q15;
+  if (g_volume_ramp_q15 < 0) {
+    g_volume_ramp_q15 = target;  // first frames of a session: adopt silently
+  }
+  // Only skip the scaling loop once the ramp has actually arrived at unity.
+  // Returning early on target == unity alone would leave the ramp stale and
+  // turn every move to or from full volume into an unramped step -- a click.
+  if (g_volume_ramp_q15 == target && target == 32768) {
     return;
   }
-  static int32_t cur_q15 = -1;
-  int32_t target = g_volume_q15;
-  if (cur_q15 < 0) {
-    cur_q15 = target;  // first call: jump silently
-  }
   for (size_t i = 0; i < samples; i++) {
-    if ((i & 1) == 0 && cur_q15 != target) {
-      int32_t diff = target - cur_q15;
+    if ((i & 1) == 0 && g_volume_ramp_q15 != target) {
+      int32_t diff = target - g_volume_ramp_q15;
       int32_t step = diff / 256;
       if (step == 0) {
         step = diff > 0 ? 1 : -1;
       }
-      cur_q15 += step;
+      g_volume_ramp_q15 += step;
     }
-    buf[i] = (int16_t) (((int32_t) buf[i] * cur_q15) >> 15);
+    buf[i] = (int16_t) (((int32_t) buf[i] * g_volume_ramp_q15) >> 15);
   }
 }
 
@@ -272,13 +301,25 @@ static void playback_task(void *arg) {
     if (g_flush_requested) {
       g_flush_requested = false;
       audio_resample_reset();
+      // Biquad state from the old stream position played into the new one is a
+      // thump; the filters must restart from rest alongside the resampler.
+      audio_dsp_reset();
       cursor_reset();
       i2s_channel_disable(g_tx_handle);
       i2s_channel_enable(g_tx_handle);
     }
 
     size_t frames = audio_receiver_read(pcm, FRAME_SAMPLES + 1);
-    if (frames > 0) {
+    // A frame count is not evidence of audio.  The scheduler answers "I cannot
+    // play" by zero-filling the buffer and returning the FULL count, so a
+    // stream wedged with no anchor (no PTP lock -> no clock map) looks exactly
+    // like a healthy one here.  Keying the idle watchdog off `frames > 0`
+    // therefore held the amp powered indefinitely through a fault whose whole
+    // symptom is that nothing comes out of it.
+    const bool carrying_audio =
+        frames > 0 && !audio_receiver_last_read_was_silence();
+
+    if (carrying_audio) {
       // Data is flowing again: cancel any idle power-down and re-assert the
       // amp if the watchdog had muted it (e.g. resume after a long pause).
       if (g_amp_idle_muted) {
@@ -286,6 +327,22 @@ static void playback_task(void *arg) {
         g_amp_idle_muted = false;
       }
       g_amp_idle_since_us = 0;
+    } else if (g_amp_idle_timeout_ms > 0) {
+      // Silent for the full timeout -- a pause, a sustained stall, or a wedge.
+      if (g_amp_idle_since_us == 0) {
+        g_amp_idle_since_us = esp_timer_get_time();
+      } else if (esp_timer_get_time() - g_amp_idle_since_us >=
+                 (int64_t) g_amp_idle_timeout_ms * 1000LL) {
+        if (!g_amp_idle_muted) {
+          amp_set(false);
+          g_amp_idle_muted = true;
+        }
+      }
+    } else {
+      g_amp_idle_since_us = 0;
+    }
+
+    if (frames > 0) {
       int16_t *play_buf = pcm;
       size_t play_frames = frames;
       if (audio_resample_is_active()) {
@@ -294,6 +351,10 @@ static void playback_task(void *arg) {
       }
       apply_volume(play_buf, play_frames * 2);
       apply_channel_mode(play_buf, play_frames);
+      // Last stage before the DAC, so the filters see exactly what is played --
+      // and running after the volume attenuation leaves headroom for a shelf
+      // with positive gain instead of clipping it at high volume.
+      audio_dsp_process(play_buf, play_frames);
       if (i2s_channel_write(g_tx_handle, play_buf, play_frames * 2 * sizeof(int16_t), &written,
                             portMAX_DELAY) == ESP_OK) {
         g_submitted_frames += (uint32_t) (written / stride);
@@ -302,23 +363,9 @@ static void playback_task(void *arg) {
     } else {
       // Receiver underflow — output a frame of silence. Block on the DMA write
       // so the write itself paces the loop, instead of a short timeout plus
-      // vTaskDelay(1) which produced jittery silence.
-      //
-      // Idle amp power-down: if the stream has been silent for the full
-      // timeout (pause or a sustained stall), de-assert the amp-enable line.
-      if (g_amp_idle_timeout_ms > 0) {
-        if (g_amp_idle_since_us == 0) {
-          g_amp_idle_since_us = esp_timer_get_time();
-        } else if (esp_timer_get_time() - g_amp_idle_since_us >=
-                   (int64_t) g_amp_idle_timeout_ms * 1000LL) {
-          if (!g_amp_idle_muted) {
-            amp_set(false);
-            g_amp_idle_muted = true;
-          }
-        }
-      } else {
-        g_amp_idle_since_us = 0;
-      }
+      // vTaskDelay(1) which produced jittery silence.  The idle power-down is
+      // handled above, which also covers the scheduler-silence case this
+      // branch never sees.
       if (i2s_channel_write(g_tx_handle, silence, (size_t) FRAME_SAMPLES * 2 * sizeof(int16_t), &written,
                             portMAX_DELAY) == ESP_OK) {
         g_submitted_frames += (uint32_t) (written / stride);
@@ -345,9 +392,9 @@ void audio_output_set_config(const AudioOutputConfig &config) {
   g_output_rate = (config.sample_rate > 0) ? (uint32_t) config.sample_rate : 44100;
   g_amp_idle_timeout_ms = config.amp_idle_timeout_ms;
   g_config_set = true;
-  ESP_LOGI(TAG, "Config: BCLK=%d LRCK=%d DOUT=%d AMP=%d rate=%d inverted=%d idle_timeout=%u ms",
+  ESP_LOGI(TAG, "Config: BCLK=%d LRCK=%d DOUT=%d AMP=%d rate=%d inverted=%d idle_timeout=%lu ms",
            config.i2s_bclk_gpio, config.i2s_lrclk_gpio, config.i2s_dout_gpio, config.amp_enable_gpio,
-           config.sample_rate, config.amp_enable_inverted ? 1 : 0, config.amp_idle_timeout_ms);
+           config.sample_rate, config.amp_enable_inverted ? 1 : 0, (unsigned long) config.amp_idle_timeout_ms);
 }
 
 esp_err_t audio_output_init(void) {
@@ -367,7 +414,13 @@ esp_err_t audio_output_init(void) {
     amp_set(false);
   }
 
-  i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+  // Resolve the I2S peripheral port: an explicit AudioOutputConfig::i2s_port
+  // (from YAML / a future config option) wins; otherwise the platform default
+  // AIRPLAY_I2S_PORT. Never hardcoded to I2S_NUM_0 (see the block above).
+  const i2s_port_t i2s_port = (g_config.i2s_port >= 0)
+                                  ? (i2s_port_t) g_config.i2s_port
+                                  : (i2s_port_t) AIRPLAY_I2S_PORT;
+  i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(i2s_port, I2S_ROLE_MASTER);
   chan_cfg.dma_desc_num = I2S_DMA_DESC_NUM;
   chan_cfg.dma_frame_num = I2S_DMA_FRAME_NUM;
   // Zero each DMA descriptor after it is sent. Without this a writer stall
@@ -410,12 +463,18 @@ esp_err_t audio_output_init(void) {
   cursor_reset();
 
   ESP_RETURN_ON_ERROR(i2s_channel_enable(g_tx_handle), TAG, "channel enable failed");
-  ESP_LOGI(TAG, "I2S PCM5100 initialized: Rate=%u, DMA_Desc=%d, DMA_Frame=%d, Amp=%d",
-           (unsigned int) g_output_rate, I2S_DMA_DESC_NUM, I2S_DMA_FRAME_NUM, g_config.amp_enable_gpio);
+  ESP_LOGI(TAG, "I2S PCM5100 initialized: Port=%d, Rate=%u, DMA_Desc=%d, DMA_Frame=%d, Amp=%d",
+           (int) i2s_port, (unsigned int) g_output_rate, I2S_DMA_DESC_NUM, I2S_DMA_FRAME_NUM,
+           g_config.amp_enable_gpio);
 
   audio_resample_init(44100, g_output_rate, 2);
+  audio_dsp_set_sample_rate(g_output_rate);
 
   return ESP_OK;
+}
+
+bool audio_output_is_ready(void) {
+  return g_config_set && g_tx_handle != nullptr;
 }
 
 void audio_output_start(void) {
@@ -426,8 +485,12 @@ void audio_output_start(void) {
   // The DMA has been free-running since the last session, so the cursor carries
   // an arbitrary submitted/sent skew. Start the new session clean.
   cursor_reset();
+  // Adopt this session's gain on the first frame rather than sliding to it from
+  // whatever the last session left behind.
+  g_volume_ramp_q15 = -1;
   g_amp_idle_since_us = 0;
   g_amp_idle_muted = false;
+  audio_dsp_reset();
   amp_set(true);
   xTaskCreatePinnedToCore(playback_task, "audio_play", 4096, nullptr, AIRPLAY_AUDIO_PLAYBACK_TASK_PRIORITY,
                           &g_playback_task, AIRPLAY_PLAYBACK_CORE);
@@ -474,6 +537,10 @@ void audio_output_set_sample_rate(uint32_t rate) {
   i2s_channel_reconfig_std_clock(g_tx_handle, &clk_cfg);
   g_output_rate = rate;
   g_resample_reinit = true;  // output rate changed: rebuild the resampler
+  // Biquad coefficients are designed against the output rate, so they are stale
+  // now. Safe here: the caller has stopped the playback task (see above), so
+  // the trig in the redesign is not running on the realtime path.
+  audio_dsp_set_sample_rate(rate);
   cursor_reset();
   i2s_channel_enable(g_tx_handle);
 }

@@ -3,7 +3,8 @@
 //
 // Conservative defaults for the smaller internal DRAM heap and typically
 // 4 MiB PSRAM boards. Same single-source-of-truth note as platform/esp32s3/
-// config.h: allocator.cpp inlines these values for the ESPHome build; keep in
+// config.h: allocator.h inlines these values for the ESPHome build (selected by
+// the AIRPLAY_PLATFORM_ESP32S3 / AIRPLAY_PLATFORM_ESP32 flag); keep in
 // lock-step.
 
 // ---------------------------------------------------------------------------

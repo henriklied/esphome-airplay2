@@ -100,6 +100,52 @@ static const char *const TAG = "airplay_ptp";
 #define PTP_TASK_STACK_SIZE 4096
 #define PTP_TASK_PRIORITY   6
 
+// Receive-path recovery.
+//
+// The sockets and their IP_ADD_MEMBERSHIP join are created once, at
+// ptp_clock_init(), and ensure_ptp_started() is a no-op for every later
+// session ("PTP clock already running").  So if multicast forwarding for
+// 224.0.1.129 stops reaching this board -- the group pruned by an IGMP
+// snooping switch while no master was sending, or an AP roam losing the
+// membership -- nothing ever re-establishes it and the task selects() on dead
+// sockets forever.  That failure is silent end to end: RTSP, metadata and the
+// audio RTP path all stay healthy, but ptp_clock_is_locked() never goes true,
+// so audio_receiver_arm_engine_v2_anchor() never publishes an anchor, the
+// clock map stays invalid, and audio_scheduler_render() emits silence on every
+// call.  Sender connected, metadata scrolling, no sound, no error.
+//
+// Rebuilding both sockets re-issues the join.  It is cheap (two socket/bind/
+// setsockopt triples, no allocation) and idempotent on the wire, so the
+// timeout is chosen for how long a person waits for audio, not for how
+// expensive the retry is.  A live stream carries ~8 SYNC/s, so a healthy
+// session never comes near this; only genuine deafness reaches it.
+#define PTP_RX_SILENCE_TIMEOUT_MS 30000
+
+// Packets ARE arriving but every SYNC/FOLLOW_UP is being dropped by the master
+// filter (see ptp_clock_set_master_clock_id).  Rebuilding sockets cannot help
+// that -- it is a clock_id mismatch, not a dead join -- so it gets a distinct,
+// rate-limited report instead of a recovery attempt.
+#define PTP_FILTER_DEAF_REPORT_MS 30000
+
+// Unlocked-state counter dump.  Unlocked means no anchor, hence no audio, and
+// the counters that say why are printed nowhere else -- but this must stay
+// visible at the INFO level the boards actually run (ESPHome refuses a per-tag
+// level more verbose than the global one, so a DEBUG-only line cannot be turned
+// on without making every other tag chatty too).  It is therefore budgeted
+// rather than rate-limited alone: each session start grants
+// PTP_UNLOCKED_STATUS_BUDGET reports, and nothing else refills it.  A session
+// that locks normally spends none of it; a session that never locks leaves
+// ~30 s of evidence and then goes quiet, so an idle board with no master on the
+// wire never accumulates log.
+//
+// The refill MUST hang off the session, not off pinning a master: tying it to
+// ptp_clock_set_master_clock_id() meant a session whose sender reused the
+// previous clock_id hit that function's early return, granted no budget, and
+// produced no diagnostics at all -- silently, and only in the repeat-offender
+// case that most needed them.
+#define PTP_UNLOCKED_STATUS_MS     5000
+#define PTP_UNLOCKED_STATUS_BUDGET 6
+
 // PTP state
 namespace {
 struct PtpState {
@@ -142,6 +188,25 @@ struct PtpState {
 
   // Master clock filter (0 = accept any master)
   uint64_t expected_clock_id = 0;
+
+  // Receive-path health, tracked PER SOCKET and updated before the master
+  // filter runs, so it separates "nothing is reaching us" (rebuild) from
+  // "everything is being rejected" (a clock_id mismatch, which a rebuild would
+  // not fix).  0 = not seeded yet.
+  //
+  // The split is load-bearing, not tidiness: SYNC arrives only on the event
+  // port and FOLLOW_UP/ANNOUNCE only on the general port, so a single
+  // timestamp lets a live general socket keep the watchdog fed while the event
+  // socket is deaf -- no SYNC, no samples, no lock, no rejections, and no
+  // rebuild either.  That silence survives everything except a reboot.
+  uint32_t last_event_packet_ms = 0;
+  uint32_t last_general_packet_ms = 0;
+  uint32_t socket_rebuilds = 0;
+  uint32_t rebuilds_since_rx = 0;
+  uint32_t last_filter_report_ms = 0;
+  uint32_t rejected_at_last_report = 0;
+  uint32_t last_status_report_ms = 0;
+  uint32_t status_budget = 0;
 };
 PtpState ptp{};
 }  // namespace
@@ -464,6 +529,129 @@ static int create_ptp_socket(uint16_t port) {
   return sock;
 }
 
+// Tear both sockets down and build them again, which re-issues the multicast
+// join.  Called only from ptp_task, so there is no race with the select() that
+// uses these descriptors.  A partial failure leaves the failed side at -1; the
+// task's `max_fd < 0` branch then idles at 100 ms and the next timeout retries,
+// so a transient failure (no IP yet, for instance) costs a delay rather than a
+// permanently dead clock.
+static void rebuild_ptp_sockets(void) {
+  if (ptp.event_socket >= 0) {
+    close(ptp.event_socket);
+    ptp.event_socket = -1;
+  }
+  if (ptp.general_socket >= 0) {
+    close(ptp.general_socket);
+    ptp.general_socket = -1;
+  }
+
+  ptp.event_socket = create_ptp_socket(PTP_EVENT_PORT);
+  ptp.general_socket = create_ptp_socket(PTP_GENERAL_PORT);
+  ptp.socket_rebuilds++;
+  ptp.rebuilds_since_rx++;
+}
+
+// Record any datagram, before filtering.  Receiving something proves the join
+// is live, so this is also where a completed recovery is reported: logging it
+// here (rather than at each rebuild) keeps an idle board -- no sender, hence no
+// master, hence no traffic -- from emitting a line every 30 s forever, while
+// still leaving evidence when a rebuild actually fixed something.
+static void note_ptp_packet(uint32_t now_ms, bool is_event_port) {
+  if (ptp.rebuilds_since_rx > 0) {
+    ESP_LOGI(TAG, "PTP receive path recovered after %lu socket rebuild(s)",
+             (unsigned long) ptp.rebuilds_since_rx);
+    ptp.rebuilds_since_rx = 0;
+  }
+  if (is_event_port) {
+    ptp.last_event_packet_ms = now_ms;
+  } else {
+    ptp.last_general_packet_ms = now_ms;
+  }
+}
+
+// Split the two ways the receive path goes deaf, because they need different
+// fixes and only one of them is repairable from here.
+static void check_ptp_rx_health(uint32_t now_ms) {
+  if (ptp.last_event_packet_ms == 0 || ptp.last_general_packet_ms == 0) {
+    // Seed both on the first pass through the loop.
+    ptp.last_event_packet_ms = now_ms;
+    ptp.last_general_packet_ms = now_ms;
+    return;
+  }
+
+  const uint32_t quiet_event_ms = now_ms - ptp.last_event_packet_ms;
+  const uint32_t quiet_general_ms = now_ms - ptp.last_general_packet_ms;
+
+  if (!ptp.locked && ptp.status_budget > 0 &&
+      (ptp.last_status_report_ms == 0 ||
+       (now_ms - ptp.last_status_report_ms) >= PTP_UNLOCKED_STATUS_MS)) {
+    ptp.last_status_report_ms = now_ms;
+    ptp.status_budget--;
+    // sync=0 announce=0 with a master pinned means the SENDER stopped sending,
+    // not that this board went deaf -- the counters are what tell those apart.
+    ESP_LOGI(TAG,
+             "unlocked: sync=%lu followup=%lu announce=%lu rejected=%lu "
+             "samples=%lu quiet_event=%lu ms quiet_general=%lu ms "
+             "rebuilds=%lu master=%016llx",
+             (unsigned long) ptp.sync_count, (unsigned long) ptp.followup_count,
+             (unsigned long) ptp.announce_count,
+             (unsigned long) ptp.rejected_master_count,
+             (unsigned long) ptp.sample_count, (unsigned long) quiet_event_ms,
+             (unsigned long) quiet_general_ms,
+             (unsigned long) ptp.socket_rebuilds,
+             (unsigned long long) ptp.expected_clock_id);
+  }
+
+  // Arriving but unusable: the filter is pinned to a master that is not the
+  // one on the wire.  Report it -- rejected_master_count is otherwise never
+  // surfaced anywhere -- and leave the sockets alone.
+  const uint32_t rejected = ptp.rejected_master_count;
+  if (rejected != ptp.rejected_at_last_report && !ptp.locked) {
+    if (ptp.last_filter_report_ms == 0 ||
+        (now_ms - ptp.last_filter_report_ms) >= PTP_FILTER_DEAF_REPORT_MS) {
+      ESP_LOGW(TAG,
+               "PTP traffic present but filtered out: rejected=%lu (+%lu) "
+               "expected_master=%016llx samples=%lu -- no lock, so no anchor "
+               "and no audio",
+               (unsigned long) rejected,
+               (unsigned long) (rejected - ptp.rejected_at_last_report),
+               (unsigned long long) ptp.expected_clock_id,
+               (unsigned long) ptp.sample_count);
+      ptp.last_filter_report_ms = now_ms;
+      ptp.rejected_at_last_report = rejected;
+    }
+    return;
+  }
+
+  // EITHER socket going quiet is enough: a deaf event port means no SYNC and
+  // therefore no clock, however healthy the general port looks.
+  if (quiet_event_ms < PTP_RX_SILENCE_TIMEOUT_MS &&
+      quiet_general_ms < PTP_RX_SILENCE_TIMEOUT_MS) {
+    return;
+  }
+
+  // Assume the multicast join is gone on at least one socket; both are rebuilt
+  // because they share the group and the cost is trivial.
+  // Quiet once the evidence budget is spent, so an idle board does not log a
+  // line every 30 s forever.
+  if (ptp.status_budget > 0) {
+    ESP_LOGI(TAG,
+             "PTP socket quiet (event=%lu ms general=%lu ms), rebuilding "
+             "(rebuild #%lu)",
+             (unsigned long) quiet_event_ms, (unsigned long) quiet_general_ms,
+             (unsigned long) (ptp.socket_rebuilds + 1U));
+  } else {
+    ESP_LOGD(TAG,
+             "PTP socket quiet (event=%lu ms general=%lu ms), rebuilding "
+             "(rebuild #%lu)",
+             (unsigned long) quiet_event_ms, (unsigned long) quiet_general_ms,
+             (unsigned long) (ptp.socket_rebuilds + 1U));
+  }
+  rebuild_ptp_sockets();
+  ptp.last_event_packet_ms = now_ms;
+  ptp.last_general_packet_ms = now_ms;
+}
+
 // PTP task - listens for messages on both ports
 static void ptp_task(void *pvParameters) {
   (void)pvParameters;
@@ -505,13 +693,14 @@ static void ptp_task(void *pvParameters) {
       continue;
     }
 
-    if (ret == 0) {
-      // Timeout - check if we lost lock due to no messages
-    } else {
+    const uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+
+    if (ret > 0) {
       // Check event port (SYNC messages)
       if (ptp.event_socket >= 0 && FD_ISSET(ptp.event_socket, &read_fds)) {
         ssize_t len = recv(ptp.event_socket, buffer, sizeof(buffer), 0);
         if (len > 0) {
+          note_ptp_packet(now_ms, true);
           process_ptp_message(buffer, (size_t)len, true);
         }
       }
@@ -520,10 +709,16 @@ static void ptp_task(void *pvParameters) {
       if (ptp.general_socket >= 0 && FD_ISSET(ptp.general_socket, &read_fds)) {
         ssize_t len = recv(ptp.general_socket, buffer, sizeof(buffer), 0);
         if (len > 0) {
+          note_ptp_packet(now_ms, false);
           process_ptp_message(buffer, (size_t)len, false);
         }
       }
     }
+
+    // Runs on both the timeout and the data path: a master that is sending
+    // only rejected packets keeps select() busy, so the deaf-filter case would
+    // never be reached from the timeout branch alone.
+    check_ptp_rx_health(now_ms);
   }
 
   // Cleanup
@@ -679,6 +874,9 @@ void ptp_clock_set_master_clock_id(uint64_t clock_id) {
   ESP_LOGI(TAG, "PTP master clock_id %s: %016llx", clock_id ? "set" : "cleared",
            (unsigned long long)clock_id);
   ptp.expected_clock_id = clock_id;
+  // The master changed under us, which invalidates every sample we hold; treat
+  // it like a fresh start for reporting purposes too.
+  ptp_clock_notify_session_start();
 
   // Drop accumulated samples / lock state — they may have come from a
   // different (wrong) master.
@@ -694,6 +892,11 @@ void ptp_clock_set_master_clock_id(uint64_t clock_id) {
 }
 
 uint64_t ptp_clock_get_master_clock_id(void) { return ptp.expected_clock_id; }
+
+void ptp_clock_notify_session_start(void) {
+  ptp.status_budget = PTP_UNLOCKED_STATUS_BUDGET;
+  ptp.last_status_report_ms = 0;
+}
 
 void ptp_clock_get_stats(ptp_stats_t *stats) {
   stats->sync_count = ptp.sync_count;

@@ -7,6 +7,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <strings.h>
@@ -21,16 +22,20 @@
 #include <string>
 
 #include "esphome/core/log.h"
+#include "esp_err.h"
 #include "esp_mac.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 #include "../allocator.h"
+#include "../timing/ntp_clock.h"
+#include "../timing/ptp_clock.h"
 #include "bplist.h"
 #include "mdns_airplay.h"
 #include "rtsp_conn.h"
 #include "rtsp_crypto.h"
 #include "rtsp_events.h"
+#include "rtsp_fairplay.h"
 #include "rtsp_message.h"
 #include "socket_utils.h"
 
@@ -48,6 +53,8 @@ static const char *const TAG = "airplay_transport";
 #define RTSP_CLIENT_STACK_SIZE 8192
 #define RTSP_SERVER_STACK_SIZE 4096
 #define RTSP_EVENT_STACK_SIZE 4096
+// How long event_port_task() sleeps between non-blocking accept() attempts.
+#define EVENT_ACCEPT_POLL_MS 100
 #define RTSP_AP2_AUDIO_BUFFER_SIZE (512 * 1024)        // buffered (type 103) TCP pre-fill
 #define RTSP_AP2_REALTIME_AUDIO_BUFFER_SIZE (1 * 1024 * 1024)  // realtime (type 96) UDP
 
@@ -146,24 +153,27 @@ static bool request_uses_rtsp(const RtspRequest *req) {
   return req != nullptr && strncasecmp(req->protocol, "RTSP/", 5) == 0;
 }
 
-// Allocate a stream port by binding an ephemeral socket of the given type,
-// recording the assigned port, then closing the probe socket. The audio engine
-// later binds the real socket to the advertised port.
+// Allocate a stream port by binding an ephemeral socket of the given type and
+// KEEPING it held (via socket_utils_reserve_port), recording the assigned port.
+// The audio engine later consumes the same already-bound descriptor through its
+// socket_utils_bind_* call, so the advertised port is bound exactly once and
+// cannot be stolen between the SETUP advertisement and the audio engine bind
+// (the old code closed the probe socket first, leaving a TOCTOU race).
 static uint16_t alloc_stream_port(bool udp) {
   uint16_t port = 0;
-  int sock;
-  if (udp) {
-    sock = socket_utils_bind_udp(0, 0, 0, &port);
-  } else {
-    sock = socket_utils_bind_tcp_listener(0, 1, false, &port);
-  }
-  if (sock > 0) {
-    close(sock);
+  if (socket_utils_reserve_port(udp, &port) != 0) {
+    ESP_LOGW(TAG, "Failed to reserve %s stream port", udp ? "UDP" : "TCP");
+    return 0;
   }
   return port;
 }
 
-static int create_event_socket(uint16_t *port) { return socket_utils_bind_tcp_listener(0, 1, false, port); }
+// Non-blocking on purpose: event_port_task() must be able to notice
+// event_task_should_stop between accept() attempts. A blocking accept() parks
+// the task forever, and nothing else closes this listener -- one leaked fd and
+// one leaked 4 KB task per AirPlay session, until LWIP runs out of sockets
+// (CONFIG_LWIP_MAX_SOCKETS is 10) and the RTP ports, OTA and the API all fail.
+static int create_event_socket(uint16_t *port) { return socket_utils_bind_tcp_listener(0, 1, true, port); }
 
 // ===========================================================================
 // Response body builders
@@ -187,10 +197,21 @@ static void event_port_task(void *pv) {
     socklen_t addr_len = sizeof(client_addr);
     int client = accept(listen_socket, (struct sockaddr *)&client_addr, &addr_len);
     if (client < 0) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        vTaskDelay(pdMS_TO_TICKS(EVENT_ACCEPT_POLL_MS));
+        continue;
+      }
       if (!event_task_should_stop) {
         ESP_LOGE(TAG, "Event port accept error: %d", errno);
       }
       break;
+    }
+    // The listener is non-blocking; the client connection is not. The liveness
+    // loop below relies on recv() parking until iOS drops the connection, and
+    // on stop_event_port_task()'s shutdown() to break it out.
+    int client_flags = fcntl(client, F_GETFL, 0);
+    if (client_flags >= 0) {
+      fcntl(client, F_SETFL, client_flags & ~O_NONBLOCK);
     }
     if (event_client_socket >= 0) {
       close(event_client_socket);
@@ -220,6 +241,9 @@ static void event_port_task(void *pv) {
     close(event_client_socket);
     event_client_socket = -1;
   }
+  // The task owns the listener from start_event_port_task() onwards -- the
+  // SETUP path drops its copy of the fd without closing it.
+  close(listen_socket);
   event_listen_socket = -1;
   event_task_handle = nullptr;
   vTaskDelete(nullptr);
@@ -442,13 +466,30 @@ static void client_task(void *pv) {
   }
 
 cleanup:
-  ESP_LOGI(TAG, "Client slot %d disconnected", slot_idx);
+  // should_stop means this slot was superseded -- the server task shut our
+  // socket down because a new client arrived, and that client's task is
+  // already running. It is NOT the sender going away.
+  //
+  // The distinction matters because the server task does not wait for us here:
+  // signal_old_client_stop() shuts the socket and creates the new task
+  // immediately, so this cleanup can land after the new session has finished
+  // SETUP/RECORD and started audio. Emitting DISCONNECTED then would call
+  // audio_receiver_stop() on the *new* session, and stop_event_port_task()
+  // would close the event port it just opened -- leaving the sender connected,
+  // metadata flowing, and no sound. That is what a wifi roam reproduces: the
+  // old socket is dead but still open, so this task only wakes once the
+  // replacement is already live.
+  const bool superseded = slot->should_stop;
+  ESP_LOGI(TAG, "Client slot %d disconnected%s", slot_idx,
+           superseded ? " (superseded)" : "");
   airplay_free(buffer);
   close(slot->socket);
   slot->socket = -1;
 
-  transport_events_emit(TRANSPORT_EVENT_DISCONNECTED, nullptr);
-  stop_event_port_task();
+  if (!superseded) {
+    transport_events_emit(TRANSPORT_EVENT_DISCONNECTED, nullptr);
+    stop_event_port_task();
+  }
 
   rtsp_conn_free(conn);
   slot->conn = nullptr;
@@ -539,6 +580,12 @@ static void handle_post(int socket, RtspConn *conn, const RtspRequest *req, cons
     }
     size_t response_len = 0;
     int err = -1;
+    // Transient (basic/auto) pair-setup ends at M4 — iOS never sends M5. The
+    // channel keys are derived at M3 and session_established set there, so the
+    // encrypted RTSP control channel comes up AFTER M4 is delivered (M4 stays
+    // plaintext, matching upstream). The enhanced (auto/device-add) path keeps
+    // the existing M5 gate below.
+    bool enable_encryption_after_response = false;
 
     if (body != nullptr && body_len > 0) {
       const uint8_t *state = nullptr;
@@ -550,6 +597,11 @@ static void handle_post(int socket, RtspConn *conn, const RtspRequest *req, cons
             break;
           case 3:
             err = s_crypto->pair_setup_m3(conn->hap_session, body, body_len, response, response_cap, &response_len);
+            // M4 is sent in the clear below; the channel switches to ChaCha20
+            // only after it (matching upstream rtsp_handlers.c).
+            if (err == 0 && s_crypto->is_pair_setup_transient(conn->hap_session)) {
+              enable_encryption_after_response = true;
+            }
             break;
           case 5:
             err = s_crypto->pair_setup_m5(conn->hap_session, body, body_len, response, response_cap, &response_len);
@@ -567,6 +619,12 @@ static void handle_post(int socket, RtspConn *conn, const RtspRequest *req, cons
     if (err == 0 && response_len > 0) {
       rtsp_send_response(socket, conn, 200, "OK", req->cseq, "Content-Type: application/octet-stream\r\n",
                          (const char *)response, response_len);
+      // Transient pair-setup: after M4 the handshake is complete and the sender
+      // switches to ChaCha20 framing, so bring the encrypted channel up now.
+      if (enable_encryption_after_response) {
+        conn->encrypted_mode = true;
+        ESP_LOGI(TAG, "RTSP encryption enabled (transient pair-setup M4)");
+      }
     } else {
       ESP_LOGE(TAG, "Pair-setup failed: err=%d", err);
       static const uint8_t error_response[] = {0x06, 0x01, 0x02, 0x07, 0x01, 0x02};
@@ -634,7 +692,19 @@ static void handle_post(int socket, RtspConn *conn, const RtspRequest *req, cons
   }
 
   if (strstr(req->path, "/fp-setup")) {
-    // AirPlay 1 / FairPlay handshake — not ported. Answer with a minimal bloom.
+    // FairPlay handshake. We advertise FairPlay (features bits 11/14, raop
+    // et=3,5), so a sender opens the encrypted channel and POSTs /fp-setup
+    // before anything else; answering it with a stub makes it hang up.
+    uint8_t *fp_response = nullptr;
+    size_t fp_response_len = 0;
+    if (body != nullptr && body_len >= 16 &&
+        rtsp_fairplay_handle(body, body_len, &fp_response, &fp_response_len) == 0) {
+      rtsp_send_response(socket, conn, 200, "OK", req->cseq, "Content-Type: application/octet-stream\r\n",
+                         (const char *)fp_response, fp_response_len);
+      airplay_free(fp_response);
+      return;
+    }
+    ESP_LOGW(TAG, "/fp-setup: unhandled handshake (%zu bytes), answering stub", body_len);
     rtsp_send_response(socket, conn, 200, "OK", req->cseq, "Content-Type: application/octet-stream\r\n", "\x00", 1);
     return;
   }
@@ -720,8 +790,53 @@ static void handle_announce(int socket, RtspConn *conn, const RtspRequest *req, 
 
 // SETUP: initial session (no streams -> eventPort/timingPort) or stream SETUP
 // (streams[] -> dataPort/controlPort + audio config handed to the engine).
+// Belt-and-braces clock start. Some senders never emit SETPEERS (or emit it
+// after the stream has already started), which would leave the PTP clock dead
+// and the engine without an anchor timestamp -> silence. ptp_clock_init() is
+// idempotent (returns ESP_ERR_INVALID_STATE when already running), so calling
+// it at the first stream SETUP / RECORD is safe; SETPEERS stays the canonical
+// start point. The master clock id is applied separately when the anchor
+// arrives, so starting early does not lock onto a wrong clock.
+static void ensure_ptp_started() {
+  // Re-arm the unlocked-state diagnostics for this session even when the clock
+  // is already running (the common case -- the task is started once per boot).
+  ptp_clock_notify_session_start();
+  esp_err_t perr = ptp_clock_init();
+  if (perr == ESP_OK) {
+    ESP_LOGI(TAG, "PTP clock started");
+  } else if (perr != ESP_ERR_INVALID_STATE) {
+    ESP_LOGW(TAG, "PTP clock start failed: %s", esp_err_to_name(perr));
+  }
+}
+
 static void handle_setup(int socket, RtspConn *conn, const RtspRequest *req, const uint8_t *raw, size_t raw_len) {
-  (void)raw_len;
+  // Capture the sender's timing/control ports from the RTSP Transport header
+  // (AirPlay 1 style) so the NTP timing fallback in SETPEERS gets a real peer
+  // rather than reading the never-written client_timing_port field. This is a
+  // legacy path (AirPlay 2 uses PTP as the clock); if a sender supplies a
+  // timing_port, the fallback genuinely activates.
+  {
+    char req_copy[512] = {0};
+    size_t rc = raw_len;
+    if (rc > sizeof(req_copy) - 1) {
+      rc = sizeof(req_copy) - 1;
+    }
+    if (rc > 0) {
+      memcpy(req_copy, raw, rc);
+      req_copy[rc] = '\0';
+      uint16_t scp = 0, stp = 0;
+      rtsp_parse_transport(req_copy, &scp, &stp);
+      // client_control_port is authoritative from the AirPlay 2 bplist below;
+      // only fall back to the Transport header for legacy senders. The timing
+      // port has no other source, so adopt it for the NTP fallback.
+      if (conn->client_timing_port == 0) {
+        conn->client_timing_port = stp;
+      }
+      if (conn->client_control_port == 0) {
+        conn->client_control_port = scp;
+      }
+    }
+  }
 
   const uint8_t *body = req->body;
   size_t body_len = req->body_len;
@@ -880,6 +995,7 @@ static void handle_setup(int socket, RtspConn *conn, const RtspRequest *req, con
   }
 
   // Stream SETUP.
+  ensure_ptp_started();
   int64_t stream_type = conn->stream_type > 0 ? conn->stream_type : 96;
   bool buffered = (stream_type == 103);
 
@@ -899,6 +1015,8 @@ static void handle_setup(int socket, RtspConn *conn, const RtspRequest *req, con
   audio.stream_type = stream_type;
   audio.data_port = conn->data_port;
   audio.control_port = conn->control_port;
+  audio.client_ip = conn->client_ip;
+  audio.client_control_port = conn->client_control_port;
   audio.timing_port = conn->timing_port;
   audio.buffered_port = conn->buffered_port;
   audio.codec_type = codec_type;
@@ -944,6 +1062,7 @@ static void handle_record(int socket, RtspConn *conn, const RtspRequest *req, co
   (void)raw;
   (void)raw_len;
   ESP_LOGI(TAG, "RECORD received (stream_paused was %d)", conn->stream_paused);
+  ensure_ptp_started();
   conn->stream_paused = false;
   conn->stream_active = true;
   transport_events_emit(TRANSPORT_EVENT_PLAYING, nullptr);
@@ -1236,6 +1355,45 @@ static void handle_setpeers(int socket, RtspConn *conn, const RtspRequest *req, 
   (void)raw;
   (void)raw_len;
   ESP_LOGI(TAG, "%s: body_len=%zu", req->method, req->body_len);
+
+  // The SETPEERS body is a binary plist of the A/V sync peer set; the sender
+  // pushes it once the playback group (multiroom) is known. This is the point
+  // the AirPlay 2 timing reference must be up, otherwise ptp_clock_is_locked()
+  // stays false and audio_receiver_arm_engine_v2_anchor() never arms the
+  // engine -> the stream is silently devoid of an anchor timestamp.
+  //
+  // Upstream starts ptp_clock at boot (main.c); the ESPHome component has no
+  // app_main, and SETPEERS fires after the client is connected and the network
+  // is up, which is both the correct ordering and more robust than a setup()
+  // call that would race WiFi bring-up. ptp_clock_init() is a no-op if the
+  // clock is already running, so repeated SETPEERS/x can't spawn a second task.
+  esp_err_t perr = ptp_clock_init();
+  if (perr == ESP_OK) {
+    ESP_LOGI(TAG, "PTP clock started (SETPEERS)");
+  } else if (perr == ESP_ERR_INVALID_STATE) {
+    // Already running against a previous SETPEERS for this/another session.
+    ESP_LOGI(TAG, "PTP clock already running (SETPEERS)");
+  } else {
+    ESP_LOGE(TAG, "PTP clock start failed: %s", esp_err_to_name(perr));
+  }
+
+  // AirPlay 2 timing uses PTP (the anchor names the PTP master). The NTP-style
+  // client covers the AirPlay 1 sync path: point it at the sender's timing port
+  // derived from the peer list / connection. Prefer the connection state
+  // (sender IP + SETUP Transport timing port), matching upstream
+  // start_ntp_timing_or_fail(). ntp_clock_start_client() re-targets (or leaves
+  // alone) an already-running client, so it is exactly-once per target.
+  if (conn->client_ip != 0 && conn->client_timing_port != 0) {
+    esp_err_t nerr = ntp_clock_start_client(conn->client_ip, conn->client_timing_port);
+    if (nerr == ESP_OK) {
+      ESP_LOGI(TAG, "NTP timing client started (SETPEERS)");
+    } else {
+      ESP_LOGW(TAG, "NTP timing client start failed: %s", esp_err_to_name(nerr));
+    }
+  } else {
+    ESP_LOGW(TAG, "SETPEERS: no timing peer (ip/port) available; PTP is the timing clock");
+  }
+
   rtsp_send_ok(socket, conn, req->cseq);
 }
 

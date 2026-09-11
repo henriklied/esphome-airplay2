@@ -1,3 +1,4 @@
+# Amped-S3 (ESP32-S3) example — PCM5100 pins for that board.
 # Schema/codegen-validation config — no secrets, so it validates standalone.
 # The real config.yaml uses !secret placeholders resolved from secrets.yaml.
 esphome:

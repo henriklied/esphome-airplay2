@@ -12,43 +12,16 @@
 // ---------------------------------------------------------------------------
 // Platform memory-policy profile
 // ---------------------------------------------------------------------------
-// The canonical values for every knob live in the platform profile headers
-//   platform/esp32s3/config.h   (ESP32-S3 target, 8MiB octal PSRAM)
-//   platform/esp32/config.h     (generic ESP32)
-//
-// ESPHome's external-component build copies only top-level (and one-level
-// subdir) sources into the generated tree; the two-level platform/*/config.h
-// headers are NOT copied, so the SAME profile values are inlined below to keep
-// the generated allocator self-contained. The active profile is chosen by the
-// AIRPLAY_PLATFORM_ESP32S3 / AIRPLAY_PLATFORM_ESP32 build flag emitted from
-// the component's to_code(). Keep the values below in lock-step with the
-// corresponding platform header. When the component is compiled as a native
-// ESP-IDF component (whole tree on the include path) a future task may switch
-// these to #include "platform/esp32/config.h" instead.
-#if defined(AIRPLAY_PLATFORM_ESP32S3)
-#ifndef AIRPLAY_ALWAYS_INTERNAL_BYTES
-#define AIRPLAY_ALWAYS_INTERNAL_BYTES 1024
-#endif
-#ifndef AIRPLAY_INTERNAL_RESERVE_BYTES
-#define AIRPLAY_INTERNAL_RESERVE_BYTES 65536
-#endif
-#elif defined(AIRPLAY_PLATFORM_ESP32)
-#ifndef AIRPLAY_ALWAYS_INTERNAL_BYTES
-#define AIRPLAY_ALWAYS_INTERNAL_BYTES 1024
-#endif
-#ifndef AIRPLAY_INTERNAL_RESERVE_BYTES
-#define AIRPLAY_INTERNAL_RESERVE_BYTES 32768
-#endif
-#else
-// No/profile fallback: identical to the ESP32-S3 target so out-of-the-box
-// behaviour matches the primary board.
-#ifndef AIRPLAY_ALWAYS_INTERNAL_BYTES
-#define AIRPLAY_ALWAYS_INTERNAL_BYTES 1024
-#endif
-#ifndef AIRPLAY_INTERNAL_RESERVE_BYTES
-#define AIRPLAY_INTERNAL_RESERVE_BYTES 65536
-#endif
-#endif
+// The values for every knob (AIRPLAY_RING_FRAMES, AIRPLAY_ALWAYS_INTERNAL_BYTES,
+// AIRPLAY_INTERNAL_RESERVE_BYTES, per-task stacks, core affinity, decoder
+// placement, BT enable) are carried by allocator.h, which is included above
+// (via #include "allocator.h") and is in turn included by every module in the
+// component. They are selected there by the AIRPLAY_PLATFORM_ESP32S3 /
+// AIRPLAY_PLATFORM_ESP32 build flag emitted from __init__.py. The canonical
+// reference remains platform/esp32s3/config.h and platform/esp32/config.h;
+// allocator.h inlines the same values because ESPHome's external-component
+// build does not copy the two-level platform/*/config.h headers into the
+// generated tree.
 
 // ---------------------------------------------------------------------------
 // airplay_alloc
@@ -70,7 +43,7 @@ void *airplay_alloc(size_t size, bool realtime) {
     return heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   }
   return heap_caps_malloc_prefer(size, 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
-                                 MALLOC_CAP_INTERNAL);
+                                 MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 #else
   (void)realtime;
   return malloc(size);
@@ -87,16 +60,20 @@ void *airplay_calloc(size_t n, size_t size, bool realtime) {
   }
 #if defined(USE_ESP_IDF)
   if (realtime) {
-    return heap_caps_calloc(n, size, MALLOC_CAP_INTERNAL);
+    // Realtime: internal DRAM (fast, cacheable, DMA-safe). Note MALLOC_CAP_8BIT:
+    // without it heap_caps_* may return 32-bit-only IRAM, which cannot be
+    // written with 16-bit stores (the silence buffer is int16_t) and would
+    // fault with a LoadStoreError.
+    return heap_caps_calloc(n, size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   }
   // Mirror the airplay_alloc non-realtime policy: cache the threshold check on
   // the total byte count.
   size_t total = n * size;
   if (total <= AIRPLAY_ALWAYS_INTERNAL_BYTES) {
-    return heap_caps_calloc(n, size, MALLOC_CAP_INTERNAL);
+    return heap_caps_calloc(n, size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   }
   return heap_caps_calloc_prefer(n, size, 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
-                                 MALLOC_CAP_INTERNAL);
+                                 MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 #else
   (void)realtime;
   return calloc(n, size);

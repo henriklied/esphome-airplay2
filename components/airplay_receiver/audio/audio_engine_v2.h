@@ -59,6 +59,15 @@ typedef struct {
    * to format a message itself. */
   uint64_t conceal_events_logged;
   uint32_t drift_servo_trims_logged;
+  // Output-side glitch counters, reported as per-second deltas alongside the
+  // network-side ones. Concealment only covers packets that never arrived; an
+  // I2S underrun, a decode failure or a dropped queue entry is just as audible
+  // and was previously invisible in the telemetry.
+  uint32_t underruns_logged;
+  uint32_t decode_fail_logged;
+  uint32_t queue_drops_logged;
+  uint32_t epoch_drops_logged;
+  uint32_t pcm_inserted_logged;
   uint32_t last_conceal_gap_rtp;
 
   /* Per-epoch ingress/decode diagnostics. Atomic increments are used because

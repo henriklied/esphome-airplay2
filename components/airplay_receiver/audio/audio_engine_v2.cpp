@@ -29,6 +29,7 @@
 #include "freertos/task.h"
 
 #include "../allocator.h"
+#include "audio_output.h"
 
 namespace esphome {
 namespace airplay_receiver {
@@ -106,6 +107,11 @@ uint32_t audio_engine_v2_begin_epoch(audio_engine_v2_t *engine,
   // has to follow it: otherwise the next status line subtracts the old total
   // from zero and reports the per-second rate as a wrapped uint32.
   engine->drift_servo_trims_logged = 0;
+  engine->underruns_logged = 0;
+  engine->decode_fail_logged = 0;
+  engine->queue_drops_logged = 0;
+  engine->epoch_drops_logged = 0;
+  engine->pcm_inserted_logged = 0;
   engine->last_conceal_gap_rtp = 0;
   __atomic_store_n(&engine->diag_rx_packets, 0, __ATOMIC_RELAXED);
   __atomic_store_n(&engine->diag_gate_drops, 0, __ATOMIC_RELAXED);
@@ -511,19 +517,41 @@ size_t audio_engine_v2_render(audio_engine_v2_t *engine,
     const uint32_t new_trims =
         engine->scheduler.drift_servo_trims - engine->drift_servo_trims_logged;
     engine->drift_servo_trims_logged = engine->scheduler.drift_servo_trims;
+    const uint32_t underruns_now = audio_output_get_underruns();
+    const uint32_t new_underruns = underruns_now - engine->underruns_logged;
+    engine->underruns_logged = underruns_now;
+    const uint32_t decode_fail_now =
+        __atomic_load_n(&engine->diag_decode_fail, __ATOMIC_RELAXED);
+    const uint32_t new_decode_fail = decode_fail_now - engine->decode_fail_logged;
+    engine->decode_fail_logged = decode_fail_now;
+    const uint32_t queue_drops_now =
+        __atomic_load_n(&engine->diag_queue_drops, __ATOMIC_RELAXED);
+    const uint32_t new_queue_drops = queue_drops_now - engine->queue_drops_logged;
+    engine->queue_drops_logged = queue_drops_now;
+    const uint32_t epoch_drops_now =
+        __atomic_load_n(&engine->diag_epoch_drops, __ATOMIC_RELAXED);
+    const uint32_t new_epoch_drops = epoch_drops_now - engine->epoch_drops_logged;
+    engine->epoch_drops_logged = epoch_drops_now;
+    const uint32_t pcm_inserted_now =
+        __atomic_load_n(&engine->diag_pcm_inserted, __ATOMIC_RELAXED);
+    const uint32_t new_pcm_inserted = pcm_inserted_now - engine->pcm_inserted_logged;
+    engine->pcm_inserted_logged = pcm_inserted_now;
     ESP_LOGI(TAG,
              "playout: raw=%s%" PRIu32 ".%03" PRIu32 " ms span=%" PRId32
              " us filt=%s%" PRIu32 ".%03" PRIu32 " ms (%" PRId32
              " smp) drift=%" PRId32 " ppm trims=%" PRIu32 "/s (%" PRIu32
              ") buffered=%u concealed=%" PRIu64 " holes=%" PRIu64 " (+%" PRIu64
-             ")",
+             ") under=%" PRIu32 " dfail=%" PRIu32 " qdrop=%" PRIu32
+             " edrop=%" PRIu32 " ins=%" PRIu32,
              raw_us < 0 ? "-" : "", raw_abs_us / 1000U, raw_abs_us % 1000U,
              span_us, filtered_us < 0 ? "-" : "", filtered_abs_us / 1000U,
              filtered_abs_us % 1000U, filtered_samples,
              engine->scheduler.estimated_drift_ppm, new_trims,
              engine->scheduler.drift_servo_trims,
              (unsigned)audio_timeline_count(&engine->timeline),
-             engine->concealed_samples, engine->conceal_events, new_conceals);
+             engine->concealed_samples, engine->conceal_events, new_conceals,
+             new_underruns, new_decode_fail, new_queue_drops, new_epoch_drops,
+             new_pcm_inserted);
   }
   return produced;
 }

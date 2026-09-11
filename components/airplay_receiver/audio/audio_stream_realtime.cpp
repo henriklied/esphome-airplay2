@@ -20,6 +20,8 @@
 // see audio_receiver.h. The per-stream encryption config uses the component's
 // AudioEncrypt (AudioEncryptType::NOT_SET == none).
 
+#include <inttypes.h>
+
 #include "audio_stream.h"
 
 #include "audio_receiver_internal.h"
@@ -31,6 +33,8 @@
 
 #include "esp_err.h"
 #include "esp_timer.h"
+
+#include "lwip/stats.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -134,6 +138,88 @@ static const uint8_t *parse_rtp(const uint8_t *packet, size_t len,
 static uint64_t resend_mask_for_count(uint16_t count) {
   return count >= RESEND_WINDOW_BITS ? UINT64_MAX : ((1ULL << count) - 1ULL);
 }
+
+// Report retransmission effectiveness at 1 Hz: how many NACKs went out, how
+// many resends came back usable, and how many arrived past their deadline.
+// A high stale count means the round trip is too slow for the playout latency;
+// sent >> recovered + stale means the sender is ignoring the requests.
+static void resend_log_stats(audio_receiver_state_t *state) {
+  int64_t now = esp_timer_get_time();
+  if (state->resend_stats_log_us != 0 &&
+      (now - state->resend_stats_log_us) < 1000000) {
+    return;
+  }
+  state->resend_stats_log_us = now;
+  if (state->resend_sent_count == 0 && state->resend_recovered_count == 0 &&
+      state->resend_stale_count == 0 && state->resend_late_recovered_count == 0 &&
+      state->resend_late_stale_count == 0) {
+    return;
+  }
+  // unmarked_* are backward-sequence packets with no retransmit payload type:
+  // if they track sent, the sender is answering and the 0x56 check is wrong.
+  ESP_LOGI(TAG,
+           "resend: sent=%" PRIu32 " recovered=%" PRIu32 " stale=%" PRIu32
+           " unmarked_ok=%" PRIu32 " unmarked_stale=%" PRIu32,
+           state->resend_sent_count, state->resend_recovered_count,
+           state->resend_stale_count, state->resend_late_recovered_count,
+           state->resend_late_stale_count);
+  state->resend_sent_count = 0;
+  state->resend_recovered_count = 0;
+  state->resend_stale_count = 0;
+  state->resend_late_recovered_count = 0;
+  state->resend_late_stale_count = 0;
+}
+
+// Separates loss on air from loss inside the board, which `holes` cannot: both
+// surface only as an RTP sequence gap.
+//
+// lwIP bumps udp.recv at the top of udp_input(), before the pcb lookup and
+// before recv_udp() posts the packet to the socket's receive mbox. That mbox is
+// CONFIG_LWIP_UDP_RECVMBOX_SIZE deep (6 packets, ~48ms at 125 pkt/s) and
+// overflow is discarded by sys_mbox_trypost with no counter of any kind. So:
+//
+//   stack -- every UDP datagram that reached lwIP, i.e. survived the air
+//   task  -- what this receiver actually read off the data socket
+//   gap   -- stack - task, dominated by recvmbox overflow
+//
+// gap ~= 0 while holes > 0 means the packets never arrived: on-air loss, and
+// only the radio side can fix it. gap tracking holes means the board is
+// dropping packets it already received, which is a config fix.
+//
+// stack counts all UDP, not just audio: PTP on 319/320, mDNS, and the control
+// socket. Those are low-rate next to 125 pkt/s but not zero -- read the idle
+// floor off a capture with no stream running and subtract it.
+#if LWIP_STATS
+static void rxpath_log_stats(audio_receiver_state_t *state) {
+  int64_t now = esp_timer_get_time();
+  if (state->rxpath_log_us != 0 && (now - state->rxpath_log_us) < 1000000) {
+    return;
+  }
+
+  uint32_t udp_recv = (uint32_t) lwip_stats.udp.recv;
+  uint32_t received = state->stats.packets_received;
+
+  // First call since the stream started: seed the baselines, or the first
+  // sample reports everything counted since boot.
+  if (state->rxpath_log_us == 0) {
+    state->rxpath_log_us = now;
+    state->rxpath_prev_udp_recv = udp_recv;
+    state->rxpath_prev_packets_received = received;
+    return;
+  }
+
+  state->rxpath_log_us = now;
+  uint32_t stack_delta = udp_recv - state->rxpath_prev_udp_recv;
+  uint32_t task_delta = received - state->rxpath_prev_packets_received;
+  state->rxpath_prev_udp_recv = udp_recv;
+  state->rxpath_prev_packets_received = received;
+
+  ESP_LOGI(TAG, "rxpath: stack=%" PRIu32 " task=%" PRIu32 " gap=%" PRId32,
+           stack_delta, task_delta, (int32_t) (stack_delta - task_delta));
+}
+#else
+static void rxpath_log_stats(audio_receiver_state_t *state) { (void) state; }
+#endif
 
 static void resend_slide_window(audio_receiver_state_t *state) {
   while (state->resend_missing_mask != 0 &&
@@ -250,6 +336,7 @@ static bool send_resend_request(audio_receiver_state_t *state,
     return false;
   } else {
     state->last_resend_error_time_us = 0;
+    state->resend_sent_count++;
     ESP_LOGD(TAG, "NACK sent: seq=%u count=%u", first_seq, count);
     return true;
   }
@@ -306,9 +393,11 @@ static bool track_regular_rtp_sequence(audio_receiver_state_t *state,
   }
 
   if (resend_mark_received(state, seq)) {
+    state->resend_late_recovered_count++;
     return true;
   }
 
+  state->resend_late_stale_count++;
   ESP_LOGD(TAG, "Dropping stale RTP packet seq=%u expected=%u", seq,
            expected_seq);
   return false;
@@ -363,15 +452,19 @@ static bool realtime_receive_packet(audio_stream_t *stream, uint8_t *packet,
 
   if (is_retransmit) {
     if (!resend_mark_received(state, seq)) {
+      state->resend_stale_count++;
       ESP_LOGD(TAG, "Dropping stale retransmit seq=%u", seq);
       return true;
     }
+    state->resend_recovered_count++;
     resend_retry_if_due(state);
+    resend_log_stats(state);
   } else if (!track_regular_rtp_sequence(state, seq)) {
     return true;
   } else {
     state->stats.last_timestamp = timestamp;
     resend_retry_if_due(state);
+    resend_log_stats(state);
   }
 
   state->blocks_read++;
@@ -428,10 +521,13 @@ static void receiver_task(void *pvParameters) {
   struct sockaddr_in src_addr;
   socklen_t addr_len = sizeof(src_addr);
 
+  // recvfrom carries a 100ms timeout, so this ticks at >=10Hz even in silence
+  // and the 1Hz rate limit inside rxpath_log_stats() is what sets the cadence.
   while (stream->running) {
     if (!realtime_receive_packet(stream, packet, &src_addr, &addr_len)) {
       break;
     }
+    rxpath_log_stats(state);
   }
 
   state->task_handle = nullptr;
@@ -578,6 +674,10 @@ static esp_err_t realtime_start(audio_stream_t *stream, uint16_t port) {
       return ESP_ERR_INVALID_STATE;
     }
   }
+
+  // Re-seed the rxpath baselines so the first sample of this session measures
+  // this session rather than everything since boot.
+  state->rxpath_log_us = 0;
 
   uint16_t bound_port = port;
   state->data_socket = socket_utils_bind_udp(port, 1, 131072, &bound_port);

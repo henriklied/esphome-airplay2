@@ -750,11 +750,22 @@ size_t audio_receiver_read(int16_t *buffer, size_t samples) {
     const int64_t playout_network_ns =
         audio_output_get_next_playout_time_ns(esp_timer_get_time()) +
         audio_receiver_network_offset_ns(nullptr);
-    return audio_engine_v2_render(&receiver.engine_v2, playout_network_ns,
-                                  buffer, samples);
+    const size_t produced = audio_engine_v2_render(
+        &receiver.engine_v2, playout_network_ns, buffer, samples);
+    // Every path in audio_scheduler_render() that cannot play emits silence
+    // and returns the full count; only AUDIO_SCHED_PLAYING carries stream
+    // audio. Latch that for audio_receiver_last_read_was_silence().
+    receiver.last_read_was_silence =
+        receiver.engine_v2.scheduler.state != AUDIO_SCHED_PLAYING;
+    return produced;
   }
 
+  receiver.last_read_was_silence = true;
   return 0;
+}
+
+bool audio_receiver_last_read_was_silence(void) {
+  return receiver.last_read_was_silence;
 }
 
 bool audio_receiver_has_data(void) {
