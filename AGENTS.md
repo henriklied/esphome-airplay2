@@ -14,6 +14,8 @@ AirPlay 2 receiver. The component lives in `components/airplay_receiver/`.
    change it there too.
 4. `examples/` — five working configs, each validated and compiled. `examples/amped-s3.yaml` is the
    reference board.
+5. `STEREO-PAIR-RESEARCH.md` — only if the task touches mDNS grouping, stereo pairs or a multi-board
+   2.1. Desk research, unverified on hardware, and explicitly labelled as such.
 
 ## Non-negotiable rules
 - **Single entry point:** the component is the media_player. Only configure `airplay_receiver:`.
