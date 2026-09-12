@@ -166,14 +166,30 @@ Sonos stereo pairs, per the same owntone thread, *remove* both speakers from Air
 expose **one** AirPlay endpoint; the pair's own software distributes and synchronises internally.
 AirPlay never learns there are two speakers.
 
-The equivalent here is to stop making the boards AirPlay receivers and put a single receiver in
-front of them — Music Assistant's AirPlay player, or one board — fanning out to all three over a
-transport we control. Sendspin is already that transport in this tree.
+The equivalent here is to stop making all three boards AirPlay receivers and put **one** endpoint in
+front of them, fanning out over a transport we control. Sendspin is already that transport in this
+tree.
 
-Trade: one player object guaranteed, no protocol archaeology, sender-agnostic. Cost: the direct
-phone-to-board path goes away, and with it the reason the `dsp:` block exists here rather than in
-Music Assistant. Mutually exclusive with the AirPlay build on the same board
-(`CONFLICTS_WITH: [sendspin]`, both claim I2S_NUM_0).
+Putting a Linux box in that slot (shairport-sync feeding Music Assistant) is ruled out: it is a
+dependency on software this house does not want to run, in the one position where its failures would
+take down every speaker at once. The all-ESP32 version is one board terminating AirPlay, decoding to
+PCM, and re-distributing to two peers against a clock it derives from the sender's PTP.
+
+That is a large piece of work and should not be started casually:
+
+- It is a new protocol. Sendspin has the right shape, but nothing makes an ESP32 a Sendspin
+  *source* — only a sink.
+- The leader board carries the AirPlay receive path **and** two outbound streams, on a chip already
+  at ~33% RAM and 28% flash.
+- It cannot coexist with the AirPlay build on the follower boards
+  (`CONFLICTS_WITH: [sendspin]`; both claim I2S_NUM_0).
+- The leader becomes a single point of failure for all three speakers.
+
+Weigh that against the twenty-line mDNS experiment in section 3, which might buy the same outcome.
+**Order of attack: run the TXT experiment first.** If iOS refuses to collapse three non-Apple
+receivers, the fallback is not this relay — it is living with three icons selected together in
+Control Center, which already plays correctly and in sync. The relay is only worth building if the
+three-icon picker becomes genuinely intolerable.
 
 ## Sources
 
