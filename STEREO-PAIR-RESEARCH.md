@@ -191,6 +191,43 @@ receivers, the fallback is not this relay — it is living with three icons sele
 Control Center, which already plays correctly and in sync. The relay is only worth building if the
 three-icon picker becomes genuinely intolerable.
 
+## 5. Apple TV as the source, and default audio output
+
+Goal: the boards selected automatically when the Apple TV wakes, the way a HomePod pair is.
+
+**This is no longer HomePod-only.** Until tvOS 26 only a HomePod or HomePod mini could be a
+permanent audio output. tvOS 26 opened Settings > Video and Audio > Audio Output to any
+AirPlay-enabled speaker, and the choice survives a power cycle. Apple's own tvOS guide documents it,
+with one carve-out: system alerts and game sounds keep playing through the TV speakers. The
+shairport-sync "Advertise as HomePod" thread (open 2022-2025) was built on the older premise and is
+moot.
+
+Nothing in the audio path changes for this. It is a routing question, not a protocol one.
+
+**Untested, and the thing to check first:** whether an Apple TV lists this component in that menu at
+all. Sonos, Bose and B&O are all Home-app-visible devices; these boards advertise `_airplay._tcp`
+and `_raop._tcp` only, with no `_hap._tcp` and no HomeKit accessory (see section 2). If tvOS filters
+the Audio Output list by Home membership rather than by plain AirPlay discovery, the boards will not
+appear, and no TXT field fixes that.
+
+**The multi-destination question, which may make section 3 load-bearing rather than cosmetic.**
+There are user reports that tvOS 26 regressed selecting several AirPlay speakers at once — that
+where tvOS 18 would play to multiple destinations, only one outputs at a time afterwards
+(discussions.apple.com thread 256218866; unconfirmed, and possibly fixed since). If an Apple TV will
+only route to a single AirPlay destination, then three separate icons cannot carry TV audio at all,
+and collapsing them into one advertised endpoint stops being a convenience.
+
+**Both questions are answerable today, with the two boards that already exist**, before any third
+board is bought:
+
+1. Does the Apple TV list `boston-x90-r` under Video and Audio > Audio Output?
+2. If so, can it play to both boards simultaneously, or only one?
+
+**Lip sync.** The component honours the sender's `latencyMin` — 250 ms default on realtime, 0 on
+buffered (`transport/transport_module.cpp:1026`) — so the Apple TV has what it needs to delay video
+to match. Separately, tvOS 26 drew widespread lip-sync complaints on AirPlay audio output in
+general, so budget for that being an Apple-side variable rather than a fault here.
+
 ## Sources
 
 - owntone#1413, "Handle Airplay stereo group as one speaker instead of two individual speakers" —
@@ -218,3 +255,11 @@ three-icon picker becomes genuinely intolerable.
   <https://github.com/orgs/music-assistant/discussions/5253>
 - pyatv protocol documentation — `gid`/`igl`/`gcgl` in service discovery, group streaming
   undocumented: <https://pyatv.dev/documentation/protocols/>
+- Apple tvOS user guide, "Use HomePod or AirPlay-enabled speakers with Apple TV 4K" — any AirPlay
+  speaker as default audio output, and the system-alerts/game-sounds carve-out:
+  <https://support.apple.com/guide/tv/homepod-airplay-enabled-speakers-apple-tv-4k-atvb2490ae15/tvos>
+- shairport-sync discussion#1588, "Advertise as HomePod" — the pre-tvOS 26 question and why it no
+  longer applies: <https://github.com/mikebrady/shairport-sync/discussions/1588>
+- Apple Support Communities 256218866, "AirPlay Cannot Play Audio on Multiple Speakers in tvOS 26" —
+  the unconfirmed multi-destination regression report:
+  <https://discussions.apple.com/thread/256218866>
