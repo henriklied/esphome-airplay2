@@ -432,8 +432,30 @@ thread (2022-2025) was built on the older premise and is moot.
 
 **Partly answered by the measurement pass.** The "Projektor" Apple TV has the HomePod pair as its
 audio output and expresses that as a three-member group it leads (section 0). So the mechanism is
-visible on the wire and we know exactly which fields it uses. Still untested: whether an Apple TV
-lists *our* component in that menu at all. The boards advertise `_airplay._tcp` and `_raop._tcp`
+visible on the wire and we know exactly which fields it uses.
+
+**And the two layers are independent.** Ungrouping the pair in the Home app also destroyed the
+audio-output group, and tvOS warned the operator it would have to be re-added manually. The Home
+app owns the pair (`tsid`, `flags` bit 13); tvOS Audio Output owns the group around it
+(`gid`/`gpn`/`psgid`/`psgsz`/`pgmid`, Apple TV at `igl=1`). **A permanent output group therefore
+needs only the group layer. None of the stereo-pair machinery is on the path.**
+
+**Projektor is the wrong Apple TV to test against.** It reports `osvers=18.6`, `srcvers=870.14.1`.
+The "any AirPlay speaker as permanent audio output" capability arrived in tvOS 26; on tvOS 18 the
+menu is HomePod-only, which is precisely why that Apple TV has a HomePod pair and could never have
+taken our board. Two others in the house are on tvOS 26.6:
+
+| Apple TV | Model | Addr | osvers | srcvers |
+|---|---|---|---|---|
+| hjemmekinoen | AppleTV6,2 | 10.0.40.97 | 26.6 | 960.13.1 |
+| Barnas | AppleTV5,3 | 10.0.40.242 | 26.6 | 960.13.1 |
+| Projektor | AppleTV11,1 | 192.168.0.175 | **18.6** | 870.14.1 |
+
+Both tvOS 26 boxes sit on `10.0.40.0/24` — **the same subnet as the boards**. That dissolves the
+same-subnet timing-peer constraint in 3.5 as well as the version gate, so a custom permanent output
+group should be attempted against `hjemmekinoen` or `Barnas`, never against `Projektor`.
+
+Still untested: whether tvOS 26 lists *our* component in that menu at all. The boards advertise `_airplay._tcp` and `_raop._tcp`
 only, with no `_hap._tcp` and no HomeKit accessory. If tvOS filters the Audio Output list by Home
 membership rather than plain AirPlay discovery, no TXT field fixes that.
 
@@ -450,8 +472,12 @@ general, so budget for that being an Apple-side variable rather than a fault her
 
 ## 7. Order of attack
 
+0. **Look for the board in Audio Output on `hjemmekinoen` or `Barnas`** (both tvOS 26.6, both on
+   the boards' own subnet — see section 6). Costs one menu visit and decides whether a custom
+   permanent output group is reachable at all. If the board is listed, a *single*-board permanent
+   output may need no code at all, and only a two-board group needs 3.2 and 3.3.
 1. **Does PTP cross the VLAN?** tcpdump for `224.0.1.129` on `10.0.40.0/24` while the pair plays.
-   If it does not, everything below is cosmetic and 3.5 is the whole project.
+   Only matters for a group spanning subnets; moot if the group is built on a `10.0.40.x` Apple TV.
 2. **Owner vs guest.** The guest device collapses the pair (confirmed). Test whether the owner's
    phone does too, or whether it is reading HomeKit. Decides whether mDNS forgery can ever work on
    the phone that matters.
