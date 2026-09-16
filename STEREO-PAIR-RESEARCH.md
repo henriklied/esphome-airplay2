@@ -23,14 +23,32 @@ so this cannot be done from a laptop off-site.
 | Johns Rom | AudioAccessory5,1 | .0.189 | — | `74830FBF…+FF716721…` | — | 1 | `AMp/StBrNTwQoS54` | `0x98404` |
 | Geneva Model M (ours) | AudioAccessory5,1 | 10.0.40.146 | — | — | — | — | — | `0x4` |
 
+Reproduce with `tools/mdns_watch.py`, which must run on a host in the speakers' broadcast domain:
+
+```bash
+scp tools/mdns_watch.py henriklied@192.168.0.94:/tmp/
+ssh henriklied@192.168.0.94 "python3 /tmp/mdns_watch.py --filter 'Stue oppe' --filter Projektor"
+```
+
+It holds a passive listener on 224.0.0.251:5353 alongside an active poller and logs every TXT field
+transition with a millisecond timestamp, decoding `flags` and `features` bits as it goes. Running it
+across a Home app pair/unpair is the cheapest observation we have of the mechanism (section 2).
+
 The group leader carries the fields that settle the structure:
 
 ```
-Projektor._airplay._tcp.local  (192.168.0.175, AppleTV11,1, osvers=18.6, srcvers=870.14.1)
-  gid=CAD95DFE-3423-5CFF-BEDE-D5283E06FE21    psgid=CAD95DFE-3423-5CFF-BEDE-D5283E06FE21
-  gpn=Projektor   igl=1   gcgl=1   psgsz=3   psgtp=1   pgm=0   pgmid=0
-  pi=da77c8cf-12af-46ab-8af9-c1f211c541df     psi=41F486C9-FDF3-4DFC-92BE-7D5BAC9147D4
+Projektor      (AppleTV11,1,      .0.175)  igl=1  pgmid=0  psgsz=3  psgtp=1  pgm=0
+Stue oppe (2)  (AudioAccessory1,1 .0.201)  igl=0  pgmid=1  tsm=0  pgcgl=1  flags bit 13 set
+Stue oppe      (AudioAccessory1,1 .0.210)  igl=0  pgmid=2  tsm=0  pgcgl=1
+
+all three:  gid = psgid = pgid = CAD95DFE-3423-5CFF-BEDE-D5283E06FE21   gpn=Projektor   gcgl=1
+both pods:  tsid = A0518D59-B671-5753-9472-7CF7284571A1
 ```
+
+**`pgmid` is the member index.** 0 on the Apple TV, 1 on `Stue oppe (2)`, 2 on `Stue oppe` — a
+contiguous ordinal over the three members, leader first, with the tight-sync leader at 1. This is
+the per-member index the 2026-09-12 text went looking for in a `gid` `+N+` suffix; it exists, but it
+lives in its own key. Undocumented, like the rest of the `psg*`/`pgm*` family.
 
 **`psgsz=3`.** The group is three members — the Apple TV plus both HomePods — and the Apple TV
 leads it (`igl=1`; both HomePods `igl=0`). It exists because the pair is that Apple TV's default
@@ -42,7 +60,7 @@ So the real structure is two nested levels, not one:
   the picker collapses into one entry named by `gpn`.
 - **Tight-sync set** — `tsid`, the two HomePods only. This is the sample-locked stereo pair.
 
-`psgsz`, `psgtp`, `pgm`, `pgmid` and `fex` are documented nowhere public — neither openairplay's
+`psgsz`, `psgtp`, `pgm`, `pgmid`, `tsm` and `fex` are documented nowhere public — neither openairplay's
 service discovery page nor the airplay2-rs TXT table (which is otherwise the most complete found,
 and adds `hkid` homeKitHomeUUID) lists any of the five — so the readings above are ours. Caveat: they come from an Apple TV
 on tvOS 18.6 while the HomePods are on 26.6, so they may be an older-tvOS spelling.
@@ -90,6 +108,29 @@ name the picker shows; both members stay individually visible as ordinary `_airp
 nowhere, and every third-party project digests mDNS rather than speaking it.
 
 **Whether a non-Apple receiver can claim membership.** Still no published attempt.
+
+**What the Home app actually says to the HomePods.** Not capturable. HAP sessions are
+ChaCha20-Poly1305 encrypted after a pair-verify whose long-term Ed25519 keys live in the iOS
+keychain and the HomePod's secure storage, and pair-verify is mutually authenticated, so there is no
+MITM position either. A passive capture yields endpoints, timing and packet sizes only. Note also
+that HomeKit state syncs through a home hub (the Projektor Apple TV is one) and iCloud, so the
+exchange may not be local at all.
+
+The tractable substitute is `tools/mdns_watch.py` across a pair/unpair: it shows which device
+mutates first, in what order the fields appear, and whether unpairing leaves residue. That is the
+mechanism as far as it is observable, and it yields the end state to forge — which is what we
+actually need if senders resolve membership from mDNS.
+
+**Whether implementing HomeKit would help.** No, for stereo pairing. A Denon Home 250 is fully
+MFi-licensed and present in the Home app, and gets no "use as stereo pair" button; neither do Sonos
+or B&O. Across eight years of licensed third-party AirPlay 2 speakers there is not one with Home app
+stereo pairing, so this is gated on being an Apple speaker rather than on MFi, HAP, or any field we
+could implement. Building `_hap._tcp` would buy Home *membership*, which is a different question —
+and the open one in section 6, since the Apple TV's Audio Output menu may filter by it. We are
+closer than it looks: `crypto_module` already has SRP-6a 3072, Ed25519, X25519, ChaCha20-Poly1305
+and TLV8 for AirPlay's transient variant. What is missing is the persistent half (an LTPK store for
+paired controllers; only our own identity persists today, `crypto/crypto_module.cpp:512`), the
+accessory attribute database, and event notifications.
 
 **Where the sender gets its member list.** The load-bearing question. Either it resolves the group
 from mDNS at play time, or it reads members from the HomeKit database and uses mDNS only to resolve
