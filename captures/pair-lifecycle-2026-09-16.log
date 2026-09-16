@@ -1,0 +1,84 @@
+11:55:10.769  Passive listener joined 224.0.0.251:5353
+11:55:10.770  Watching all AirPlay instances. Toggle the pair in the Home app now. Ctrl-C to stop.
+11:55:10.836  BASELINE Johns Rom [airplay]                 features=0x4A7FCA00,0x3C356BD0 fex=AMp/StBrNTwQoS54 flags=0x98404 gcgl=1 gid=74830FBF-2EFA-4C19-AE76-34DF42D6B2E2+FF716721-DB78-4711-AB15-6EB905917622 igl=1 model=AudioAccessory5,1 pi=edc4b73c-d800-451a-92e6-f824909bf0c2 psi=EE57D3C2-D630-4802-AA5B-22CE89BF77F4
+11:55:10.837  BASELINE Sverres rom [airplay]               features=0x4A7FCA00,0x3C354BD0 fex=AMp/StBLNTwQoS54 flags=0x98404 gcgl=1 gid=2461D383-6B1F-4C89-92D9-EAFC0CF13ADE+091A34E5-7C44-421D-A441-BE0F126F71CF igl=1 model=AudioAccessory5,1 pi=2b30e3ad-6f91-4236-a185-40ab531a4b84 psi=83C50D2E-7A55-4A42-881E-76822DA0039D
+11:55:10.843  BASELINE Barnas [airplay]                    features=0x5A7FDFD5,0x3C175FDE fex=1d9/Wt5fFzw4oQ58 flags=0x18244 gcgl=1 gid=A75A5488-52AA-4502-84F3-6113216CEBC2 igl=1 model=AppleTV5,3 pi=51c5fb35-4542-43cd-8003-e58459534d2d psi=A0BE1613-6534-43AB-A225-798F3EA27224
+11:55:10.843  BASELINE hjemmekinoen [airplay]              features=0x4A7FDFD5,0x3C177FDE fex=1d9/St5/Fzw4oY58 flags=0x18644 gcgl=1 gid=18D3598D-342D-4A51-8ED8-7CB1180EF331 igl=1 model=AppleTV6,2 pi=1ad18d18-f0d1-45f3-97f8-73f8e7ccdaea psi=26E0D36C-B323-4BCF-9AE3-3925A4B121D3
+11:55:10.877  BASELINE Stue oppe [airplay]                 features=0x4A7FCA00,0x3C356BD0 fex=AMp/StBrNTwQoS54 flags=0xb8c04 gcgl=1 gid=CAD95DFE-3423-5CFF-BEDE-D5283E06FE21 gpn=Projektor igl=0 model=AudioAccessory1,1 pgcgl=1 pgid=CAD95DFE-3423-5CFF-BEDE-D5283E06FE21 pgm=0 pgmid=2 pi=4e1723d5-04d2-4be3-9a67-31de2ede37d8 psgid=CAD95DFE-3423-5CFF-BEDE-D5283E06FE21 psgsz=3 psgtp=1 psi=757AEBC2-61B7-4135-BF40-46CD9202D1BE tsid=A0518D59-B671-5753-9472-7CF7284571A1 tsm=0
+11:55:10.878  BASELINE Stue oppe (2) [airplay]             features=0x4A7FCA00,0x3C356BD0 fex=AMp/StBrNTwQoS54 flags=0xbac04 gcgl=1 gid=CAD95DFE-3423-5CFF-BEDE-D5283E06FE21 gpn=Projektor igl=0 model=AudioAccessory1,1 pgcgl=1 pgid=CAD95DFE-3423-5CFF-BEDE-D5283E06FE21 pgm=0 pgmid=1 pi=4ce97457-8dfa-4c66-a127-23952cb48658 psgid=CAD95DFE-3423-5CFF-BEDE-D5283E06FE21 psgsz=3 psgtp=1 psi=3D4638CC-3FFE-4B3E-9B0A-5E809FA7AC1A tsid=A0518D59-B671-5753-9472-7CF7284571A1 tsm=0
+11:55:10.879  BASELINE 3E4638CC3FFE@Stue oppe (2) [raop]   am=AudioAccessory1,1 ft=0x4A7FCA00,0x3C356BD0 sf=0xbac04
+11:55:10.880  BASELINE 767AEBC261B7@Stue oppe [raop]       am=AudioAccessory1,1 ft=0x4A7FCA00,0x3C356BD0 sf=0xb8c04
+11:55:10.880  BASELINE Geneva Model M [airplay]            features=0x405C4A00,0x1C340 flags=0x4 model=AudioAccessory5,1 pi=00000000-0000-0000-0000-000000000000
+11:55:10.881  BASELINE Projektor [airplay]                 features=0x4A7FDFD5,0x3C177FDE fex=1d9/St5/Fzw4oQ4E flags=0x18644 gcgl=1 gid=CAD95DFE-3423-5CFF-BEDE-D5283E06FE21 gpn=Projektor igl=1 model=AppleTV11,1 pgm=0 pgmid=0 pi=da77c8cf-12af-46ab-8af9-c1f211c541df psgid=CAD95DFE-3423-5CFF-BEDE-D5283E06FE21 psgsz=3 psgtp=1 psi=41F486C9-FDF3-4DFC-92BE-7D5BAC9147D4
+11:55:10.881  BASELINE 42F486C9FDF3@Projektor [raop]       am=AppleTV11,1 ft=0x4A7FDFD5,0x3C177FDE sf=0x18644
+11:55:10.884  BASELINE DCB4D900A544@Geneva Model M [raop]  am=AudioAccessory5,1 ft=0x405C4A00,0x1C340 sf=0x4
+11:55:10.942  BASELINE EE57D3C2D630@Johns Rom [raop]       am=AudioAccessory5,1 ft=0x4A7FCA00,0x3C356BD0 sf=0x98404
+11:55:10.950  BASELINE 82C50D2E7A55@Sverres rom [raop]     am=AudioAccessory5,1 ft=0x4A7FCA00,0x3C354BD0 sf=0x98404
+11:55:11.137  BASELINE 26E0D36CB323@hjemmekinoen [raop]    am=AppleTV6,2 ft=0x4A7FDFD5,0x3C177FDE sf=0x18644
+11:55:11.138  BASELINE A2BE16136534@Barnas [raop]          am=AppleTV5,3 ft=0x5A7FDFD5,0x3C175FDE sf=0x18244
+11:56:13.497    CHANGE  Projektor [airplay]                 btaddr: 43:97:86:B7:6F:D3 -> 49:43:25:7D:9A:54
+11:56:51.431  * CHANGE  Stue oppe (2) [airplay]             flags: 0xbac04 -> 0xba404   (AudioCableAttached, DeviceWasSetupForHKAccessControl, TightSyncIsGroupLeader, IsAppleMusicSubscriber, CloudLibraryIsOn, ReceiverSessionIsActive, bit19)
+11:56:51.432  * CHANGE  Stue oppe (2) [airplay]             gid: CAD95DFE-3423-5CFF-BEDE-D5283E06FE21 -> CAD95DFE-3423-5CFF-BEDE-D5283E06FE21+1
+11:56:51.433  * DROP    Stue oppe (2) [airplay]             pgcgl (was 1)
+11:56:51.433  * DROP    Stue oppe (2) [airplay]             pgid (was CAD95DFE-3423-5CFF-BEDE-D5283E06FE21)
+11:56:51.467  * CHANGE  Stue oppe [airplay]                 flags: 0xb8c04 -> 0xb8404   (AudioCableAttached, DeviceWasSetupForHKAccessControl, IsAppleMusicSubscriber, CloudLibraryIsOn, ReceiverSessionIsActive, bit19)
+11:56:51.467  * CHANGE  Stue oppe [airplay]                 gid: CAD95DFE-3423-5CFF-BEDE-D5283E06FE21 -> CAD95DFE-3423-5CFF-BEDE-D5283E06FE21+2
+11:56:51.468  * DROP    Stue oppe [airplay]                 pgcgl (was 1)
+11:56:51.468  * DROP    Stue oppe [airplay]                 pgid (was CAD95DFE-3423-5CFF-BEDE-D5283E06FE21)
+11:56:51.552  * CHANGE  3E4638CC3FFE@Stue oppe (2) [raop]   sf: 0xbac04 -> 0xba404   (AudioCableAttached, DeviceWasSetupForHKAccessControl, TightSyncIsGroupLeader, IsAppleMusicSubscriber, CloudLibraryIsOn, ReceiverSessionIsActive, bit19)
+11:56:51.579  * CHANGE  767AEBC261B7@Stue oppe [raop]       sf: 0xb8c04 -> 0xb8404   (AudioCableAttached, DeviceWasSetupForHKAccessControl, IsAppleMusicSubscriber, CloudLibraryIsOn, ReceiverSessionIsActive, bit19)
+11:56:51.653  * CHANGE  Stue oppe (2) [airplay]             flags: 0xba404 -> 0x9a404   (AudioCableAttached, DeviceWasSetupForHKAccessControl, TightSyncIsGroupLeader, IsAppleMusicSubscriber, CloudLibraryIsOn, bit19)
+11:56:51.654  * CHANGE  Stue oppe (2) [airplay]             gid: CAD95DFE-3423-5CFF-BEDE-D5283E06FE21+1 -> CAD95DFE-3423-5CFF-BEDE-D5283E06FE21+1+34FA707A-C3AF-4497-99F0-0409D6E6B6C7
+11:56:51.679  * CHANGE  Stue oppe [airplay]                 flags: 0xb8404 -> 0x98404   (AudioCableAttached, DeviceWasSetupForHKAccessControl, IsAppleMusicSubscriber, CloudLibraryIsOn, bit19)
+11:56:51.679  * CHANGE  Stue oppe [airplay]                 gid: CAD95DFE-3423-5CFF-BEDE-D5283E06FE21+2 -> CAD95DFE-3423-5CFF-BEDE-D5283E06FE21+2+C658958B-613D-4979-BBF5-F3BCCE6234AE
+11:56:51.928  * CHANGE  3E4638CC3FFE@Stue oppe (2) [raop]   sf: 0xba404 -> 0x9a404   (AudioCableAttached, DeviceWasSetupForHKAccessControl, TightSyncIsGroupLeader, IsAppleMusicSubscriber, CloudLibraryIsOn, bit19)
+11:56:51.930  * CHANGE  767AEBC261B7@Stue oppe [raop]       sf: 0xb8404 -> 0x98404   (AudioCableAttached, DeviceWasSetupForHKAccessControl, IsAppleMusicSubscriber, CloudLibraryIsOn, bit19)
+11:56:53.077  * CHANGE  Stue oppe (2) [airplay]             flags: 0x9a404 -> 0x98404   (AudioCableAttached, DeviceWasSetupForHKAccessControl, IsAppleMusicSubscriber, CloudLibraryIsOn, bit19)
+11:56:53.077  * CHANGE  Stue oppe (2) [airplay]             gid: CAD95DFE-3423-5CFF-BEDE-D5283E06FE21+1+34FA707A-C3AF-4497-99F0-0409D6E6B6C7 -> A0518D59-B671-5753-9472-7CF7284571A1+1+34FA707A-C3AF-4497-99F0-0409D6E6B6C7
+11:56:53.078  * CHANGE  Stue oppe (2) [airplay]             igl: 0 -> 1
+11:56:53.304  * CHANGE  3E4638CC3FFE@Stue oppe (2) [raop]   sf: 0x9a404 -> 0x98404   (AudioCableAttached, DeviceWasSetupForHKAccessControl, IsAppleMusicSubscriber, CloudLibraryIsOn, bit19)
+11:56:53.441  * CHANGE  Stue oppe [airplay]                 gid: CAD95DFE-3423-5CFF-BEDE-D5283E06FE21+2+C658958B-613D-4979-BBF5-F3BCCE6234AE -> C90E49EB-D1C8-47FF-BF2D-8F9776B051CC+C658958B-613D-4979-BBF5-F3BCCE6234AE
+11:56:53.442  * CHANGE  Stue oppe [airplay]                 igl: 0 -> 1
+11:56:53.442  * DROP    Stue oppe [airplay]                 tsid (was A0518D59-B671-5753-9472-7CF7284571A1)
+11:56:53.443  * DROP    Stue oppe [airplay]                 tsm (was 0)
+11:56:53.556  * CHANGE  Stue oppe (2) [airplay]             gid: A0518D59-B671-5753-9472-7CF7284571A1+1+34FA707A-C3AF-4497-99F0-0409D6E6B6C7 -> B14BD1F2-66A6-4568-9501-8D5C6D6D33CC+34FA707A-C3AF-4497-99F0-0409D6E6B6C7
+11:56:53.557  * DROP    Stue oppe (2) [airplay]             gpn (was Projektor)
+11:56:53.557  * DROP    Stue oppe (2) [airplay]             pgm (was 0)
+11:56:53.558  * DROP    Stue oppe (2) [airplay]             pgmid (was 1)
+11:56:53.558  * DROP    Stue oppe (2) [airplay]             psgid (was CAD95DFE-3423-5CFF-BEDE-D5283E06FE21)
+11:56:53.558  * DROP    Stue oppe (2) [airplay]             psgsz (was 3)
+11:56:53.559  * DROP    Stue oppe (2) [airplay]             psgtp (was 1)
+11:56:53.559  * DROP    Stue oppe (2) [airplay]             tsid (was A0518D59-B671-5753-9472-7CF7284571A1)
+11:56:53.559  * DROP    Stue oppe (2) [airplay]             tsm (was 0)
+11:56:55.152  * CHANGE  Projektor [airplay]                 gid: CAD95DFE-3423-5CFF-BEDE-D5283E06FE21 -> 9477E977-2D8A-42C8-B32C-2612599BC148
+11:56:55.153  * DROP    Projektor [airplay]                 gpn (was Projektor)
+11:56:55.153  * DROP    Projektor [airplay]                 pgm (was 0)
+11:56:55.154  * DROP    Projektor [airplay]                 pgmid (was 0)
+11:56:55.154  * DROP    Projektor [airplay]                 psgid (was CAD95DFE-3423-5CFF-BEDE-D5283E06FE21)
+11:56:55.154  * DROP    Projektor [airplay]                 psgsz (was 3)
+11:56:55.155  * DROP    Projektor [airplay]                 psgtp (was 1)
+11:56:57.136  * DROP    Stue oppe [airplay]                 gpn (was Projektor)
+11:56:57.136  * DROP    Stue oppe [airplay]                 pgm (was 0)
+11:56:57.136  * DROP    Stue oppe [airplay]                 pgmid (was 2)
+11:56:57.136  * DROP    Stue oppe [airplay]                 psgid (was CAD95DFE-3423-5CFF-BEDE-D5283E06FE21)
+11:56:57.136  * DROP    Stue oppe [airplay]                 psgsz (was 3)
+11:56:57.136  * DROP    Stue oppe [airplay]                 psgtp (was 1)
+11:57:51.709  * CHANGE  Stue oppe (2) [airplay]             flags: 0x98404 -> 0x29a404   (AudioCableAttached, DeviceWasSetupForHKAccessControl, TightSyncIsGroupLeader, IsAppleMusicSubscriber, CloudLibraryIsOn, bit19, bit21)
+11:57:51.710  * CHANGE  Stue oppe (2) [airplay]             gid: B14BD1F2-66A6-4568-9501-8D5C6D6D33CC+34FA707A-C3AF-4497-99F0-0409D6E6B6C7 -> 64C27BB9-21AC-58B6-9486-A3AB1015B1BA+0+34FA707A-C3AF-4497-99F0-0409D6E6B6C7
+11:57:51.710  * ADD     Stue oppe (2) [airplay]             gpn=Stue oppe
+11:57:51.710  * ADD     Stue oppe (2) [airplay]             tsid=64C27BB9-21AC-58B6-9486-A3AB1015B1BA
+11:57:51.711  * ADD     Stue oppe (2) [airplay]             tsm=0
+11:57:51.793  * CHANGE  3E4638CC3FFE@Stue oppe (2) [raop]   sf: 0x98404 -> 0x29a404   (AudioCableAttached, DeviceWasSetupForHKAccessControl, TightSyncIsGroupLeader, IsAppleMusicSubscriber, CloudLibraryIsOn, bit19, bit21)
+11:57:52.128  * CHANGE  Stue oppe (2) [airplay]             gid: 64C27BB9-21AC-58B6-9486-A3AB1015B1BA+0+34FA707A-C3AF-4497-99F0-0409D6E6B6C7 -> 64C27BB9-21AC-58B6-9486-A3AB1015B1BA+0+8B7C97A9-E4E3-4F06-AF08-37FE5414BF1B
+11:57:52.359  * CHANGE  Stue oppe [airplay]                 gid: C90E49EB-D1C8-47FF-BF2D-8F9776B051CC+C658958B-613D-4979-BBF5-F3BCCE6234AE -> 64C27BB9-21AC-58B6-9486-A3AB1015B1BA+1+C658958B-613D-4979-BBF5-F3BCCE6234AE
+11:57:52.360  * ADD     Stue oppe [airplay]                 gpn=Stue oppe
+11:57:52.360  * ADD     Stue oppe [airplay]                 tsid=64C27BB9-21AC-58B6-9486-A3AB1015B1BA
+11:57:52.360  * ADD     Stue oppe [airplay]                 tsm=0
+11:57:54.136  * CHANGE  Stue oppe [airplay]                 flags: 0x98404 -> 0xb8c04   (AudioCableAttached, DeviceWasSetupForHKAccessControl, DeviceSupportsRelay, IsAppleMusicSubscriber, CloudLibraryIsOn, ReceiverSessionIsActive, bit19)
+11:57:54.136  * CHANGE  Stue oppe [airplay]                 gid: 64C27BB9-21AC-58B6-9486-A3AB1015B1BA+1+C658958B-613D-4979-BBF5-F3BCCE6234AE -> 64C27BB9-21AC-58B6-9486-A3AB1015B1BA+0
+11:57:54.137  * CHANGE  Stue oppe [airplay]                 igl: 1 -> 0
+11:57:54.137  * ADD     Stue oppe [airplay]                 pgcgl=1
+11:57:54.137  * ADD     Stue oppe [airplay]                 pgid=64C27BB9-21AC-58B6-9486-A3AB1015B1BA+0
+11:57:54.138  * CHANGE  767AEBC261B7@Stue oppe [raop]       sf: 0x98404 -> 0xb8c04   (AudioCableAttached, DeviceWasSetupForHKAccessControl, DeviceSupportsRelay, IsAppleMusicSubscriber, CloudLibraryIsOn, ReceiverSessionIsActive, bit19)
+11:57:59.698  * CHANGE  Stue oppe [airplay]                 gid: 64C27BB9-21AC-58B6-9486-A3AB1015B1BA+0 -> 64C27BB9-21AC-58B6-9486-A3AB1015B1BA+0+8B7C97A9-E4E3-4F06-AF08-37FE5414BF1B
+11:57:59.698  * CHANGE  Stue oppe [airplay]                 pgid: 64C27BB9-21AC-58B6-9486-A3AB1015B1BA+0 -> 64C27BB9-21AC-58B6-9486-A3AB1015B1BA+0+8B7C97A9-E4E3-4F06-AF08-37FE5414BF1B

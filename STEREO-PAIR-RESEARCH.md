@@ -32,7 +32,8 @@ ssh henriklied@192.168.0.94 "python3 /tmp/mdns_watch.py --filter 'Stue oppe' --f
 
 It holds a passive listener on 224.0.0.251:5353 alongside an active poller and logs every TXT field
 transition with a millisecond timestamp, decoding `flags` and `features` bits as it goes. Running it
-across a Home app pair/unpair is the cheapest observation we have of the mechanism (section 2).
+across a full ungroup/regroup/swap cycle is in `captures/pair-lifecycle-2026-09-16.log`, analysed
+in 1.1 and 1.2.
 
 The group leader carries the fields that settle the structure:
 
@@ -82,15 +83,18 @@ That gives the pair its *own* leader, distinct from the group leader. Three role
 once: the Apple TV leads the group (`igl=1`), `Stue oppe (2)` leads the tight-sync set
 (`flags` bit 13), and `Stue oppe` follows both.
 
-> **Self-correction, same pass.** An earlier reading of this capture claimed bits 11 and 17 were
-> "where pair state lives". They are not. Bit 11 is `DeviceSupportsRelay` and bit 17 is
-> `ReceiverSessionIsActive` — the pair simply happened to be receiving when captured, being the
-> Apple TV's audio output. The only genuine pair-state bit found is 13.
+> **Self-correction, twice.** A first reading claimed bits 11 and 17 were "where pair state lives";
+> a second retracted both. The lifecycle capture (1.1) settles it: **bit 11 `DeviceSupportsRelay`
+> does track group membership** — it clears the instant ungrouping starts and is re-added when the
+> follower rejoins. Bit 17 `ReceiverSessionIsActive` really is just session state. So the original
+> claim was half right and the retraction over-corrected.
 
-**`gid` has no `+<index>+` form.** Paired members share one plain UUID. The two-component
-`UUID+UUID` form appears on the *unpaired* HomePods — inverted from what the old text inferred from
-owntone#1413. No numeric index component exists anywhere in the capture, so the `+0+`/`+1+`
-channel-marker speculation is moot.
+**`gid` `+<index>+` is the *transitional* form, and the index is not a channel.** A settled
+three-member group shows one plain shared UUID; a settled standalone HomePod shows the two-part
+`UUID+UUID`. The three-part `UUID+<n>+UUID` that owntone#1413 could not account for appears only
+while membership is changing (1.1), and `<n>` is the member ordinal, not a channel marker. Both
+readings in the older text — "it might be a channel index" and later "no index exists" — are wrong;
+it exists, it is an ordinal, and it is transient.
 
 **`igl=0` on both pair members**, not `1`. Leadership sits with the Apple TV. The old claim that
 "`igl`/`gcgl` are both 1 on a standing pair" is wrong; `gcgl=1` holds, `igl=1` does not.
@@ -101,6 +105,55 @@ the house today. That concern is retired.
 
 What survives unchanged: `tsid` is present only on the pair and identical across it; `gpn` is the
 name the picker shows; both members stay individually visible as ordinary `_airplay._tcp` records.
+
+### 1.1 The pair lifecycle, measured
+
+Full trace in `captures/pair-lifecycle-2026-09-16.log`: the operator pressed "Ungroup accessories"
+in the Home app, re-created the pair, then pressed swap-left-right twice, with
+`tools/mdns_watch.py` running throughout.
+
+**Teardown** (11:56:51.4 -> 11:56:57.1, 5.7 s). Both HomePods mutate first and together: `flags`
+bit 11 clears, `gid` gains its ordinal suffix (`...+1` on the device whose `pgmid` was 1, `...+2` on
+`pgmid` 2), `pgcgl`/`pgid` drop. 0.2 s later each appends a fresh per-member UUID, giving the
+three-part form. At +1.6 s the tight-sync leader's `gid` prefix becomes **`A0518D59...`, which was
+the `tsid`** — the pair momentarily becomes its own group named by its tight-sync UUID — and its
+`igl` flips 0->1. The follower drops `tsid`/`tsm` first. Only at +3.7 s does the **Apple TV** drop
+`gpn`, `psgid`, `psgsz`, `psgtp`, `pgm`, `pgmid`.
+
+**Rebuild** (11:57:51.7 -> 11:57:59.7, 8 s). The device that becomes tight-sync leader goes first
+and alone, minting `tsid=64C27BB9...`, setting `gpn`, asserting `flags` bit 13 and adopting the new
+`tsid` as its `gid` prefix — all in a single announcement. The follower copies `tsid`/`gpn`/`tsm`
+0.65 s later, and only at +2.4 s settles into its role: `igl` 1->0, `flags` bits 11 and 17 added,
+`pgcgl`/`pgid` added.
+
+Three consequences:
+
+- **The leader is a lagging reporter, not the authority.** The Apple TV publishes `psgsz` 3.7 s
+  *after* the members have already left. This materially weakens the blocker in 3.6.
+- **`tsid` is asserted, not negotiated.** One device mints it and the other copies it. No handshake
+  is visible from outside, consistent with the real exchange happening over HAP.
+- **`igl=0` on both is not a pair signature.** It means the pair sits inside a larger group. A bare
+  pair has its tight-sync leader at `igl=1`.
+
+Two undocumented `flags` bits turned up. Bit 21 is set on the tight-sync leader of a *bare* pair
+(`0x29a404`) and was absent when that same device sat inside the Apple TV's group (`0xbac04`); it
+persists rather than being transient. Bit 19 is set on every Apple device seen, in every state.
+
+### 1.2 Channel assignment is not in mDNS
+
+The operator pressed the Home app's swap-left-and-right control **twice**, 53 s apart. The watcher
+recorded **no transition of any kind**, and a fresh query afterwards returned TXT records
+byte-identical to the pre-swap state.
+
+So no mDNS field carries physical channel. In the settled bare pair both members share
+`fex=AMp/StBrNTwQoS54` *and* an identical `gid`; the only fields distinguishing them are `flags`
+bits 13/21 versus 11/17, which 1.1 shows are leader/follower role, not channel.
+
+**This closes the question rather than leaving it open, and in our favour.** Channel assignment is
+local device state configured over HomeKit and stored on the speaker — which is exactly what
+`audio_channel_mode: left | right | mono` already is. It also fits the capture study's finding that
+the sender transmits byte-identical full-stereo RTP to both members. There is nothing here to
+reverse-engineer and nothing to advertise.
 
 ## 2. What is still unknown
 
@@ -250,8 +303,13 @@ Group size is advertised by the leader. The Apple TV publishes `psgsz=3`. We can
 TV's advertisement, so a board that self-declares into `gid=CAD95DFE…` contradicts the leader's own
 count of its members.
 
-Whether a sender reconciles the two or simply trusts the leader is unknown. It is a far sharper
-rejection point than "iOS might ignore the fields", and it is the first thing worth testing.
+Whether a sender reconciles the two or simply trusts the leader is unknown, and it is still the
+first thing worth testing.
+
+**Downgraded 2026-09-16.** The lifecycle capture (1.1) shows the Apple TV publishing `psgsz` 3.7 s
+*after* the members had already changed state. A leader that learns last is reporting group
+membership, not constituting it, which makes a stale or contradicted count much less likely to be
+load-bearing than it looked.
 
 ### 3.7 Out of reach
 
