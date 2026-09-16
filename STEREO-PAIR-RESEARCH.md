@@ -42,8 +42,9 @@ So the real structure is two nested levels, not one:
   the picker collapses into one entry named by `gpn`.
 - **Tight-sync set** — `tsid`, the two HomePods only. This is the sample-locked stereo pair.
 
-`psgsz`, `psgtp`, `pgm`, `pgmid` and `fex` are documented nowhere public (openairplay's service
-discovery page omits all five), so the readings above are ours. Caveat: they come from an Apple TV
+`psgsz`, `psgtp`, `pgm`, `pgmid` and `fex` are documented nowhere public — neither openairplay's
+service discovery page nor the airplay2-rs TXT table (which is otherwise the most complete found,
+and adds `hkid` homeKitHomeUUID) lists any of the five — so the readings above are ours. Caveat: they come from an Apple TV
 on tvOS 18.6 while the HomePods are on 26.6, so they may be an older-tvOS spelling.
 
 ## 1. Corrections to the 2026-09-12 desk research
@@ -53,10 +54,20 @@ on tvOS 18.6 while the HomePods are on 26.6, so they may be an older-tvOS spelli
 (Johns Rom). The old text called the L/R meaning "confirmed by listening test", quoting the 2026
 capture study; the house refutes it. Whatever `fex` encodes, it is not pair channel assignment.
 
-**The per-member role marker is in `flags`, not `fex`.** The two pair members differ in exactly one
-bit across their whole TXT: `0xb8c04` vs `0xbac04`, i.e. bit 13 (`0x2000`). Against a standalone
-HomePod (`0x98404`) both pair members additionally set bits 11 (`0x800`) and 17 (`0x20000`). That is
-where pair state lives. Which of the two bit-13 states is physically left is unmeasured.
+**The per-member role marker is in `flags`, not `fex`, and it has a name.** The two pair members
+differ in exactly one bit across their whole TXT: `0xb8c04` vs `0xbac04`, i.e. bit 13. The
+airplay2-rs status-flags table names bit 13 **`TightSyncIsGroupLeader`**, so `Stue oppe (2)` leads
+the tight-sync set and `Stue oppe` follows. Bit 14 is `TightSyncBuddyNotReachable` and is clear on
+both, i.e. they can see each other.
+
+That gives the pair its *own* leader, distinct from the group leader. Three roles are in play at
+once: the Apple TV leads the group (`igl=1`), `Stue oppe (2)` leads the tight-sync set
+(`flags` bit 13), and `Stue oppe` follows both.
+
+> **Self-correction, same pass.** An earlier reading of this capture claimed bits 11 and 17 were
+> "where pair state lives". They are not. Bit 11 is `DeviceSupportsRelay` and bit 17 is
+> `ReceiverSessionIsActive` — the pair simply happened to be receiving when captured, being the
+> Apple TV's audio output. The only genuine pair-state bit found is 13.
 
 **`gid` has no `+<index>+` form.** Paired members share one plain UUID. The two-component
 `UUID+UUID` form appears on the *unpaired* HomePods — inverted from what the old text inferred from
@@ -124,7 +135,15 @@ HomePod  features=0x4A7FCA00,0x3C354BD0  hi bits: 36 38 39 40 41 43 46 48 50 52 
 
 We claim 40 (`SupportsBufferedAudio`) and 41 (`SupportsPTP`), the two bits a device needs to show as
 multi-room capable. We do **not** claim **bit 52, `SupportsSetPeersExtendedMessage`** — the bit that
-says this receiver can be handed a group peer set. We also lack 43 (`SupportsSystemPairing`).
+says this receiver can be handed a group peer set. We also lack 43 (`SupportsSystemPairing`). Bit 52
+is named identically in two independent bit tables (SteeBono's wiki and airplay2-rs), so the reading
+is not resting on one source.
+
+Worth knowing what our profile currently *is*: our upper word `0x1C340` is byte-identical to the
+AirPort Express 2 signature published in airplay2-rs 2.2.3 (`0x445D0A00,0x1C340`), and the Sonos
+Symfonisk shares it too. Across the full 64 bits we differ from an AirPort Express only in bits 14,
+16 and 26. **We are advertising an AirPort-Express-class third-party speaker, not a HomePod-class
+one** — and no AirPort Express is a group member either.
 
 And the behaviour matches the missing bit. `transport/transport_module.cpp:1358` registers
 `SETPEERS` and `SETPEERSX` (dispatch table line 1429-1430) but **discards the body** — `raw` and
@@ -153,7 +172,23 @@ So 3.3 is: set bit 52 in `AIRPLAY_FEATURES_HI` (`mdns_airplay.cpp:29`), parse th
 `handle_setpeers`, drive `ptp_clock_set_master_clock_id()` from `ClockID`, and key our entry in
 `ClockPorts` off the real `pi` from 3.1.
 
-### 3.4 The subnet constraint
+### 3.4 Status flags
+
+Our `flags=0x4` sets exactly one bit, 2 (`AudioCableAttached`). A pair member carries `0xb8c04`:
+
+```
+ 2 AudioCableAttached                10 DeviceWasSetupForHKAccessControl
+11 DeviceSupportsRelay               13 TightSyncIsGroupLeader   (leader only)
+15 IsAppleMusicSubscriber            16 CloudLibraryIsOn
+17 ReceiverSessionIsActive           19 (undocumented, set on every Apple device seen)
+```
+
+Bit 10 `DeviceWasSetupForHKAccessControl` is the one most likely to be gated on, since it asserts
+the device participates in Home access control at all. Bits 13 and 14 are the tight-sync role and
+reachability bits we would have to drive ourselves, and 17 should track whether a session is live.
+Bits 15 and 16 are account state we cannot honestly claim.
+
+### 3.5 The subnet constraint
 
 Our boards are on `10.0.40.0/24`; the group and its senders are on `192.168.0.0/24`.
 
@@ -168,7 +203,7 @@ board's mDNS records, so mDNS is being reflected across the VLANs — but that s
 whether PTP event traffic reaches `10.0.40.0/24`. **Tight sync with the HomePods is impossible
 unless the board hears the same grandmaster they do.** Unmeasured; this is the tcpdump to run.
 
-### 3.5 The hard blocker: `psgsz` belongs to the leader
+### 3.6 The hard blocker: `psgsz` belongs to the leader
 
 Group size is advertised by the leader. The Apple TV publishes `psgsz=3`. We cannot edit the Apple
 TV's advertisement, so a board that self-declares into `gid=CAD95DFE…` contradicts the leader's own
@@ -177,7 +212,7 @@ count of its members.
 Whether a sender reconciles the two or simply trusts the leader is unknown. It is a far sharper
 rejection point than "iOS might ignore the fields", and it is the first thing worth testing.
 
-### 3.6 Out of reach
+### 3.7 Out of reach
 
 Genuine Home membership needs `_hap._tcp` and accessory status. A generic HAP accessory is
 achievable (HomeSpan exists). The **AirPlay-2-speaker HAP profile** that Sonos and B&O ship requires
@@ -317,7 +352,7 @@ general, so budget for that being an Apple-side variable rather than a fault her
 ## 7. Order of attack
 
 1. **Does PTP cross the VLAN?** tcpdump for `224.0.1.129` on `10.0.40.0/24` while the pair plays.
-   If it does not, everything below is cosmetic and 3.4 is the whole project.
+   If it does not, everything below is cosmetic and 3.5 is the whole project.
 2. **Owner vs guest.** The guest device collapses the pair (confirmed). Test whether the owner's
    phone does too, or whether it is reading HomeKit. Decides whether mDNS forgery can ever work on
    the phone that matters.
@@ -353,10 +388,19 @@ this the evening the house wants music.
   ID), neither of which our HomePods advertise. Does **not** document `fex`, `psgid`, `psgsz`,
   `psgtp`, `pgm` or `pgmid`:
   <https://openairplay.github.io/airplay-spec/service_discovery.html>
-- SteeBono/airplayreceiver wiki, AirPlay2 Protocol — the features bitfield table used for the decode
-  in 3.3, including bit 40 `SupportsBufferedAudio`, bit 41 `SupportsPTP` and bit 52
-  `SupportsSetPeersExtendedMessage`:
-  <https://github.com/SteeBono/airplayreceiver/wiki/AirPlay2-Protocol>
+- SteeBono/airplayreceiver wiki, AirPlay2 Protocol — features bitfield table used for the decode in
+  3.3: <https://github.com/SteeBono/airplayreceiver/wiki/AirPlay2-Protocol>
+- lmcgartland/airplay2-rs, `AIRPLAY_2_SPEC.md` — an unofficial implementer RFC for the *sender*
+  side, and the best single reference found. Source for the complete `flags` table that names bit 13
+  `TightSyncIsGroupLeader` and bit 14 `TightSyncBuddyNotReachable` (section 2.5), a second
+  independent features table confirming bit 52 (2.2), published per-device feature signatures
+  including the AirPort Express 2 value that matches ours (2.2.3), and the HomePod access-control
+  notes (section 9). It confirms our transient pair-setup path exactly: `X-Apple-HKP: 4`, SRP M1-M4,
+  PIN `3939`, skip pair-verify — which is what `crypto/crypto_module.cpp:923` already does. It does
+  **not** cover receiver-side group membership: `tsid` appears only as a TXT key, section 8
+  ("Multi-room Peer Coordination") is three sentences of SHOULDs, and `psgid`/`psgsz`/`psgtp`/`fex`
+  are absent. The core unknown in section 2 is untouched by it:
+  <https://raw.githubusercontent.com/lmcgartland/airplay2-rs/refs/heads/master/AIRPLAY_2_SPEC.md>
 - openairplay/airplay2-receiver — the SETPEERS and SETPEERSX body shapes quoted in 3.3; note that
   this implementation logs the plist and does nothing with it:
   <https://github.com/openairplay/airplay2-receiver>
