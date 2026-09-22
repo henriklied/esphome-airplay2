@@ -24,6 +24,13 @@
 //   * DMA parameters (8 desc x 256 frame) match upstream's ~46 ms ring.
 //   * The amp-enable GPIO is asserted in start() and de-asserted in stop().
 
+// This file is the I2S PCM5100 backend. The SPDIF backend
+// (audio_output_spdif.cpp) defines the same symbols; -DAIRPLAY_OUTPUT_SPDIF
+// selects it and compiles this file to nothing.
+#ifdef AIRPLAY_OUTPUT_SPDIF
+// selected the SPDIF backend in audio_output_spdif.cpp
+#else
+
 #include "audio_output.h"
 
 #include "audio_dsp.h"
@@ -731,3 +738,5 @@ audio_channel_mode_t audio_output_get_channel_mode(void) {
 
 }  // namespace airplay_receiver
 }  // namespace esphome
+
+#endif  // AIRPLAY_OUTPUT_SPDIF

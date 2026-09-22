@@ -55,6 +55,9 @@ class AirPlayReceiver : public Component, public media_player::MediaPlayer {
   /// Optional I2S MCLK/SCK pin (PCM5100 boards that don't self-strap). -1 = unused.
   void set_i2s_mclk(int pin) { this->i2s_mclk_pin_ = pin; }
 
+  /// S/PDIF data-out pin (used by the SPDIF backend; -1 = unused).
+  void set_spdif_dout(int pin) { this->spdif_dout_pin_ = pin; }
+
   /// Output channel mode (0=STEREO 1=LEFT 2=RIGHT 3=MONO), from the YAML
   /// audio_channel_mode enum. Applied after audio_output_init().
   void set_audio_channel_mode(int mode) { this->audio_channel_mode_ = static_cast<audio_channel_mode_t>(mode); }
@@ -152,6 +155,7 @@ class AirPlayReceiver : public Component, public media_player::MediaPlayer {
   int i2s_lrclk_pin_{-1};
   int i2s_dout_pin_{-1};
   int i2s_mclk_pin_{-1};  // optional MCLK/SCK (-1 = unused)
+  int spdif_dout_pin_{-1};
   int amp_enable_pin_{-1};
   int sample_rate_{44100};
   bool amp_enable_inverted_{false};
