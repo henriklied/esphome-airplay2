@@ -36,6 +36,7 @@ void AirPlayReceiver::setup() {
   oc.i2s_mclk_gpio = this->i2s_mclk_pin_;
   oc.i2s_lrclk_gpio = this->i2s_lrclk_pin_;
   oc.i2s_dout_gpio = this->i2s_dout_pin_;
+  oc.spdif_dout_gpio = this->spdif_dout_pin_;
   oc.amp_enable_gpio = this->amp_enable_pin_;
   oc.sample_rate = this->sample_rate_;
   oc.amp_enable_inverted = this->amp_enable_inverted_;

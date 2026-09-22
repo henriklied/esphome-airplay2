@@ -61,6 +61,8 @@ struct AudioOutputConfig {
   int i2s_lrclk_gpio = -1;
   /// DOUT (serial data out to the DAC) GPIO.
   int i2s_dout_gpio = -1;
+  /// S/PDIF data-out GPIO for the bit-banged SPDIF backend. -1 = unused.
+  int spdif_dout_gpio = -1;
   /// Board amp-enable GPIO (drives the PA/amp power line).
   int amp_enable_gpio = -1;
   /// Output sample rate in Hz (e.g. 44100, 48000).
