@@ -34,6 +34,8 @@ _CONFIG_I2S_BCLK = "i2s_bclk_pin"
 _CONFIG_I2S_LRCLK = "i2s_lrclk_pin"
 _CONFIG_I2S_DOUT = "i2s_dout_pin"
 _CONFIG_I2S_MCLK = "i2s_mclk_pin"
+_CONFIG_OUTPUT = "output"
+_CONFIG_SPDIF_DOUT = "spdif_dout_pin"
 _CONFIG_AMP_ENABLE = "amp_enable_pin"
 _CONFIG_SAMPLE_RATE = "sample_rate"
 _CONFIG_AMP_INVERTED = "amp_enable_inverted"
@@ -55,6 +57,13 @@ AUDIO_CHANNEL_MODE_ENUM = {
     "left": 1,
     "right": 2,
     "mono": 3,
+}
+
+# Output backend. Chosen at compile time: i2s (default, upstream PCM5100 path)
+# or spdif (bit-banged S/PDIF on spdif_dout_pin, no DAC chip).
+OUTPUT_ENUM = {
+    "i2s": "i2s",
+    "spdif": "spdif",
 }
 
 
@@ -148,6 +157,22 @@ def _optional_output_pin(value):
     return pins.internal_gpio_output_pin_number(value)
 
 
+def _validate_output(config):
+    """Make `output` and the pins agree, so a config cannot half-configure a
+    backend (e.g. output: spdif but no pin, or I2S pins left set)."""
+    output = config[_CONFIG_OUTPUT]
+    if output == "spdif":
+        if config[_CONFIG_SPDIF_DOUT] == -1:
+            raise cv.Invalid("spdif_dout_pin is required when output: spdif", path=[_CONFIG_SPDIF_DOUT])
+        for key in (_CONFIG_I2S_BCLK, _CONFIG_I2S_LRCLK, _CONFIG_I2S_DOUT, _CONFIG_I2S_MCLK):
+            if config[key] != -1:
+                raise cv.Invalid(f"'{key}' is not used with output: spdif", path=[key])
+    else:
+        if config[_CONFIG_SPDIF_DOUT] != -1:
+            raise cv.Invalid("spdif_dout_pin requires output: spdif", path=[_CONFIG_SPDIF_DOUT])
+    return config
+
+
 CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
@@ -161,6 +186,9 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(_CONFIG_I2S_DOUT, default=-1): _optional_output_pin,
             # Optional MCLK/SCK for PCM5100 boards that don't self-strap (-1 = unused).
             cv.Optional(_CONFIG_I2S_MCLK, default=-1): _optional_output_pin,
+            cv.Optional(_CONFIG_OUTPUT, default="i2s"): cv.enum(OUTPUT_ENUM, lower=True),
+            # S/PDIF data-out pin. Presence/absence is governed by `output:`.
+            cv.Optional(_CONFIG_SPDIF_DOUT, default=-1): _optional_output_pin,
             cv.Optional(_CONFIG_AMP_ENABLE, default=-1): _optional_output_pin,
             cv.Optional(_CONFIG_SAMPLE_RATE, default=44100): cv.int_,
             cv.Optional(_CONFIG_AMP_INVERTED, default=False): cv.boolean,
@@ -175,6 +203,7 @@ CONFIG_SCHEMA = cv.All(
     .extend(cv.COMPONENT_SCHEMA)
     .extend(media_player_mod.media_player_schema(AirPlayReceiver)),
     _validate_dsp_against_sample_rate,
+    _validate_output,
     cv.only_with_framework("esp-idf"),
     cv.only_on_esp32,
 )
@@ -192,6 +221,8 @@ async def _build_airplay_receiver(config):
     _register_recursive_sources()
     _add_memory_policy_flags()
     _add_lwip_requirements()
+    if config[_CONFIG_OUTPUT] == "spdif":
+        cg.add_build_flag("-DAIRPLAY_OUTPUT_SPDIF=1")
     # Re-enable ESP-IDF's I2S driver (excluded by default to save compile time).
     include_builtin_idf_component("esp_driver_i2s")
     # The HAP pairing / ChaCha20-Poly1305 audio crypto needs libsodium (Ed25519,
@@ -214,6 +245,7 @@ async def _build_airplay_receiver(config):
                                 config[_CONFIG_AMP_INVERTED]))
     cg.add(var.set_amp_idle_timeout(config[_CONFIG_AMP_IDLE_TIMEOUT]))
     cg.add(var.set_i2s_mclk(config[_CONFIG_I2S_MCLK]))
+    cg.add(var.set_spdif_dout(config[_CONFIG_SPDIF_DOUT]))
     # cv.enum returns the string key ("stereo"/"mono"...), so map to the
     # audio_channel_mode_t integer before the C++ setter.
     cg.add(var.set_audio_channel_mode(AUDIO_CHANNEL_MODE_ENUM[config[_CONFIG_AUDIO_CHANNEL_MODE]]))

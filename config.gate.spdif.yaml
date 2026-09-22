@@ -1,0 +1,42 @@
+# Schema/codegen-validation config for the SPDIF backend — no secrets.
+esphome:
+  name: airplay2-spdif
+  friendly_name: AirPlay2 SPDIF
+  min_version: 2025.1.0
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  cpu_frequency: 240MHz
+  flash_size: 16MB
+  flash_mode: dio
+  flash_frequency: 80MHz
+  framework:
+    type: esp-idf
+    version: recommended
+  toolchain: esp-idf
+  partitions: partitions.csv
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+wifi:
+  ssid: "gate-ssid"
+  password: "gate-password"
+
+logger:
+
+external_components:
+  - source:
+      type: local
+      path: components
+    components:
+      - airplay_receiver
+
+airplay_receiver:
+  id: airplay_spdif
+  name: "AirPlay2 SPDIF"
+  output: spdif
+  spdif_dout_pin: GPIO21
+  sample_rate: 44100
