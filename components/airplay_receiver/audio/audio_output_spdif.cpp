@@ -27,6 +27,7 @@
 #include "esphome/core/log.h"
 #include "driver/i2s_std.h"
 #include "driver/gpio.h"
+#include "esp_attr.h"
 #include "esp_check.h"
 #include "esp_timer.h"
 #include "soc/soc_caps.h"
@@ -69,7 +70,10 @@ static constexpr size_t MAX_RESAMPLE_FRAMES = (size_t) ((FRAME_SAMPLES + 2) * 2 
 #define BMC_FACTOR    (BMC_BITS / I2S_BITS)
 #define SPDIF_BLOCK   192
 #define SPDIF_BUF_DIV 2
-#define DMA_BUF_COUNT  2
+// Descriptors in the TX ring; each holds one encoded half-block (2.18 ms).
+// Upstream used 2 (4.35 ms), which underran on this ESPHome build's scheduling
+// jitter; 8 gives ~17 ms of slack so a short stall no longer drains the ring.
+#define DMA_BUF_COUNT 8
 #define DMA_BUF_FRAMES (SPDIF_BLOCK * BMC_BITS / I2S_BITS / SPDIF_BUF_DIV)
 #define SPDIF_BUF_BYTES (SPDIF_BLOCK * (BMC_BITS / 8) * I2S_CHANNELS / SPDIF_BUF_DIV)
 #define SPDIF_BUF_WORDS (SPDIF_BUF_BYTES / sizeof(uint32_t))
@@ -100,6 +104,24 @@ static bool g_amp_idle_muted = false;           // amp auto-muted by the watchdo
 
 static uint32_t spdif_buf[SPDIF_BUF_WORDS];
 static uint32_t *spdif_ptr;
+
+// TX DMA completion cursor: counts bytes the DMA actually clocked out, so an
+// underrun (the DMA drained ahead of the writer) is visible. The SPDIF backend
+// has no hardware completion cursor for the timing engine (get_pipeline_us
+// returns false), but this is still enough to count underruns.
+static volatile uint32_t g_sent_bytes;
+static volatile uint32_t g_submitted_bytes;
+static uint32_t g_session_base_bytes;
+static volatile uint32_t g_underruns;
+
+static bool IRAM_ATTR on_sent_cb(i2s_chan_handle_t handle, i2s_event_data_t *event, void *ctx) {
+  (void) handle;
+  (void) ctx;
+  if (event && event->size > 0) {
+    g_sent_bytes += (uint32_t) event->size;
+  }
+  return false;
+}
 
 // ── BMC preambles (verbatim from upstream) ──────────────────────────────────
 #define BMC_B      0x33173333U /* block start (B) */
@@ -230,6 +252,7 @@ static void spdif_write(const void *src, size_t size) {
       size_t written;
       ((uint8_t *) spdif_buf)[SYNC_OFFSET] ^= SYNC_FLIP;
       i2s_channel_write(g_tx_handle, spdif_buf, sizeof(spdif_buf), &written, portMAX_DELAY);
+      g_submitted_bytes += (uint32_t) written;
       spdif_ptr = spdif_buf;
     }
   }
@@ -282,6 +305,16 @@ static void playback_task(void *arg) {
     // symptom is that nothing comes out of it.
     const bool carrying_audio =
         samples > 0 && !audio_receiver_last_read_was_silence();
+
+    // Drain-ahead detection: if the DMA clocked out more than we have submitted,
+    // the ring ran dry (an underrun). Rebase so the same gap is not counted twice.
+    {
+      const uint32_t sent = g_sent_bytes - g_session_base_bytes;
+      if ((int32_t) (sent - g_submitted_bytes) > 0) {
+        g_submitted_bytes = sent;
+        g_underruns++;
+      }
+    }
 
     if (carrying_audio) {
       // Data is flowing again: cancel any idle power-down and re-assert the
@@ -369,10 +402,13 @@ esp_err_t audio_output_init(void) {
   i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(i2s_port, I2S_ROLE_MASTER);
   chan_cfg.dma_desc_num = DMA_BUF_COUNT;
   chan_cfg.dma_frame_num = DMA_BUF_FRAMES;
-  // Zero each DMA descriptor after it is sent. Without this a writer stall
-  // longer than the ring makes the hardware replay stale ring contents in a
-  // loop (loud stutter). With auto_clear an underrun degrades to silence.
-  chan_cfg.auto_clear = true;
+  // auto_clear is intentionally OFF (upstream behavior). On a brief writer
+  // stall the DMA repeats the last half-block, which is still a VALID
+  // BMC-encoded S/PDIF frame, so the optical receiver keeps its lock. With
+  // auto_clear the DMA would instead emit raw zeros (no BMC transitions) on a
+  // stall; the receiver reads that as a lost carrier, mutes, and re-locks when
+  // data resumes -- an audible drop that recovers immediately.
+  chan_cfg.auto_clear = false;
   ESP_RETURN_ON_ERROR(i2s_new_channel(&chan_cfg, &g_tx_handle, nullptr), TAG, "channel create failed");
 
   i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(g_output_rate * BMC_FACTOR);
@@ -394,6 +430,13 @@ esp_err_t audio_output_init(void) {
           },
   };
   ESP_RETURN_ON_ERROR(i2s_channel_init_std_mode(g_tx_handle, &std_cfg), TAG, "std mode init failed");
+  const i2s_event_callbacks_t irq_cbs = {
+      .on_recv = nullptr,
+      .on_recv_q_ovf = nullptr,
+      .on_sent = on_sent_cb,
+      .on_send_q_ovf = nullptr,
+  };
+  ESP_RETURN_ON_ERROR(i2s_channel_register_event_callback(g_tx_handle, &irq_cbs, nullptr), TAG, "event cb failed");
   ESP_RETURN_ON_ERROR(i2s_channel_enable(g_tx_handle), TAG, "channel enable failed");
 
   // Pre-fill DMA with SPDIF-encoded silence so the receiver can lock.
@@ -419,6 +462,9 @@ void audio_output_start(void) {
     return;
   }
   g_playback_running = true;
+  g_session_base_bytes = g_sent_bytes;
+  g_submitted_bytes = 0;
+  g_underruns = 0;
   g_volume_ramp_q15 = -1;
   g_amp_idle_since_us = 0;
   g_amp_idle_muted = false;
@@ -494,7 +540,7 @@ int64_t audio_output_get_next_playout_time_ns(int64_t now_us) {
   return (now_us + (int64_t) audio_output_get_hardware_latency_us() + 5000) * 1000LL;
 }
 
-uint32_t audio_output_get_underruns(void) { return 0; }
+uint32_t audio_output_get_underruns(void) { return __atomic_load_n(&g_underruns, __ATOMIC_RELAXED); }
 
 bool audio_output_channel_mode_locked(void) { return false; }
 bool audio_output_channel_mode_in_dsp(void) { return false; }
