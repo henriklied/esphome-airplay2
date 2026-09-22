@@ -6,8 +6,8 @@
 Custom [esphome](https://esphome.io/) component that turns an ESP32 into an AirPlay 2 speaker.
 
 It advertises `_airplay._tcp`, runs the HomeKit pairing handshake, decodes ALAC and AAC, and plays
-out over I2S to an external DAC. The board shows up in Control Center next to the HomePods, and in
-Home Assistant as a `media_player`.
+out over I2S to an external DAC, or as bit-banged S/PDIF to an optical transmitter. The board shows
+up in Control Center next to the HomePods, and in Home Assistant as a `media_player`.
 
 ## More info
 
@@ -16,6 +16,7 @@ Home Assistant as a `media_player`.
   - [Requirements](#requirements)
   - [Adding a component](#adding-a-component)
   - [Configuration](#configuration)
+  - [S/PDIF output](#spdif-output)
   - [Output DSP](#output-dsp)
   - [Runtime tuning](#runtime-tuning)
 - [Entities](#entities)
@@ -23,6 +24,7 @@ Home Assistant as a `media_player`.
 - [Examples](examples)
   - [Amped-ESP32-S3](examples/amped-s3.yaml)
   - [Generic ESP32 + PCM5102A](examples/generic-esp32.yaml)
+  - [S/PDIF transmitter](examples/spdif-s3.yaml)
   - [Speaker correction](examples/dsp-speaker-correction.yaml)
   - [Physical buttons](examples/buttons.yaml)
   - [Character LCD](examples/display.yaml)
@@ -41,7 +43,8 @@ The profile is selected at build time from the target variant, so there is nothi
 S3 is the board this is developed and measured on, and it has the headroom to ride out a wifi hiccup
 that the plain ESP32 does not.
 
-PSRAM is not optional on either. The DAC is expected to be a PCM5100-class I2S part.
+PSRAM is not optional on either. The DAC is expected to be a PCM5100-class I2S part, or an optical
+S/PDIF transmitter for `output: spdif`.
 
 Multi-room works well. Two boards play as a stereo pair with `audio_channel_mode: left` and
 `right`, and a group of boards stays in sync off the shared PTP clock.
@@ -91,10 +94,12 @@ airplay_receiver:
 
 * **id** (Optional, string): Component ID. Needed for lambdas;
 * **name** (Optional, string): The name senders see in Control Center, and the `media_player` entity name;
+* **output** (Optional, string): `i2s` (default) or `spdif`; selects the output backend;
 * **i2s_bclk_pin** (Optional, pin): I2S bit clock to the DAC (default: unused);
 * **i2s_lrclk_pin** (Optional, pin): I2S word select to the DAC (default: unused);
 * **i2s_dout_pin** (Optional, pin): I2S data to the DAC (default: unused);
 * **i2s_mclk_pin** (Optional, pin): Master clock, for DACs that do not self-strap (default: unused);
+* **spdif_dout_pin** (Optional, pin): S/PDIF data out, driven directly from the GPIO (default: unused). Required for `output: spdif`, rejected with `output: i2s`;
 * **amp_enable_pin** (Optional, pin): Amplifier enable/unmute line (default: unused);
 * **amp_enable_inverted** (Optional, bool): True if the amp-enable line is active-LOW (default: false);
 * **amp_idle_timeout** (Optional, int): Seconds of silence before the amp line is de-asserted. `0` keeps the amp on (default: 60);
@@ -109,6 +114,32 @@ occasionally useful for testing pairing on a board with no DAC attached.
 The component **is** the media_player. There is no `media_player: - platform: airplay_receiver`, and
 a config that adds one fails validation. That is deliberate: two instances would mean two RTSP
 servers on port 7000 and two claims on the same I2S peripheral.
+
+### S/PDIF output
+
+Set `output: spdif` and a `spdif_dout_pin`, and the component drives an optical transmitter directly
+from that GPIO. There is no DAC chip: the 020A / DLT1120's DATA pin takes the GPIO signal (its VCC
+is 5 V; DATA is the ESP32's 3.3 V logic output). The I2S pins are unused here and are rejected by
+validation.
+
+```yaml
+airplay_receiver:
+  id: airplay
+  name: "SPDIF Speaker"
+  output: spdif
+  spdif_dout_pin: GPIO21
+  sample_rate: 44100
+```
+
+The bit-banged BMC encoder is ported from rbouteiller/airplay-esp32, whose `amedes` output is where
+the approach originates.
+
+`dsp:` and volume behave the same on both outputs, but multi-room sync is coarser than the I2S
+backend: the bit-bang path has no hardware DMA completion cursor, so the timing engine falls back to
+a modelled latency instead of the I2S playout cursor. A single speaker is unaffected, and a group
+still plays in sync, just to a looser tolerance.
+
+See [examples/spdif-s3.yaml](examples/spdif-s3.yaml) for a full ESP32-S3 config.
 
 ### Output DSP
 
@@ -217,7 +248,7 @@ twice.
 
 * **AirPlay 1 / RAOP.** RSA auth, the FairPlay handshake and AES-CBC audio encryption are
   deliberately not ported. If you only ever use AirPlay 2, this is the component you want;
-* **Bluetooth A2DP**, SPDIF and USB outputs.
+* **Bluetooth A2DP** and USB outputs.
 
 ## Credits
 
