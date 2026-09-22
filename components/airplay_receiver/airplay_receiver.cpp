@@ -30,7 +30,7 @@ void AirPlayReceiver::setup() {
   this->crypto_.setup();
   ESP_LOGI(TAG, "Crypto ready (paired=%d)", this->crypto_.paired());
 
-  // Audio output backend (I2S PCM5100 + amp enable) from YAML wiring.
+  // Audio output backend (I2S PCM5100 or S/PDIF + amp enable) from YAML wiring.
   AudioOutputConfig oc{};
   oc.i2s_bclk_gpio = this->i2s_bclk_pin_;
   oc.i2s_mclk_gpio = this->i2s_mclk_pin_;

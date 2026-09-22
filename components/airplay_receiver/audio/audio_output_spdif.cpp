@@ -42,6 +42,7 @@ static const char *const TAG = "audio_output_spdif";
 
 // Pull PCM from the receiver ring (declared, not included — matches audio_output.cpp).
 size_t audio_receiver_read(int16_t *buffer, size_t samples);
+bool audio_receiver_last_read_was_silence(void);
 
 static constexpr size_t FRAME_SAMPLES = 352;
 // Worst-case resample headroom (<=2x ratio), matches the I2S backend.
@@ -88,6 +89,15 @@ static volatile bool g_resample_reinit = false;
 static volatile audio_channel_mode_t g_channel_mode = AUDIO_CHANNEL_STEREO;
 static int32_t g_volume_q15 = 32768;
 static int32_t g_volume_ramp_q15 = -1;
+
+// Amp idle power-down watchdog (audio_output.h amp_idle_timeout_ms). When the
+// stream is active but produces no PCM frames for the whole timeout (pause or
+// sustained underflow), the amp-enable line is de-asserted to mute/power down
+// the amplifier; it is re-asserted on the next frame.
+static uint32_t g_amp_idle_timeout_ms = 60000;  // 0 = disabled
+static int64_t g_amp_idle_since_us = 0;         // ignored when g_amp_idle_muted
+static bool g_amp_idle_muted = false;           // amp auto-muted by the watchdog
+
 static uint32_t spdif_buf[SPDIF_BUF_WORDS];
 static uint32_t *spdif_ptr;
 
@@ -264,6 +274,38 @@ static void playback_task(void *arg) {
       i2s_channel_enable(g_tx_handle);
     }
     size_t samples = audio_receiver_read(pcm, FRAME_SAMPLES + 1);
+    // A frame count is not evidence of audio.  The scheduler answers "I cannot
+    // play" by zero-filling the buffer and returning the FULL count, so a
+    // stream wedged with no anchor (no PTP lock -> no clock map) looks exactly
+    // like a healthy one here.  Keying the idle watchdog off `samples > 0`
+    // therefore held the amp powered indefinitely through a fault whose whole
+    // symptom is that nothing comes out of it.
+    const bool carrying_audio =
+        samples > 0 && !audio_receiver_last_read_was_silence();
+
+    if (carrying_audio) {
+      // Data is flowing again: cancel any idle power-down and re-assert the
+      // amp if the watchdog had muted it (e.g. resume after a long pause).
+      if (g_amp_idle_muted) {
+        amp_set(true);
+        g_amp_idle_muted = false;
+      }
+      g_amp_idle_since_us = 0;
+    } else if (g_amp_idle_timeout_ms > 0) {
+      // Silent for the full timeout -- a pause, a sustained stall, or a wedge.
+      if (g_amp_idle_since_us == 0) {
+        g_amp_idle_since_us = esp_timer_get_time();
+      } else if (esp_timer_get_time() - g_amp_idle_since_us >=
+                 (int64_t) g_amp_idle_timeout_ms * 1000LL) {
+        if (!g_amp_idle_muted) {
+          amp_set(false);
+          g_amp_idle_muted = true;
+        }
+      }
+    } else {
+      g_amp_idle_since_us = 0;
+    }
+
     if (samples > 0) {
       int16_t *play_buf = pcm;
       size_t play_samples = samples;
@@ -297,9 +339,11 @@ void audio_output_set_config(const AudioOutputConfig &config) {
   }
   g_config = config;
   g_output_rate = (config.sample_rate > 0) ? (uint32_t) config.sample_rate : 44100;
+  g_amp_idle_timeout_ms = config.amp_idle_timeout_ms;
   g_config_set = true;
-  ESP_LOGI(TAG, "Config: SPDIF DOUT=%d AMP=%d rate=%d", config.spdif_dout_gpio, config.amp_enable_gpio,
-           config.sample_rate);
+  ESP_LOGI(TAG, "Config: SPDIF DOUT=%d AMP=%d rate=%d inverted=%d idle_timeout=%lu ms", config.spdif_dout_gpio,
+           config.amp_enable_gpio, config.sample_rate, config.amp_enable_inverted ? 1 : 0,
+           (unsigned long) config.amp_idle_timeout_ms);
 }
 
 esp_err_t audio_output_init(void) {
@@ -325,6 +369,10 @@ esp_err_t audio_output_init(void) {
   i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(i2s_port, I2S_ROLE_MASTER);
   chan_cfg.dma_desc_num = DMA_BUF_COUNT;
   chan_cfg.dma_frame_num = DMA_BUF_FRAMES;
+  // Zero each DMA descriptor after it is sent. Without this a writer stall
+  // longer than the ring makes the hardware replay stale ring contents in a
+  // loop (loud stutter). With auto_clear an underrun degrades to silence.
+  chan_cfg.auto_clear = true;
   ESP_RETURN_ON_ERROR(i2s_new_channel(&chan_cfg, &g_tx_handle, nullptr), TAG, "channel create failed");
 
   i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(g_output_rate * BMC_FACTOR);
@@ -372,6 +420,8 @@ void audio_output_start(void) {
   }
   g_playback_running = true;
   g_volume_ramp_q15 = -1;
+  g_amp_idle_since_us = 0;
+  g_amp_idle_muted = false;
   audio_dsp_reset();
   amp_set(true);
   xTaskCreatePinnedToCore(playback_task, "spdif_play", 4096, nullptr, AIRPLAY_AUDIO_PLAYBACK_TASK_PRIORITY,
@@ -387,6 +437,8 @@ void audio_output_stop(void) {
   while (g_playback_task != nullptr && timeout-- > 0) {
     vTaskDelay(pdMS_TO_TICKS(50));
   }
+  g_amp_idle_since_us = 0;
+  g_amp_idle_muted = false;
   amp_set(false);
 }
 
@@ -405,6 +457,8 @@ void audio_output_set_sample_rate(uint32_t rate) {
   if (rate == 0 || g_tx_handle == nullptr) {
     return;
   }
+  // Only safe when no writer task is actively using I2S (the caller must stop
+  // the playback task first).
   i2s_channel_disable(g_tx_handle);
   i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(rate * BMC_FACTOR);
   i2s_channel_reconfig_std_clock(g_tx_handle, &clk_cfg);

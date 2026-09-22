@@ -2,6 +2,9 @@
 # from GPIO21. No DAC chip: the transmitter's DATA pin takes the GPIO signal.
 #
 # The 020A VCC pin is 5V; DATA is the ESP32's 3.3V logic output.
+#
+# Run this from a checkout of the repo: the component path is ../components and
+# the partition table is ../partitions.csv, and secrets.yaml must sit beside it.
 
 esphome:
   name: airplay-spdif

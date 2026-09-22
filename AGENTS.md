@@ -12,7 +12,7 @@ AirPlay 2 receiver. The component lives in `components/airplay_receiver/`.
    list that includes one confidently-wrong conclusion a previous pass reached and committed.
 3. **`README.md`** — the user-facing documentation. If you change the schema or the public API,
    change it there too.
-4. `examples/` — five working configs, each validated and compiled. `examples/amped-s3.yaml` is the
+4. `examples/` — six working configs, each validated and compiled. `examples/amped-s3.yaml` is the
    reference board.
 
 ## Non-negotiable rules

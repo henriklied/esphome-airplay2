@@ -1,11 +1,16 @@
 #pragma once
 // airplay_receiver audio output backend.
 //
-// Port of upstream main/audio/audio_output.c + audio_output_common.c for an
-// I2S external DAC (PCM5100) driven through the ESP-IDF standard I2S driver,
-// plus a board amp-enable GPIO. All heap routes through ../allocator.h
-// (airplay_alloc / airplay_calloc / airplay_free); all logging uses the
-// ESPHome log macros and a per-file TAG.
+// Shared header for both output backends, selected at build time by
+// -DAIRPLAY_OUTPUT_SPDIF:
+//   * the I2S external-DAC backend (audio_output.cpp) — a port of upstream
+//     main/audio/audio_output.c + audio_output_common.c, driving a PCM5100
+//     through the ESP-IDF standard I2S driver; and
+//   * the bit-banged S/PDIF backend (audio_output_spdif.cpp) — driving an
+//     optical transmitter's DATA pin from spdif_dout_gpio.
+// Both expose the same audio_output_* symbols and can drive a board amp-enable
+// GPIO. All heap routes through ../allocator.h (airplay_alloc / airplay_calloc
+// / airplay_free); all logging uses the ESPHome log macros and a per-file TAG.
 //
 // The output stage is a self-contained leaf: the receiver/timing layer calls
 // audio_output_* (see below), and the internal playback task drains a feed
@@ -46,7 +51,9 @@ typedef enum {
 } audio_channel_mode_t;
 
 /**
- * Board wiring + output configuration for the I2S PCM5100 backend.
+ * Board wiring + output configuration shared by both backends. Which fields are
+ * required depends on the selected backend: the I2S-PCM5100 backend needs the
+ * i2s_* pins, the S/PDIF backend needs spdif_dout_gpio.
  *
  * The component builds this from the YAML config and hands it to the backend
  * via audio_output_set_config() before audio_output_init().
@@ -61,7 +68,7 @@ struct AudioOutputConfig {
   int i2s_lrclk_gpio = -1;
   /// DOUT (serial data out to the DAC) GPIO.
   int i2s_dout_gpio = -1;
-  /// S/PDIF data-out GPIO for the bit-banged SPDIF backend. -1 = unused.
+  /// S/PDIF data (DOUT) pin for the bit-banged S/PDIF backend. -1 = unused.
   int spdif_dout_gpio = -1;
   /// Board amp-enable GPIO (drives the PA/amp power line).
   int amp_enable_gpio = -1;
@@ -90,7 +97,7 @@ struct AudioOutputConfig {
 void audio_output_set_config(const AudioOutputConfig &config);
 
 /**
- * Initialize the I2S PCM5100 output backend.
+ * Initialize the configured output backend (I2S PCM5100 or S/PDIF).
  */
 esp_err_t audio_output_init(void);
 
@@ -152,19 +159,25 @@ void audio_output_set_source_rate(int rate);
 void audio_output_set_volume_q15(int32_t volume_q15);
 
 /**
- * Return the modelled I2S DMA pipeline latency in microseconds.
+ * Return the modelled output pipeline latency in microseconds. The I2S backend
+ * uses:
  *   (2 * dma_desc_num - 1) * dma_frame_num * 1e6 / (2 * sample_rate)
+ * The S/PDIF backend models its own DMA ring.
  */
 uint32_t audio_output_get_hardware_latency_us(void);
 
 /**
  * Sample the live output pipeline delay: how long from now until the first
- * sample of the NEXT backend write is heard. Uses the queue depth reported by
- * the hardware completion cursor.
+ * sample of the NEXT backend write is heard.
+ *
+ * The I2S backend reports this from the hardware completion cursor and returns
+ * true. The S/PDIF bit-bang backend has no completion cursor, so it returns
+ * false and the caller falls back to the modelled latency
+ * (audio_output_get_next_playout_time_ns).
  *
  * @param now_us       out: esp_timer_get_time() sampled with the queue depth.
  * @param pipeline_us  out: queue depth in microseconds at the output rate.
- * @return true (the backend always has a completion cursor).
+ * @return true when the backend has a completion cursor; false on S/PDIF.
  */
 bool audio_output_get_pipeline_us(int64_t *now_us, uint32_t *pipeline_us);
 
