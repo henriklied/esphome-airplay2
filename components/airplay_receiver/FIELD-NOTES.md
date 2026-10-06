@@ -634,6 +634,31 @@ Same bench and build as above, ms per frame:
 - Flashing while the bench decodes can trip the task watchdog on core 1 and
   leave the old image running; retry the upload.
 
+### Apple TV 5.1 plays (2026-10-06 night, measured)
+
+Geneva, `advertise_surround: true`, Apple TV (`.175`) sending 5.1 AAC 48 kHz:
+~7 min continuous, through three reconnects, a pause and two skips. Sync within
+~0.2 ms, decode 15.2-16.3 ms avg per 21.3 ms frame (max 19-28 ms), no
+underruns, one 5 ms concealment (WiFi). Three fixes were needed on top of the
+two-core filterbank:
+
+- **New buffered port per SETUP** (section below): the Apple TV's
+  SETUP -> TEARDOWN -> SETUP now lands on a fresh connection whose first packet
+  matches the anchor.
+- **I2S follows the stream's rate** (`reclock_output()` in `audio_output.cpp`):
+  the 48 -> 44.1 kHz resampler ran on core 1 next to the decode and tripped the
+  task watchdog (`subsample_no_interpolate` -> software `floor()` on doubles).
+  44.1 and 48 kHz now play natively; the reclock happens before the first
+  audible frame, while the amp is off.
+- **The decode task yields after 200 ms back-to-back** (`audio_decode_worker`):
+  after a reconnect the Apple TV front-loads seconds of audio, and decoding that
+  backlog at ~15 ms per frame starved IDLE1 past the watchdog.
+
+Open: the two-core worker failed to start once ("Worker unavailable", internal
+RAM ~30-35 KB free while streaming), which leaves 5.1 on one core with no
+headroom. Spotify against the 5.1 `/info` is untested, so the committed Geneva
+config keeps `advertise_surround: false`.
+
 ### Buffered port reuse and Mac PTP corrections (2026-10-06 evening)
 
 - **New buffered port per SETUP after a stream TEARDOWN** (`handle_teardown`),
@@ -695,4 +720,6 @@ Same bench and build as above, ms per frame:
   Stereo from the same Apple TV has matching anchors. See the 2026-10-06
   shairport-sync notes in AIRPLAY-FINDINGS for how it reconciles the two.
 - 5.1 advertising is off again (`advertise_surround: false`); `/info` is then
-  identical to the build that plays Spotify and Apple TV stereo.
+  identical to the build that plays Spotify and Apple TV stereo. **Superseded:**
+  the anchor/RTP mismatch was buffered port reuse, and 5.1 now plays; see
+  "Apple TV 5.1 plays".
