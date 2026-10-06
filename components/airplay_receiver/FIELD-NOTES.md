@@ -508,3 +508,29 @@ working latency.
 If resumes regress (silent start, wrong position, `Anchor change detected`
 right after a resume), revert the commit "airplay: reuse the resume anchor
 across a realtime FLUSH".
+
+## FDK performance (2026-10-06, Geneva, measured)
+
+Stereo AAC 44.1k decode per 1024-sample (23.2 ms) frame, from the decoder's
+`decode avg=` log line:
+
+| Build | avg | max | internal free |
+|---|---|---|---|
+| `-Os`, all FDK memory in PSRAM | 11.6-12.1 ms | 14.4-15.9 ms | 56-62 KB |
+| `-O2` + L1 buffers internal | 7.3-7.4 ms | 10.9-12.6 ms | 35-39 KB |
+
+- `-O2` is `esp32: framework: advanced: compiler_optimization: PERF`, set in
+  `boston-x90-l-airplay.yaml` only (`sdkconfig_options` is overridden by
+  ESPHome). Flash 37.7% -> 44.7%.
+- FDK tags allocations by memory section; the pschatzmann port ignored the tag
+  and put everything in PSRAM. `-Wl,--wrap=FDKcalloc_L/FDKaalloc_L`
+  (`__init__.py`, wrappers at the end of `decoder/aac_fdk.cpp`) puts L1 (2 x
+  8 KB for stereo) in internal RAM while 40 KB stays free
+  (`INTERNAL_RESERVE_BYTES`). L2 (53 KB) and EXTERN (256 KB) stay in PSRAM.
+  Sizes measured on the host by logging `FDKcalloc_L`.
+- Internal RAM fell ~23 KB, not 16: `-O2` presumably grows IRAM code, which
+  shares SRAM. Not separated. **If WiFi drops or allocations fail**, raise
+  `INTERNAL_RESERVE_BYTES` (disables the move, keeps `-O2`) or drop PERF.
+- Contribution of each change was not measured separately.
+- 5.1 at ~3x stereo work would still be ~22 ms per 23 ms frame: not viable
+  without further gains.

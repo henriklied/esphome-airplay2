@@ -209,6 +209,9 @@ async def _build_airplay_receiver(config):
     # FDK. Pinned by commit; tests/test_aac_fdk.py builds the same one.
     add_idf_component(name="espressif/esp_audio_codec", ref="^2.5.0")
     add_idf_component(name="codec-fdk-aac", repo=_FDK_AAC_REPO, ref=_FDK_AAC_REF)
+    # FDK's section-tagged work buffers get placed by decoder/aac_fdk.cpp.
+    for symbol in ("FDKcalloc_L", "FDKaalloc_L"):
+        cg.add_build_flag(f"-Wl,--wrap={symbol}")
 
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)

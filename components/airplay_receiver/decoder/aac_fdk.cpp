@@ -72,3 +72,70 @@ int aac_fdk_decode(aac_fdk_t *decoder, const uint8_t *adts_frame, size_t adts_le
 
 }  // namespace airplay_receiver
 }  // namespace esphome
+
+// Memory placement for FDK's section-tagged allocations.
+//
+// The pschatzmann FDK port puts every allocation in PSRAM. FDK itself tags its
+// per-frame work buffers with a memory section (SECT_DATA_L1 = fastest, L2,
+// EXTERN) and leaves placement to the platform; upstream ignores the tag.
+// Wrapping FDKcalloc_L / FDKaalloc_L at link time (-Wl,--wrap, set in
+// __init__.py) honours it without patching the pinned component: L1 goes to
+// internal RAM while enough stays free for WiFi and lwIP, everything else
+// stays in PSRAM. Stereo AAC-LC tags 2 x 8 KB as L1 and 53 KB as L2 (measured
+// on the host); L2 does not fit beside WiFi, so only L1 moves.
+//
+// FDKafree_L / FDKfree_L are not wrapped: they read the pointer stored below
+// the aligned block and call free(), which accepts either heap. These live in
+// this file, not their own, because the linker only pulls an archive member
+// that something already references; aac_fdk_open() guarantees this one.
+
+#ifdef USE_ESP_IDF
+
+#include "esp_heap_caps.h"
+
+#include "genericStds.h"
+
+namespace {
+
+// Internal RAM left free after an L1 allocation. ~60 KB is free while
+// streaming with FDK open; the headroom is for WiFi RX buffers and sockets.
+constexpr size_t INTERNAL_RESERVE_BYTES = 40 * 1024;
+
+bool is_fast_section(MEMORY_SECTION section) {
+  return section == SECT_DATA_L1 || section == SECT_DATA_L1_A || section == SECT_DATA_L1_B;
+}
+
+void *placed_calloc(size_t bytes, MEMORY_SECTION section) {
+  if (is_fast_section(section) &&
+      heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) >= bytes + INTERNAL_RESERVE_BYTES) {
+    void *ptr = heap_caps_calloc(1, bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (ptr != nullptr) {
+      return ptr;
+    }
+  }
+  void *ptr = heap_caps_calloc(1, bytes, MALLOC_CAP_SPIRAM);
+  return ptr != nullptr ? ptr : heap_caps_calloc(1, bytes, MALLOC_CAP_8BIT);
+}
+
+}  // namespace
+
+extern "C" {
+
+void *__wrap_FDKcalloc_L(const UINT dim, const UINT size, MEMORY_SECTION section) {
+  return placed_calloc((size_t) dim * size, section);
+}
+
+// Same layout as the original, so the unwrapped FDKafree_L can release it.
+void *__wrap_FDKaalloc_L(const UINT size, const UINT alignment, MEMORY_SECTION section) {
+  void *addr = placed_calloc((size_t) size + alignment + sizeof(void *), section);
+  if (addr == nullptr) {
+    return nullptr;
+  }
+  void *result = ALIGN_PTR((unsigned char *) addr + sizeof(void *));
+  *(((void **) result) - 1) = addr;
+  return result;
+}
+
+}  // extern "C"
+
+#endif  // USE_ESP_IDF
