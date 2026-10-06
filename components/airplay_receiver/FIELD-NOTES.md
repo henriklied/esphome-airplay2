@@ -624,6 +624,28 @@ Same bench and build as above, ms per frame:
 - Flashing while the bench decodes can trip the task watchdog on core 1 and
   leave the old image running; retry the upload.
 
+### Buffered port reuse and Mac PTP corrections (2026-10-06 evening)
+
+- **New buffered port per SETUP after a stream TEARDOWN** (`handle_teardown`),
+  as shairport-sync does. Verified with Mac Music: every SETUP got a new port,
+  the old connection closed, and each connection's first packet RTP sat
+  ~0.3 s from its anchor. iPhone Apple Music track changes stay inside one
+  connection (FLUSHBUFFERED + new anchor), so they never hit this path. The
+  Apple TV, which motivated it, is still untested.
+- **A Mac's PTP correctionField is a timescale offset.** Logged raw: Follow_Up
+  `preciseOriginTimestamp` = the Mac's awake uptime (`CLOCK_UPTIME_RAW`),
+  correctionField = -59806 s; its SETRATEANCHORTIME uses the same uptime under
+  its own clock ID. Applying the correction put anchors 16.6 h ahead and Mac
+  streams never started, on any subnet. Corrections over 1 s are now ignored;
+  Mac Music then played, anchors within a few ms (`lead=-18 ms`, `-4 ms`).
+  nqptp applies the correction and files it under the Announce grandmaster,
+  so shairport-sync would not have handled this case either.
+- **Open: a second RTSP client supersedes a playing one.** Home Assistant
+  (Music Assistant, 192.168.0.232) connected after a reflash and the Mac's
+  session was dropped silently; Music kept showing "playing".
+- **Open: Mac volume.** Reported not working; the test session was the one
+  dropped above. `Sender volume %.2f dB` is now logged at INFO to settle it.
+
 ### 5.1 attempt with an Apple TV (2026-10-06, measured)
 
 - **120 MHz octal PSRAM** (experimental, temperature-tracked tuning): 5.1
