@@ -75,6 +75,7 @@ void rtsp_conn_set_volume(RtspConn *conn, float volume_db) {
   if (conn == nullptr) {
     return;
   }
+  ESP_LOGI(TAG, "Sender volume %.2f dB", volume_db);
   conn->volume_db = volume_db;
   conn->volume_q15 = db_to_q15(volume_db);
   transport_set_volume_state(conn->volume_db, conn->volume_q15);
