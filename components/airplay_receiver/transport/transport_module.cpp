@@ -1312,6 +1312,14 @@ static void handle_teardown(int socket, RtspConn *conn, const RtspRequest *req, 
   if (has_streams) {
     conn->stream_paused = true;
     transport_events_emit(TRANSPORT_EVENT_PAUSED, nullptr);
+    // The next buffered SETUP gets a new port, as in shairport-sync. Reusing
+    // it kept the torn-down stream's TCP connection being read: the Apple TV
+    // does SETUP -> TEARDOWN -> SETUP within a second, and its new anchor was
+    // applied to the old stream's packets, a random RTP base away. A new port
+    // makes audio_receiver_start_buffered() restart the listener, which
+    // closes the old connection.
+    socket_utils_release_reservation(conn->buffered_port);
+    conn->buffered_port = 0;
   }
   conn->stream_active = false;
   rtsp_send_ok(socket, conn, req->cseq);

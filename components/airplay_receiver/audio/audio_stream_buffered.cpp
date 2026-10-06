@@ -135,6 +135,9 @@ static void buffered_audio_task(void *pvParameters) {
     }
 
     state->buffered_client_socket = client_sock;
+    const unsigned peer_port = ntohs(client_addr.sin_port);
+    uint32_t connection_packets = 0;
+    ESP_LOGI(TAG, "Buffered connection from port %u on %u", peer_port, (unsigned) state->buffered_port);
 
     struct timeval tv = {.tv_sec = 30, .tv_usec = 0};
     setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
@@ -193,6 +196,12 @@ static void buffered_audio_task(void *pvParameters) {
       }
 
       state->stats.packets_received++;
+      if (connection_packets++ == 0) {
+        ESP_LOGI(TAG, "Buffered connection %u: first packet seq %u rtp %u", peer_port,
+                 (unsigned) (((uint32_t) packet[1] << 16) | ((uint32_t) packet[2] << 8) | packet[3]),
+                 (unsigned) (((uint32_t) packet[4] << 24) | ((uint32_t) packet[5] << 16) |
+                             ((uint32_t) packet[6] << 8) | packet[7]));
+      }
 
       uint32_t seq_no = ((uint32_t) packet[1] << 16) | ((uint32_t) packet[2] << 8) | packet[3];
       uint32_t timestamp = ((uint32_t) packet[4] << 24) | ((uint32_t) packet[5] << 16) |
@@ -274,6 +283,7 @@ static void buffered_audio_task(void *pvParameters) {
       }
     }
 
+    ESP_LOGI(TAG, "Buffered connection %u closed after %u packets", peer_port, (unsigned) connection_packets);
     close(client_sock);
     state->buffered_client_socket = -1;
   }
@@ -358,17 +368,22 @@ static void buffered_stop(audio_stream_t *stream) {
 
   stream->running = false;
 
+  // shutdown(), not close(): the task still holds the descriptor and closes it
+  // itself on the way out. Closing it here let that second close() land on
+  // whatever socket had reused the number meanwhile.
   if (state->buffered_client_socket > 0) {
-    close(state->buffered_client_socket);
-    state->buffered_client_socket = -1;
+    shutdown(state->buffered_client_socket, SHUT_RDWR);
   }
 
+  const bool stopped = buffered_wait_for_task_stopped(state, 20);
+
+  // After the wait where possible: the task polls accept() on it until it exits.
   if (state->buffered_listen_socket > 0) {
     close(state->buffered_listen_socket);
     state->buffered_listen_socket = -1;
   }
 
-  if (!buffered_wait_for_task_stopped(state, 20)) {
+  if (!stopped) {
     ESP_LOGW(TAG, "Buffered audio task did not exit within timeout");
     return;
   }
