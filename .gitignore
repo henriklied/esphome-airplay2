@@ -15,3 +15,6 @@ secrets.yaml
 
 # Editor / OS
 .DS_Store
+
+# FDK source and host harness builds (tests/test_aac_fdk.py)
+tests/.cache/

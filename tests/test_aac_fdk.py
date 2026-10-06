@@ -22,7 +22,9 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-COMPONENT = ROOT / "airplay_receiver"
+# Standalone repo nests the component under components/; the monorepo copy does not.
+COMPONENT = next(c for c in (ROOT / "components" / "airplay_receiver", ROOT / "airplay_receiver")
+                 if c.is_dir())
 CACHE = Path(__file__).resolve().parent / ".cache"
 FDK_REPO = "https://github.com/pschatzmann/codec-fdk-aac.git"
 FDK_REF = "9998bb9e5fe839ddccb0aeba8ff8c5afc1c94ed1"  # keep in step with __init__.py
