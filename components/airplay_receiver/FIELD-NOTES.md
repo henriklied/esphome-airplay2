@@ -550,6 +550,42 @@ the audio core with the board idle, `-O2` + L1 internal, downmix to stereo.
 streaming projects to ~20.5 ms per 21.3 ms frame, ~96% of the core. Not viable
 without roughly another 25-30% off the decode.
 
+### Where FDK's decode time goes (2026-10-06, measured)
+
+`tools/fdk_bench/` on the Geneva: the `boston-x90-l-airplay.yaml` build (`-O2`,
+L1 internal), the decode task's core, priority and stack, board idle, downmix to
+stereo. Phases are timed by `-Wl,--wrap` on FDK's cross-file calls; ~400 frames
+per clip, two rounds agreed within 1%. ms per frame:
+
+| Clip | total | read | tools | filterbank | downmix | other |
+|---|---|---|---|---|---|---|
+| stereo 44.1k 256k, Apple enc. | 6.6 | 2.4 (36%) | 0.2 | 2.4 (37%) | 0.0 | 1.5 (23%) |
+| 5.1 48k 640k, Apple enc. | 17.5 | 5.6 (32%) | 0.4 | 7.3 (42%) | 1.5 (9%) | 2.7 (15%) |
+| 5.1 48k 640k, ffmpeg enc. | 16.5 | 4.6 (28%) | 0.4 | 7.3 (44%) | 1.5 (9%) | 2.7 (16%) |
+
+read = `CChannelElement_Read` (bitstream + Huffman), tools =
+`CChannelElement_Decode`, filterbank = `CBlock_FrequencyToTime` (IMDCT +
+overlap-add), downmix = `pcmDmx_ApplyFrame`, other = the remainder.
+
+- **Filterbank: 1.2 ms per channel**, the largest share of 5.1. FDK runs it in a
+  per-channel loop after every element is parsed (`aacdecoder.cpp`, the loop
+  calling `CBlock_FrequencyToTime`), so channels can be split across cores. The
+  shared state is the `pWorkBufferCore1->mdctOutTemp` scratch; a second core
+  needs its own. Best case, half the channels on core 0: -3.6 ms.
+- **FDK's downmix costs 1.5 ms on the board** (a host run put it at 0.16 ms).
+  Decoding to 6 channels and mixing in our own code may recover most of it;
+  the cost of our own mix is unmeasured.
+- **Read is 28-32% and sequential**: element boundaries are only known after
+  parsing the previous one. Apple's encoder costs 1 ms more here than ffmpeg's
+  at the same bitrate, and its max (23.6 ms) exceeds the 21.3 ms frame.
+- Projection, not measured: 17.5 - 3.6 - 1.3 = ~12.6 ms idle (-28%), ~16 ms
+  streaming at the +28% measured for stereo, ~76% of core 1, with ~3.6 ms per
+  frame (~17%) added to core 0 next to WiFi.
+- Stereo is 6.6 ms here against 5.76 ms in the earlier benchmark; that run's
+  encoder was not recorded, and the two are not directly comparable.
+- The bench needs the decode task's 56 KB stack (16 KB crashed in `dit_fft`)
+  and must yield every frame, or IDLE1 starves and the task watchdog resets.
+
 ### 5.1 attempt with an Apple TV (2026-10-06, measured)
 
 - **120 MHz octal PSRAM** (experimental, temperature-tracked tuning): 5.1
