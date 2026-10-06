@@ -572,9 +572,8 @@ overlap-add), downmix = `pcmDmx_ApplyFrame`, other = the remainder.
   calling `CBlock_FrequencyToTime`), so channels can be split across cores. The
   shared state is the `pWorkBufferCore1->mdctOutTemp` scratch; a second core
   needs its own. Best case, half the channels on core 0: -3.6 ms.
-- **FDK's downmix costs 1.5 ms on the board** (a host run put it at 0.16 ms).
-  Decoding to 6 channels and mixing in our own code may recover most of it;
-  the cost of our own mix is unmeasured.
+- **FDK's downmix shows 1.5 ms on the board** (a host run put it at 0.16 ms),
+  but it is not removable cost: see the next section.
 - **Read is 28-32% and sequential**: element boundaries are only known after
   parsing the previous one. Apple's encoder costs 1 ms more here than ffmpeg's
   at the same bitrate, and its max (23.6 ms) exceeds the 21.3 ms frame.
@@ -585,6 +584,45 @@ overlap-add), downmix = `pcmDmx_ApplyFrame`, other = the remainder.
   encoder was not recorded, and the two are not directly comparable.
 - The bench needs the decode task's 56 KB stack (16 KB crashed in `dit_fft`)
   and must yield every frame, or IDLE1 starves and the task watchdog resets.
+
+### Filterbank on two cores (2026-10-06, measured)
+
+`decoder/aac_fdk_parallel.cpp`: on multichannel streams, every other
+channel's `CBlock_FrequencyToTime` runs on a worker pinned to core 0, and a
+wrap of `CAacDecoder_DecodeFrame` waits for it before returning. Link-time
+wraps only; the pinned FDK is unmodified. The file's header comment lists the
+FDK facts that keep the output identical; a ref bump must re-check them.
+
+Same bench and build as above, ms per frame:
+
+| Clip | 1 core | 2 cores | max, 2 cores |
+|---|---|---|---|
+| 5.1 640k, Apple enc. | 17.5-17.8 | 14.8-15.1 (-15%) | 18.9-20.3 |
+| 5.1 640k, ffmpeg enc. | 16.5-16.8 | 13.8-14.1 (-16%) | 15.3-16.5 |
+| stereo 256k | 6.6 | 6.6 (not split) | 9.4-9.9 |
+
+- **Output is bit-identical** to the serial decode: FNV hash over every sample,
+  every round, both encoders.
+- -2.7 ms of a possible -3.6 ms: the worker's three channels take longer on
+  core 0 than on core 1. Handing it the first channel (even calls) rather than
+  the second was worth ~0.8 ms; with odd calls the saving was 1.9 ms.
+- Deferral only happens in the concealment steady state; a frame with errors
+  or fading runs serially.
+- Worker: 10 KB stack (peak ~6.3 KB), 8 KB scratch placed like FDK's L1
+  buffer, created on the first multichannel frame, freed with the decoder.
+- **Replacing FDK's downmix buys nothing.** Decoding 5.1 to six channels with
+  no downmix at all measured 15.2 ms against 15.1 ms with it: the 1.5 ms is
+  FDK's interleave and PCM conversion, which happen inside the downmix call
+  and move elsewhere without it.
+- 5.1 while streaming, projected from the stereo overhead (+1.6 ms, or +28%):
+  ~16.5-19.5 ms of the 21.3 ms frame. Unmeasured; the next test is a real 5.1
+  stream with `advertise_surround`, once the anchor/RTP mismatch below is
+  fixed.
+- Not split: parsing (28-32%) is sequential.
+- Free internal RAM read either ~97 KB or ~72 KB at boot, before any decode, on
+  different boots of the same build; worker start/stop did not move it.
+- Flashing while the bench decodes can trip the task watchdog on core 1 and
+  leave the old image running; retry the upload.
 
 ### 5.1 attempt with an Apple TV (2026-10-06, measured)
 

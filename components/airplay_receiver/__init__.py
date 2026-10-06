@@ -40,6 +40,11 @@ _CONFIG_AMP_INVERTED = "amp_enable_inverted"
 _CONFIG_AMP_IDLE_TIMEOUT = "amp_idle_timeout"
 _CONFIG_ADVERTISE_SURROUND = "advertise_surround"
 _FDK_AAC_REPO = "https://github.com/pschatzmann/codec-fdk-aac.git"
+# C++ mangled names at _FDK_AAC_REF; a bump that changes a signature fails to link.
+_FDK_PARALLEL_SYMBOLS = (
+    "_Z22CBlock_FrequencyToTimeP28CAacDecoderStaticChannelInfoP22CAacDecoderChannelInfoPlsiS3_iji",
+    "_Z23CAacDecoder_DecodeFrameP20AAC_DECODER_INSTANCEjPlii",
+)
 _FDK_AAC_REF = "9998bb9e5fe839ddccb0aeba8ff8c5afc1c94ed1"
 _CONFIG_DSP = "dsp"
 _CONFIG_DSP_ENABLED = "enabled"
@@ -209,8 +214,9 @@ async def _build_airplay_receiver(config):
     # FDK. Pinned by commit; tests/test_aac_fdk.py builds the same one.
     add_idf_component(name="espressif/esp_audio_codec", ref="^2.5.0")
     add_idf_component(name="codec-fdk-aac", repo=_FDK_AAC_REPO, ref=_FDK_AAC_REF)
-    # FDK's section-tagged work buffers get placed by decoder/aac_fdk.cpp.
-    for symbol in ("FDKcalloc_L", "FDKaalloc_L"):
+    # FDK's section-tagged work buffers get placed by decoder/aac_fdk.cpp, and
+    # its multichannel filterbank split across cores by aac_fdk_parallel.cpp.
+    for symbol in ("FDKcalloc_L", "FDKaalloc_L", *_FDK_PARALLEL_SYMBOLS):
         cg.add_build_flag(f"-Wl,--wrap={symbol}")
 
     var = cg.new_Pvariable(config[CONF_ID])

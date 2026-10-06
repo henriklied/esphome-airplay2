@@ -27,6 +27,10 @@ aac_fdk_t *aac_fdk_open(int output_channels);
 
 void aac_fdk_close(aac_fdk_t *decoder);
 
+/// Allow multichannel streams to run part of the filterbank on the other core
+/// (aac_fdk_parallel.h). On by default; output is identical either way.
+void aac_fdk_set_parallel(aac_fdk_t *decoder, bool allowed);
+
 /// Decode one complete ADTS frame into `out` (interleaved 16-bit PCM holding
 /// up to `out_capacity_frames` frames). Returns frames written, or -1 on error
 /// with `info->error` set. After an error the next call clears the decoder's

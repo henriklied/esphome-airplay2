@@ -2,6 +2,7 @@
 
 #include <new>
 
+#include "aac_fdk_parallel.h"
 #include "aacdecoder_lib.h"
 
 namespace esphome {
@@ -11,6 +12,9 @@ struct aac_fdk {
   HANDLE_AACDECODER handle;
   int output_channels;
   bool clear_history;
+  bool parallel_allowed;
+  bool parallel_started;
+  bool multichannel;  // the last decoded frame had more than two channels
 };
 
 aac_fdk_t *aac_fdk_open(int output_channels) {
@@ -24,6 +28,7 @@ aac_fdk_t *aac_fdk_open(int output_channels) {
     return nullptr;
   }
   decoder->output_channels = output_channels;
+  decoder->parallel_allowed = true;
   // Min = max pins the output: mono is duplicated up, 5.1 / 7.1 mixed down.
   aacDecoder_SetParam(decoder->handle, AAC_PCM_MIN_OUTPUT_CHANNELS, output_channels);
   aacDecoder_SetParam(decoder->handle, AAC_PCM_MAX_OUTPUT_CHANNELS, output_channels);
@@ -39,8 +44,13 @@ void aac_fdk_close(aac_fdk_t *decoder) {
     return;
   }
   aacDecoder_Close(decoder->handle);
+  if (decoder->parallel_started) {
+    aac_fdk_parallel_stop();
+  }
   delete decoder;
 }
+
+void aac_fdk_set_parallel(aac_fdk_t *decoder, bool allowed) { decoder->parallel_allowed = allowed; }
 
 int aac_fdk_decode(aac_fdk_t *decoder, const uint8_t *adts_frame, size_t adts_len, int16_t *out,
                    size_t out_capacity_frames, aac_fdk_frame_info_t *info) {
@@ -50,6 +60,10 @@ int aac_fdk_decode(aac_fdk_t *decoder, const uint8_t *adts_frame, size_t adts_le
   UINT bytes_valid = (UINT) adts_len;
 
   AAC_DECODER_ERROR err = aacDecoder_Fill(decoder->handle, buffers, sizes, &bytes_valid);
+  if (decoder->multichannel && decoder->parallel_allowed && !decoder->parallel_started) {
+    decoder->parallel_started = aac_fdk_parallel_start();
+  }
+  aac_fdk_parallel_enable(decoder->multichannel && decoder->parallel_allowed && decoder->parallel_started);
   if (err == AAC_DEC_OK) {
     const UINT flags = decoder->clear_history ? AACDEC_CLRHIST : 0;
     err = aacDecoder_DecodeFrame(decoder->handle, out,
@@ -67,6 +81,7 @@ int aac_fdk_decode(aac_fdk_t *decoder, const uint8_t *adts_frame, size_t adts_le
   const CStreamInfo *stream = aacDecoder_GetStreamInfo(decoder->handle);
   info->sample_rate = stream->sampleRate;
   info->source_channels = stream->aacNumChannels;
+  decoder->multichannel = stream->aacNumChannels > 2;
   return stream->frameSize;
 }
 

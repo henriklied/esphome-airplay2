@@ -12,7 +12,6 @@ CONFIG_SCHEMA = cv.Schema({cv.GenerateID(): cv.declare_id(FdkBench)}).extend(cv.
 WRAPPED = [
     "_Z20CChannelElement_ReadP13FDK_BITSTREAMPP22CAacDecoderChannelInfoPP28CAacDecoderStaticChannelInfo17AUDIO_OBJECT_TYPEP16SamplingRateInfojjjhaP12TRANSPORTDEC",
     "_Z22CChannelElement_DecodePP22CAacDecoderChannelInfoPP28CAacDecoderStaticChannelInfoP16SamplingRateInfojji",
-    "_Z22CBlock_FrequencyToTimeP28CAacDecoderStaticChannelInfoP22CAacDecoderChannelInfoPlsiS3_iji",
     "pcmDmx_ApplyFrame",
 ]
 

@@ -9,7 +9,6 @@
 #include "esphome/components/airplay_receiver/decoder/aac_fdk.h"
 #include "esphome/core/log.h"
 
-#include "block.h"
 #include "channel.h"
 #include "pcmdmx_lib.h"
 
@@ -17,10 +16,9 @@
 
 namespace {
 
-enum Phase { READ, TOOLS, IMDCT, DMX, PHASES };
-const char *const PHASE_NAMES[PHASES] = {"read", "tools", "imdct", "dmx"};
+// The filterbank is not timed separately: airplay_receiver wraps it (aac_fdk_parallel.cpp).
+enum Phase { READ, TOOLS, DMX, PHASES };
 int64_t g_phase_us[PHASES];
-uint32_t g_imdct_calls;
 
 }  // namespace
 
@@ -51,20 +49,6 @@ void wrap_tools(CAacDecoderChannelInfo *ci[2], CAacDecoderStaticChannelInfo *sci
   int64_t t = esp_timer_get_time();
   real_tools(ci, sci, sri, flags, el_flags, el_channels);
   g_phase_us[TOOLS] += esp_timer_get_time() - t;
-}
-
-void real_imdct(CAacDecoderStaticChannelInfo *, CAacDecoderChannelInfo *, PCM_DEC[], const SHORT, const int,
-                FIXP_DBL *, const INT, UINT, INT)
-    __asm__("__real__Z22CBlock_FrequencyToTimeP28CAacDecoderStaticChannelInfoP22CAacDecoderChannelInfoPlsiS3_iji");
-void wrap_imdct(CAacDecoderStaticChannelInfo *, CAacDecoderChannelInfo *, PCM_DEC[], const SHORT, const int,
-                FIXP_DBL *, const INT, UINT, INT)
-    __asm__("__wrap__Z22CBlock_FrequencyToTimeP28CAacDecoderStaticChannelInfoP22CAacDecoderChannelInfoPlsiS3_iji");
-void wrap_imdct(CAacDecoderStaticChannelInfo *sci, CAacDecoderChannelInfo *ci, PCM_DEC out[], const SHORT len,
-                const int ok, FIXP_DBL *work, const INT headroom, UINT el_flags, INT el_ch) {
-  int64_t t = esp_timer_get_time();
-  real_imdct(sci, ci, out, len, ok, work, headroom, el_flags, el_ch);
-  g_phase_us[IMDCT] += esp_timer_get_time() - t;
-  g_imdct_calls++;
 }
 
 extern "C" {
@@ -98,14 +82,16 @@ static const Clip CLIPS[] = {
 static constexpr int PASSES = 3;
 static constexpr size_t OUT_FRAMES = 2048;
 
-static void run_clip(const Clip &clip) {
+static uint32_t run_clip(const Clip &clip, bool parallel, int output_channels = 2) {
   using namespace airplay_receiver;
-  static int16_t out[OUT_FRAMES * 2];
-  aac_fdk_t *dec = aac_fdk_open(2);
+  static int16_t out[OUT_FRAMES * 8];
+  aac_fdk_t *dec = aac_fdk_open(output_channels);
   if (dec == nullptr) {
     ESP_LOGE(TAG, "open failed");
-    return;
+    return 0;
   }
+  aac_fdk_set_parallel(dec, parallel);
+  uint32_t hash = 2166136261u;  // FNV-1a over every decoded sample
   int64_t total_us = 0, max_us = 0;
   uint32_t frames = 0, errors = 0, frame_size = 0, rate = 0, channels = 0;
   bool warmed_up = false;
@@ -126,11 +112,12 @@ static void run_clip(const Clip &clip) {
         errors++;
         continue;
       }
+      const uint8_t *bytes = reinterpret_cast<const uint8_t *>(out);
+      for (size_t i = 0; i < (size_t) n * output_channels * sizeof(int16_t); i++) hash = (hash ^ bytes[i]) * 16777619u;
       if (!warmed_up) {
         // The first frame carries the decoder's configuration: not timed.
         warmed_up = true;
         frame_size = n, rate = info.sample_rate, channels = info.source_channels;
-        g_imdct_calls = 0;
         for (auto &p : g_phase_us) p = 0;
         continue;
       }
@@ -142,7 +129,7 @@ static void run_clip(const Clip &clip) {
   aac_fdk_close(dec);
   if (frames == 0) {
     ESP_LOGE(TAG, "%s: no frames (errors=%u)", clip.name, (unsigned) errors);
-    return;
+    return 0;
   }
   const float avg = (float) total_us / frames / 1000.0f;
   const float budget = frame_size * 1000.0f / (rate ? rate : 1);
@@ -151,13 +138,12 @@ static void run_clip(const Clip &clip) {
     phase_ms[i] = (float) g_phase_us[i] / frames / 1000.0f;
     phase_sum += phase_ms[i];
   }
-  ESP_LOGI(TAG, "%s: ch=%u frames=%u err=%u avg=%.2f ms max=%.2f ms budget=%.1f ms load=%.0f%%", clip.name,
-           (unsigned) channels, (unsigned) frames, (unsigned) errors, avg, max_us / 1000.0f, budget,
-           100.0f * avg / budget);
-  ESP_LOGI(TAG, "  read=%.2f (%.0f%%) tools=%.2f (%.0f%%) imdct=%.2f (%.0f%%, %.2f calls/frame) dmx=%.2f (%.0f%%) other=%.2f (%.0f%%)",
-           phase_ms[READ], 100 * phase_ms[READ] / avg, phase_ms[TOOLS], 100 * phase_ms[TOOLS] / avg, phase_ms[IMDCT],
-           100 * phase_ms[IMDCT] / avg, (float) g_imdct_calls / frames, phase_ms[DMX], 100 * phase_ms[DMX] / avg,
-           avg - phase_sum, 100 * (avg - phase_sum) / avg);
+  ESP_LOGI(TAG, "%s %s: ch=%u frames=%u err=%u avg=%.2f ms max=%.2f ms budget=%.1f ms load=%.0f%% hash=%08x",
+           clip.name, parallel ? (output_channels == 2 ? "2-core" : "2-core, no downmix") : "1-core", (unsigned) channels, (unsigned) frames, (unsigned) errors, avg,
+           max_us / 1000.0f, budget, 100.0f * avg / budget, (unsigned) hash);
+  ESP_LOGI(TAG, "  read=%.2f tools=%.2f dmx=%.2f rest(filterbank+other)=%.2f", phase_ms[READ], phase_ms[TOOLS],
+           phase_ms[DMX], avg - phase_sum);
+  return hash;
 }
 
 static void bench_task(void *) {
@@ -165,7 +151,14 @@ static void bench_task(void *) {
   for (int round = 1;; round++) {
     ESP_LOGI(TAG, "round %d on core %d, internal free=%u", round, xPortGetCoreID(),
              (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-    for (const Clip &clip : CLIPS) run_clip(clip);
+    for (const Clip &clip : CLIPS) {
+      const uint32_t serial = run_clip(clip, false);
+      const uint32_t split = run_clip(clip, true);
+      ESP_LOGI(TAG, "  output %s, internal free=%u", serial == split ? "identical" : "DIFFERS",
+               (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+      // Ceiling for replacing FDK's downmix: the same decode with no downmix at all.
+      if (clip.data != clip_stereo_at) run_clip(clip, true, 6);
+    }
     vTaskDelay(pdMS_TO_TICKS(30000));
   }
 }

@@ -88,6 +88,7 @@ def harness() -> Path:
         _run(["ar", "rcs", str(library), *objects])
     binary = CACHE / "aac_harness"
     sources = [ROOT / "tests" / "host" / "aac_harness.cpp", COMPONENT / "decoder" / "aac_fdk.cpp",
+               COMPONENT / "decoder" / "aac_fdk_parallel.cpp",
                COMPONENT / "decoder" / "aac_format.cpp", COMPONENT / "transport" / "bplist.cpp"]
     _run(["c++", "-std=c++17", "-O2", "-Wall", "-Wextra", f"-I{COMPONENT}", *includes,
           *map(str, sources), str(library), "-lpthread", "-o", str(binary)])
