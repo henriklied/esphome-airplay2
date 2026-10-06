@@ -38,6 +38,9 @@ _CONFIG_AMP_ENABLE = "amp_enable_pin"
 _CONFIG_SAMPLE_RATE = "sample_rate"
 _CONFIG_AMP_INVERTED = "amp_enable_inverted"
 _CONFIG_AMP_IDLE_TIMEOUT = "amp_idle_timeout"
+_CONFIG_ADVERTISE_SURROUND = "advertise_surround"
+_FDK_AAC_REPO = "https://github.com/pschatzmann/codec-fdk-aac.git"
+_FDK_AAC_REF = "9998bb9e5fe839ddccb0aeba8ff8c5afc1c94ed1"
 _CONFIG_DSP = "dsp"
 _CONFIG_DSP_ENABLED = "enabled"
 _CONFIG_DSP_PREAMP = "preamp"
@@ -168,6 +171,8 @@ CONFIG_SCHEMA = cv.All(
             # de-asserted to mute the amplifier. 0 disables the power-down
             # watchdog (amp stays on for the whole session). Default 60.
             cv.Optional(_CONFIG_AMP_IDLE_TIMEOUT, default=60): cv.int_,
+            # Offer 5.1 AAC to senders (decoded with FDK, mixed down to stereo).
+            cv.Optional(_CONFIG_ADVERTISE_SURROUND, default=False): cv.boolean,
             cv.Optional(_CONFIG_AUDIO_CHANNEL_MODE, default="stereo"): cv.enum(AUDIO_CHANNEL_MODE_ENUM, lower=True),
             cv.Optional(_CONFIG_DSP): _DSP_SCHEMA,
         }
@@ -199,8 +204,11 @@ async def _build_airplay_receiver(config):
     # mbedtls (SRP bignum + raw-signature AES-CTR) is a built-in IDF component.
     # Caret ranges over published Espressif Component Registry versions.
     add_idf_component(name="espressif/libsodium", ref="^1.0.21")
-    # ALAC/AAC decoding (audio engine) comes from the ESP-ADF codec library.
+    # ALAC decoding comes from the ESP-ADF codec library. Its AAC decoder is
+    # mono/stereo only, so AAC (including AirPlay's 5.1 / 7.1) uses Fraunhofer
+    # FDK. Pinned by commit; tests/test_aac_fdk.py builds the same one.
     add_idf_component(name="espressif/esp_audio_codec", ref="^2.5.0")
+    add_idf_component(name="codec-fdk-aac", repo=_FDK_AAC_REPO, ref=_FDK_AAC_REF)
 
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
@@ -213,6 +221,7 @@ async def _build_airplay_receiver(config):
                                 config[_CONFIG_AMP_ENABLE], config[_CONFIG_SAMPLE_RATE],
                                 config[_CONFIG_AMP_INVERTED]))
     cg.add(var.set_amp_idle_timeout(config[_CONFIG_AMP_IDLE_TIMEOUT]))
+    cg.add(var.set_advertise_surround(config[_CONFIG_ADVERTISE_SURROUND]))
     cg.add(var.set_i2s_mclk(config[_CONFIG_I2S_MCLK]))
     # cv.enum returns the string key ("stereo"/"mono"...), so map to the
     # audio_channel_mode_t integer before the C++ setter.

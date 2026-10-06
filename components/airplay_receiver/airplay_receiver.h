@@ -51,6 +51,9 @@ class AirPlayReceiver : public Component, public media_player::MediaPlayer {
 
   /// Idle power-down for the amp-enable line (seconds, 0 disables). Default 60.
   void set_amp_idle_timeout(int seconds) { this->amp_idle_timeout_s_ = seconds; }
+  /// Advertise 5.1 AAC in GET /info so senders can choose it (mixed down to
+  /// stereo on the board). Off by default: /info stays as it always was.
+  void set_advertise_surround(bool advertise) { this->advertise_surround_ = advertise; }
 
   /// Optional I2S MCLK/SCK pin (PCM5100 boards that don't self-strap). -1 = unused.
   void set_i2s_mclk(int pin) { this->i2s_mclk_pin_ = pin; }
@@ -156,6 +159,7 @@ class AirPlayReceiver : public Component, public media_player::MediaPlayer {
   int sample_rate_{44100};
   bool amp_enable_inverted_{false};
   int amp_idle_timeout_s_{60};  // amp power-down after this many idle seconds (0 = off)
+  bool advertise_surround_{false};
   audio_channel_mode_t audio_channel_mode_{AUDIO_CHANNEL_STEREO};
 
   // Output DSP cascade, in YAML order. Mirrored here (rather than read back

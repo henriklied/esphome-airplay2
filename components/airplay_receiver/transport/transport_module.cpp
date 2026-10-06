@@ -21,6 +21,7 @@
 #include <inttypes.h>
 #include <string>
 
+#include "../decoder/aac_format.h"
 #include "esphome/core/log.h"
 #include "esp_err.h"
 #include "esp_mac.h"
@@ -91,6 +92,7 @@ static volatile bool event_task_should_stop = false;
 // the airplay_* path; never a std::string).
 #define AIRPLAY_DEVICE_NAME_MAX 80
 static char s_device_name[AIRPLAY_DEVICE_NAME_MAX] = "AirPlay2";
+static uint64_t s_buffer_stream_formats = 0;
 
 // ===========================================================================
 // TLV8 + small helpers
@@ -538,7 +540,7 @@ static void handle_get(int socket, RtspConn *conn, const RtspRequest *req, const
     // fine.
     uint8_t body[1024];
     size_t body_len = bplist_build_info_response(body, sizeof(body), device_id, s_device_name, pk, 32,
-                                                 features, 2);
+                                                 features, 2, s_buffer_stream_formats);
     if (body_len == 0) {
       ESP_LOGE(TAG, "Failed to build binary /info response");
       rtsp_send_response(socket, conn, 500, "Internal Error", req->cseq, nullptr, nullptr, 0);
@@ -859,6 +861,7 @@ static void handle_setup(int socket, RtspConn *conn, const RtspRequest *req, con
   int64_t codec_type = 0;  // bplist "ct": 2=ALAC, 4=AAC, 8=AAC-ELD
   int spf = 0;             // bplist "spf": samples per frame
   int latency_min = 0;     // bplist "latencyMin": realtime playout latency samples
+  uint64_t audio_format = 0;  // bplist "audioFormat": one supportedFormats bit
 
   // AirPlay 2 stream path.
   if (body != nullptr && body_len > 0 && is_bplist && request_has_streams) {
@@ -878,11 +881,21 @@ static void handle_setup(int socket, RtspConn *conn, const RtspRequest *req, con
       size_t kv_count = 0;
       if (bplist_get_stream_kv_info(body, body_len, i, kv, 16, &kv_count)) {
         for (size_t k = 0; k < kv_count; k++) {
+          // Every key, so a sender's format choice can be read off the log.
+          if (kv[k].value_type == BPLIST_VALUE_INT) {
+            ESP_LOGI(TAG, "SETUP stream %u: %s = %lld (0x%llx)", (unsigned)i, kv[k].key,
+                     (long long)kv[k].int_value, (unsigned long long)kv[k].int_value);
+          } else {
+            ESP_LOGI(TAG, "SETUP stream %u: %s (type %d, %u bytes)", (unsigned)i, kv[k].key, kv[k].value_type,
+                     (unsigned)kv[k].value_len);
+          }
           if (kv[k].value_type == BPLIST_VALUE_INT) {
             if (strcmp(kv[k].key, "ct") == 0) {
               codec_type = (int64_t)kv[k].int_value;
             } else if (strcmp(kv[k].key, "sr") == 0) {
               conn->sample_rate = (int)kv[k].int_value;
+            } else if (strcmp(kv[k].key, "audioFormat") == 0) {
+              audio_format = (uint64_t)kv[k].int_value;
             } else if (strcmp(kv[k].key, "spf") == 0) {
               spf = (int)kv[k].int_value;
             } else if (strcmp(kv[k].key, "latencyMin") == 0) {
@@ -900,6 +913,12 @@ static void handle_setup(int socket, RtspConn *conn, const RtspRequest *req, con
   TransportAudioConfig audio{};
   audio.stream_type = conn->stream_type > 0 ? conn->stream_type : 96;
   audio.sample_rate = conn->sample_rate;
+  // audioFormat names the rate too, and 5.1 / 7.1 exist only at 48 kHz.
+  // Channels stay 2: the decoder mixes any AAC layout down to stereo.
+  aac_stream_format_t aac_format{};
+  if (aac_format_from_audio_format(audio_format, &aac_format)) {
+    audio.sample_rate = (int)aac_format.sample_rate;
+  }
   audio.channels = (conn->channels != 0) ? conn->channels : 2;
   audio.bits_per_sample = 16;
   audio.event_port = conn->event_port;
@@ -1593,6 +1612,8 @@ static void server_task(void *pv) {
 
 AirPlay2Transport::AirPlay2Transport() = default;
 AirPlay2Transport::~AirPlay2Transport() { this->stop(); }
+
+void AirPlay2Transport::set_buffer_stream_formats(uint64_t formats) { s_buffer_stream_formats = formats; }
 
 void AirPlay2Transport::setup(CryptoModule *crypto, const std::string &device_name) {
   if (this->started_) {

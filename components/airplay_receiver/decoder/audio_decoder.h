@@ -41,12 +41,18 @@ audio_decoder_t *audio_decoder_create(const audio_decoder_config_t *config);
 /// Destroy a decoder previously returned by audio_decoder_create().
 void audio_decoder_destroy(audio_decoder_t *decoder);
 
+/// `ssrc` value for callers without a per-packet format (realtime streams).
+static constexpr uint32_t AUDIO_DECODER_SSRC_NONE = 0;
+
 /// Decode one frame of `input` (input_len bytes) into `output` interleaved
-/// 16-bit PCM. `output_capacity_samples` is the maximum number of samples
-/// (per channel) the caller can hold. Returns the number of decoded samples
-/// (per channel) on success, or -1 on error / unsupported codec.
+/// 16-bit PCM. `ssrc` is the packet's RTP SSRC, which on buffered streams names
+/// the AAC rate and channel layout; AUDIO_DECODER_SSRC_NONE falls back to the
+/// SETUP format. AAC of any layout up to 7.1 is mixed down to stereo.
+/// `output_capacity_samples` is the maximum number of samples (per channel)
+/// the caller can hold. Returns the number of decoded samples (per channel) on
+/// success, or -1 on error / unsupported codec.
 int audio_decoder_decode(audio_decoder_t *decoder, const uint8_t *input,
-                         size_t input_len, int16_t *output,
+                         size_t input_len, uint32_t ssrc, int16_t *output,
                          size_t output_capacity_samples,
                          audio_decode_info_t *info);
 

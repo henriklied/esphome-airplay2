@@ -47,6 +47,10 @@ class AirPlay2Transport {
    */
   void setup(CryptoModule *crypto, const std::string &device_name);
 
+  /// GET /info "supportedFormats.bufferStream" bitmask (decoder/aac_format.h
+  /// bits). 0, the default, omits the key and leaves /info as it always was.
+  void set_buffer_stream_formats(uint64_t formats);
+
   /// Poll hook (called from AirPlayReceiver::loop()); no busy work today.
   void loop();
 

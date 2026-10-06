@@ -45,6 +45,7 @@ that adds one fails validation (`Platform not found`), which prevents two RTSP s
 | `amp_enable_pin` | `-1` | amp unmute GPIO line. `-1` = unconfigured. |
 | `amp_enable_inverted` | `false` | invert the amp-enable polarity |
 | `amp_idle_timeout` | `60` | seconds of silence before the amp-enable line de-asserts (mutes). `0` = never. |
+| `advertise_surround` | `false` | advertise 5.1 AAC (`supportedFormats.bufferStream` bit 39) in GET /info; decoded by FDK and mixed down to stereo |
 | `sample_rate` | `44100` | output sample rate |
 | `audio_channel_mode` | `"stereo"` | `stereo \| mono \| left \| right` (AuMONO modes) |
 | `dsp` | — | output biquad cascade, see below |
@@ -145,7 +146,7 @@ cd .check && esphome compile amped-s3.yaml
   stream SETUP / RECORD.
 - `crypto/` — HomeKit pairing (SRP-6a + Ed25519 + ChaCha20-Poly1305) + audio decrypt.
 - `timing/` — PTP one-sample clock servo + NTP client (`ptp_clock`, `ntp_clock`, `audio_timing`).
-- `decoder/` — ALAC/AAC decode via `espressif/esp_audio_codec` (managed component; impl headers resolve from the managed include dirs, do not create local shadow copies).
+- `decoder/` — ALAC via `espressif/esp_audio_codec` (managed component; impl headers resolve from the managed include dirs, do not create local shadow copies). AAC via Fraunhofer FDK (`aac_fdk.*`, git component pinned in `__init__.py`), configured per packet from the RTP SSRC (`aac_format.*`) and mixed down to stereo. FDK needs ~49 KB of stack: the decode task has 56 KB. Host tests: `uv run tests/test_aac_fdk.py`.
 - `audio/` — timeline/engine v2, decode worker, I2S output, and the **control surface** in `audio_control.{h,cpp}`.
 - `audio/audio_dsp.{h,cpp}` — the output biquad cascade (RBJ coefficients). Last stage in
   `playback_task`, after volume and channel mode. Coefficients are double-buffered and published

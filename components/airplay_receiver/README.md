@@ -39,7 +39,8 @@ End-to-end AirPlay 2:
   `ANNOUNCE / SETUP / RECORD / PAIR-SETUP / PAIR-VERIFY / GET_PARAMETER /
   SET_PARAMETER / TEARDOWN / FLUSH / OPTIONS / GET / POST / PAUSE / SETPEERS`.
 * **Audio engine (`audio/`)** — RTP receive (realtime + buffered), `CryptoModule`
-  decrypt, **ALAC / AAC decode via `espressif/esp_audio_codec`**, PTP/NTP clock,
+  decrypt, **ALAC decode via `espressif/esp_audio_codec`, AAC (stereo, 5.1, 7.1)
+  via Fraunhofer FDK** mixed down to stereo, PTP/NTP clock,
   playout timing engine (audio_timeline v2), and an **I2S PCM5100 DAC + amp-enable**
   output backend.
 * **Allocator (`allocator.h` / `allocator.cpp`)** — a single choke point that

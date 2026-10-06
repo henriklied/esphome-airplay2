@@ -40,7 +40,10 @@ static const char *const TAG = "audio_decode";
 
 #define AUDIO_DECODE_QUEUE_DEPTH 16U
 #define AUDIO_DECODE_MAX_PAYLOAD 8192U
-#define AUDIO_DECODE_TASK_STACK 6144U
+/* FDK AAC peaks at ~49 KB of stack decoding 5.1 / 7.1 (measured on the host by
+ * tests/test_aac_fdk.py; CAacDecoder_DecodeFrame alone is ~36 KB at -Os).  The
+ * decoder logs the live high-water mark ("stack free=") every 1000 frames. */
+#define AUDIO_DECODE_TASK_STACK 57344U
 
 /* Sits above the buffered TCP reader (5) so decoded PCM keeps draining ahead of
  * ingress, and below the RTP/control receivers (7/8) and the I2S playback task

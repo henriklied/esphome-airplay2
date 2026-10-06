@@ -197,6 +197,8 @@ static void buffered_audio_task(void *pvParameters) {
       uint32_t seq_no = ((uint32_t) packet[1] << 16) | ((uint32_t) packet[2] << 8) | packet[3];
       uint32_t timestamp = ((uint32_t) packet[4] << 24) | ((uint32_t) packet[5] << 16) |
                            ((uint32_t) packet[6] << 8) | packet[7];
+      uint32_t ssrc = ((uint32_t) packet[8] << 24) | ((uint32_t) packet[9] << 16) |
+                      ((uint32_t) packet[10] << 8) | packet[11];
 
       // Snapshot the epoch before the gate so a seek that lands between the
       // gate and the decode invalidates this packet rather than letting it
@@ -250,6 +252,7 @@ static void buffered_audio_task(void *pvParameters) {
       const audio_encoded_packet_t encoded = {
           .epoch = epoch,
           .rtp_timestamp = timestamp,
+          .ssrc = ssrc,
           .payload = decrypted,
           .payload_len = (size_t) decrypted_len,
           .prime_mute = audio_stream_aac_prime_mute_wanted(state),

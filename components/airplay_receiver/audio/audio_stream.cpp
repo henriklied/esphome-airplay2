@@ -178,7 +178,8 @@ bool audio_stream_process_accepted_frame(audio_receiver_state_t *state,
     return false;
   }
   decoded_samples = audio_decoder_decode(state->decoder, audio_data, audio_len,
-                                         decode_buffer, capacity_samples, &info);
+                                         AUDIO_DECODER_SSRC_NONE, decode_buffer,
+                                         capacity_samples, &info);
   xSemaphoreGive(state->decoder_mutex);
   if (decoded_samples <= 0) {
     return false;
@@ -262,7 +263,7 @@ bool audio_stream_decode_encoded_packet(audio_receiver_state_t *state,
   audio_decode_info_t info = {0};
   const int decoded_samples =
       audio_decoder_decode(state->decoder, packet->payload, packet->payload_len,
-                           decode_buffer, capacity_samples, &info);
+                           packet->ssrc, decode_buffer, capacity_samples, &info);
   if (decoded_samples <= 0) {
     (void) __atomic_add_fetch(&state->engine_v2.diag_decode_fail, 1U,
                               __ATOMIC_RELAXED);

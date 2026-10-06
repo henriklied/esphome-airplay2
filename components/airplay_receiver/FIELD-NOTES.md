@@ -371,6 +371,35 @@ flush) or its still-valid anchor (Path B, without one) discarded that audio:
 live connection now resets as a new stream. Measure it as `start decision`
 RTP minus `Anchor set` RTP.
 
+## AAC decoder: FDK, and what AirPlay surround looks like (2026-10-06)
+
+AAC now decodes with Fraunhofer FDK (`decoder/aac_fdk.*`); `esp_audio_codec`'s
+AAC decoder is mono/stereo only and AirPlay sends 5.1 / 7.1 as AAC-LC 48 kHz.
+ALAC stays on `esp_audio_codec`.
+
+- **Format comes from the RTP SSRC**, per packet (`decoder/aac_format.*`):
+  `0x16000000` 44.1k stereo, `0x17000000` 48k stereo, `0x27000000` 5.1,
+  `0x28000000` 7.1. A 7-byte ADTS header built from it tells FDK the layout.
+  Values and method from shairport-sync 5.0. The previous header was hardcoded
+  to 44.1 kHz stereo.
+- **Senders learn it from `/info` `supportedFormats.bufferStream`**: bit 39 =
+  5.1, bit 40 = 7.1 (HomePods set both). `advertise_surround` sets 22 + 39;
+  default off leaves `/info` byte-identical.
+- **Host-verified, not hardware-verified**: `tests/test_aac_fdk.py` decodes
+  ffmpeg- and AudioToolbox-encoded 5.1 with a tone per channel; every channel
+  lands on the right side, centre and surrounds at -3 dB, LFE dropped.
+- **7.1 is ambiguous.** channelConfiguration 7 means front-wide pairs to FDK
+  and side pairs to ffmpeg; AudioToolbox instead emits configuration 0 with an
+  in-band PCE in the first frame only (`aac_adts_channel_config()` handles the
+  PCE case). Not advertised until a real sender's packets are seen -- the
+  decoder logs the SSRC and first payload bytes on every format change.
+- **Stack: ~49 KB peak** (host), 36 KB of it `CAacDecoder_DecodeFrame` at -Os.
+  The decode task went from 6 KB to 56 KB. The realtime RX task (12 KB) must
+  never decode AAC with FDK; Apple realtime streams are ALAC.
+- **Cost on the S3 is unmeasured.** FDK keeps its state in PSRAM. The decoder
+  logs `aac: ... decode avg= max= ... stack free= internal free=` every 1000
+  frames; check it on the first stereo and first 5.1 session.
+
 ## Clicks on connect (mechanism inferred, not measured)
 
 Selecting the board from iOS produced a run of clicks -- "click click click,

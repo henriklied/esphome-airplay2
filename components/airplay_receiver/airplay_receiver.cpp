@@ -5,6 +5,7 @@
 #include <cstring>
 #include <string>
 
+#include "decoder/aac_format.h"
 #include "timing/ptp_clock.h"
 
 #include "esphome/components/network/util.h"
@@ -67,6 +68,12 @@ void AirPlayReceiver::setup() {
   // Start the _airplay._tcp advertisement + RTSP server and hook the audio
   // engine up to the transport events. At AFTER_CONNECTION the network stack
   // and ESPHome's mDNS are already initialized.
+  if (this->advertise_surround_) {
+    // Stereo stays at 44.1 kHz AAC as before; 7.1 is held back until a real
+    // sender shows how it encodes it (Apple's encoder uses an in-band PCE).
+    this->transport_.set_buffer_stream_formats(AIRPLAY_FORMAT_AAC_LC_44100_STEREO |
+                                               AIRPLAY_FORMAT_AAC_LC_48000_5POINT1);
+  }
   this->transport_.setup(&this->crypto_, device_name);
   this->transport_.register_event_callback(&AirPlayReceiver::on_transport_event, this);
 
