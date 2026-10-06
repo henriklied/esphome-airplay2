@@ -73,6 +73,7 @@ void AirPlayReceiver::setup() {
     // sender shows how it encodes it (Apple's encoder uses an in-band PCE).
     this->transport_.set_buffer_stream_formats(AIRPLAY_FORMAT_AAC_LC_44100_STEREO |
                                                AIRPLAY_FORMAT_AAC_LC_48000_5POINT1);
+    this->transport_.set_audio_stream_formats(AIRPLAY_AUDIO_STREAM_FORMATS);
   }
   this->transport_.setup(&this->crypto_, device_name);
   this->transport_.register_event_callback(&AirPlayReceiver::on_transport_event, this);

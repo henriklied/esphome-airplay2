@@ -219,3 +219,12 @@ def test_info_advertises_buffer_stream_formats(harness: Path, tmp_path: Path) ->
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v", "-s"]))
+
+
+def test_info_advertises_audio_stream_formats(harness: Path, tmp_path: Path) -> None:
+    buffer_formats, audio_formats = (1 << 22) | (1 << 39), 0x1440000
+    out = tmp_path / "info.plist"
+    _run([str(harness), "info", f"{buffer_formats:x}", f"{audio_formats:x}", str(out)])
+    info = plistlib.loads(out.read_bytes())
+    assert info["supportedFormats"] == {"bufferStream": buffer_formats, "audioStream": audio_formats}
+    assert info["name"] == "Test"

@@ -6,7 +6,7 @@
 //       from the SSRC with aac_build_adts_header(), decode to stereo s16le.
 //       Prints "frames=<n> source_channels=<n> sample_rate=<n> stack=<bytes>
 //       header_mismatches=<n>".
-//   aac_harness info <formats-hex> <out.plist>
+//   aac_harness info <formats-hex> [<audio-stream-hex>] <out.plist>
 //       Write the GET /info binary plist.
 
 #include <pthread.h>
@@ -135,12 +135,14 @@ static int run_decode(const char *in_path, const char *ssrc_hex, const char *out
   return job.failed ? 1 : 0;
 }
 
-static int run_info(const char *formats_hex, const char *out_path) {
+static int run_info(const char *formats_hex, const char *audio_hex, const char *out_path) {
   static const uint8_t public_key[32] = {};
   uint8_t body[1024];
   const uint64_t formats = strtoull(formats_hex, nullptr, 16);
+  const uint64_t audio_formats = strtoull(audio_hex, nullptr, 16);
   const size_t len = bplist_build_info_response(body, sizeof(body), "AA:BB:CC:DD:EE:FF", "Test", public_key,
-                                                sizeof(public_key), 0x1C340405F4A00ULL, 2, formats);
+                                                sizeof(public_key), 0x1C340405F4A00ULL, 2, formats,
+                                                audio_formats);
   if (len == 0) {
     return 1;
   }
@@ -158,7 +160,10 @@ int main(int argc, char **argv) {
     return run_decode(argv[2], argv[3], argv[4]);
   }
   if (argc == 4 && strcmp(argv[1], "info") == 0) {
-    return run_info(argv[2], argv[3]);
+    return run_info(argv[2], "0", argv[3]);
+  }
+  if (argc == 5 && strcmp(argv[1], "info") == 0) {
+    return run_info(argv[2], argv[3], argv[4]);
   }
   fprintf(stderr, "usage: aac_harness decode <in.adts> <ssrc-hex> <out.pcm> | info <formats-hex> <out>\n");
   return 2;

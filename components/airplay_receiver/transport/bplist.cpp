@@ -564,16 +564,18 @@ size_t bplist_build_info_response(uint8_t *out, size_t capacity,
                                   const uint8_t *public_key,
                                   size_t public_key_len, uint64_t features,
                                   int64_t protocol_version,
-                                  uint64_t buffer_stream_formats) {
+                                  uint64_t buffer_stream_formats,
+                                  uint64_t audio_stream_formats) {
   if (!out || !device_id || !device_name || !public_key ||
       public_key_len == 0 || capacity < 512) {
     return 0;
   }
 
   const bool has_supported_formats = buffer_stream_formats != 0;
-  const size_t object_count = has_supported_formats ? 43 : 39;
+  const bool has_audio_stream = has_supported_formats && audio_stream_formats != 0;
+  const size_t object_count = has_supported_formats ? (has_audio_stream ? 45 : 43) : 39;
   size_t pos = 0;
-  size_t offsets[43];
+  size_t offsets[45];
   size_t obj = 0;
 
 #define ADD_OFFSET()                                   \
@@ -777,21 +779,35 @@ size_t bplist_build_info_response(uint8_t *out, size_t capacity,
     if (!bplist_write_int(out, capacity, &pos, buffer_stream_formats)) {
       return 0;
     }
-    ADD_OFFSET(); // 41: supportedFormats dict
+    // Realtime formats, as HomePods publish them. With supportedFormats but no
+    // audioStream, Spotify tore down before SETUP (presumably finding no
+    // realtime format); with it, the Apple TV got past setup.
+    if (has_audio_stream) {
+      ADD_OFFSET(); // 41: "audioStream"
+      if (!bplist_write_ascii_string(out, capacity, &pos, "audioStream")) {
+        return 0;
+      }
+      ADD_OFFSET(); // 42: audioStream format mask
+      if (!bplist_write_int(out, capacity, &pos, audio_stream_formats)) {
+        return 0;
+      }
+    }
+    ADD_OFFSET(); // 41 or 43: supportedFormats dict
     {
-      const uint8_t keys[] = {39};
-      const uint8_t values[] = {40};
-      if (!bplist_write_dict(out, capacity, &pos, keys, values, 1)) {
+      const uint8_t keys[] = {39, 41};
+      const uint8_t values[] = {40, 42};
+      if (!bplist_write_dict(out, capacity, &pos, keys, values, has_audio_stream ? 2 : 1)) {
         return 0;
       }
     }
   }
+  const uint8_t supported_formats_dict = has_audio_stream ? 43 : 41;
 
   const size_t top_object = obj;
   ADD_OFFSET(); // last: top-level info dict
   {
     const uint8_t keys[] = {0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 28, 38};
-    const uint8_t values[] = {1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 27, 37, 41};
+    const uint8_t values[] = {1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 27, 37, supported_formats_dict};
     const size_t entries = has_supported_formats ? 13 : 12;
     if (!bplist_write_dict(out, capacity, &pos, keys, values, entries)) {
       return 0;

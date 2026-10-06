@@ -93,6 +93,7 @@ static volatile bool event_task_should_stop = false;
 #define AIRPLAY_DEVICE_NAME_MAX 80
 static char s_device_name[AIRPLAY_DEVICE_NAME_MAX] = "AirPlay2";
 static uint64_t s_buffer_stream_formats = 0;
+static uint64_t s_audio_stream_formats = 0;
 
 // ===========================================================================
 // TLV8 + small helpers
@@ -540,7 +541,8 @@ static void handle_get(int socket, RtspConn *conn, const RtspRequest *req, const
     // fine.
     uint8_t body[1024];
     size_t body_len = bplist_build_info_response(body, sizeof(body), device_id, s_device_name, pk, 32,
-                                                 features, 2, s_buffer_stream_formats);
+                                                 features, 2, s_buffer_stream_formats,
+                                                 s_audio_stream_formats);
     if (body_len == 0) {
       ESP_LOGE(TAG, "Failed to build binary /info response");
       rtsp_send_response(socket, conn, 500, "Internal Error", req->cseq, nullptr, nullptr, 0);
@@ -1420,6 +1422,18 @@ static void handle_setpeers(int socket, RtspConn *conn, const RtspRequest *req, 
   rtsp_send_ok(socket, conn, req->cseq);
 }
 
+// Apple TV sends this right after SETUP for video content. Its body is not
+// needed (no loudness processing here). With a 501 reply the Apple TV
+// stopped sending audio ~2 s into playback (suspected cause, 2026-10-06).
+static void handle_loudness_normalization(int socket, RtspConn *conn, const RtspRequest *req, const uint8_t *raw,
+                                          size_t raw_len) {
+  (void) raw;
+  (void) raw_len;
+  ESP_LOGI(TAG, "LOUDNESSNORMALIZATION: content_type='%s' body_len=%u", req->content_type,
+           (unsigned) req->body_len);
+  rtsp_send_ok(socket, conn, req->cseq);
+}
+
 // ===========================================================================
 // Dispatch table
 // ===========================================================================
@@ -1447,6 +1461,7 @@ static const RtspMethodHandler method_handlers[] = {
     {"SETRATEANCHORTIME", handle_setrateanchortime},
     {"SETPEERS", handle_setpeers},
     {"SETPEERSX", handle_setpeers},
+    {"LOUDNESSNORMALIZATION", handle_loudness_normalization},
     {nullptr, nullptr},
 };
 
@@ -1614,6 +1629,7 @@ AirPlay2Transport::AirPlay2Transport() = default;
 AirPlay2Transport::~AirPlay2Transport() { this->stop(); }
 
 void AirPlay2Transport::set_buffer_stream_formats(uint64_t formats) { s_buffer_stream_formats = formats; }
+void AirPlay2Transport::set_audio_stream_formats(uint64_t formats) { s_audio_stream_formats = formats; }
 
 void AirPlay2Transport::setup(CryptoModule *crypto, const std::string &device_name) {
   if (this->started_) {

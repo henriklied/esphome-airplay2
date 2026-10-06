@@ -565,3 +565,27 @@ without roughly another 25-30% off the decode.
   `supportedAudioFormatsExtended` (HomePods send it, indices up to 75), which
   the `audioFormatIndex` key in SETUP suggests. Compare a HomePod's full
   `/info` against ours before trying again.
+
+### Apple TV 5.1 over AirPlay (2026-10-06, measured)
+
+- **`supportedFormats.audioStream` unblocked the Apple TV.** HomePods publish
+  `audioStream` (0x1440000), `bufferStream`, `screenStream`,
+  `lowLatencyAudioStream` and `supportedAudioFormatsExtended`. Adding
+  `audioStream` alone (bits 18 + 22 + 24) to our `bufferStream` got the Apple
+  TV (`.175`) past setup, and it then **chose 5.1** (`audioFormat =
+  0x8000000000`, index 39, packets with SSRC `0x27000000`, FDK sees channel
+  configuration 6). `supportedAudioFormatsExtended` was not needed. Spotify
+  against this list is untested.
+- **`LOUDNESSNORMALIZATION`** (Apple TV, video content, 78-byte bplist) is now
+  answered 200 instead of 501. Whether the 501 mattered is unproven: the
+  stereo session that stopped after ~2 s also had it rejected.
+- **5.1 does not play: the anchor and the packets are on different RTP
+  timelines.** Packets are clean (seq +1, RTP +1024, 64-byte opening frames),
+  but SETRATEANCHORTIME's rtp is unrelated to them: anchor 16809885 vs packets
+  ~1824877526, a different gap in each of four sessions. The scheduler waits
+  for the anchor position, the timeline fills with unplayable frames,
+  back-pressure stops the TCP reader, and the Apple TV closes the connection.
+  Stereo from the same Apple TV has matching anchors. See the 2026-10-06
+  shairport-sync notes in AIRPLAY-FINDINGS for how it reconciles the two.
+- 5.1 advertising is off again (`advertise_surround: false`); `/info` is then
+  identical to the build that plays Spotify and Apple TV stereo.

@@ -50,6 +50,8 @@ class AirPlay2Transport {
   /// GET /info "supportedFormats.bufferStream" bitmask (decoder/aac_format.h
   /// bits). 0, the default, omits the key and leaves /info as it always was.
   void set_buffer_stream_formats(uint64_t formats);
+  /// GET /info "supportedFormats.audioStream" bitmask: realtime formats.
+  void set_audio_stream_formats(uint64_t formats);
 
   /// Poll hook (called from AirPlayReceiver::loop()); no busy work today.
   void loop();

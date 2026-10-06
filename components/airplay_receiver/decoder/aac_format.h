@@ -32,6 +32,9 @@ static constexpr uint64_t AIRPLAY_FORMAT_AAC_LC_44100_STEREO = 1ULL << 22;
 static constexpr uint64_t AIRPLAY_FORMAT_AAC_LC_48000_STEREO = 1ULL << 23;
 static constexpr uint64_t AIRPLAY_FORMAT_AAC_LC_48000_5POINT1 = 1ULL << 39;
 static constexpr uint64_t AIRPLAY_FORMAT_AAC_LC_48000_7POINT1 = 1ULL << 40;
+/// supportedFormats.audioStream as HomePods publish it (0x1440000): bit 18 is
+/// ALAC 44.1k/16/2, what Spotify's realtime stream uses.
+static constexpr uint64_t AIRPLAY_AUDIO_STREAM_FORMATS = (1ULL << 18) | (1ULL << 22) | (1ULL << 24);
 
 /// MPEG-4 channelConfiguration values (ISO/IEC 14496-3 table 1.19).
 static constexpr uint8_t AAC_CHANNEL_CONFIG_STEREO = 2;
