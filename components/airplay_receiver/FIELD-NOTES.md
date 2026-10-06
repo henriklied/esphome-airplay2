@@ -486,3 +486,25 @@ ramp around the disable/enable, which has not been written.
   responding`) -- stop playback first. Flashing reboots the board, which drops
   the AirPlay session; the sender must re-select the speaker before the next
   capture.
+
+## Realtime resume latency (2026-10-06, Spotify on iOS, measured)
+
+A realtime (type 96, ALAC) resume runs `start_stream` -> sync packet (anchor)
+-> `FLUSH`, all within ~70 ms. `audio_receiver_seek_flush()` used to drop that
+anchor and wait for the next sync packet (~1 s); its gate then sat ~1 s past
+the first anchor and discarded that audio, heard as a skip. It now replays the
+anchor if it arrived since the stream started and within 500 ms
+(`RESUME_ANCHOR_REUSE_WINDOW_US`); log line `seek flush: reusing resume
+anchor`. A mid-stream seek never reuses one (one use per stream start).
+
+**The remaining ~2 s from resume to sound is the sender, not the board.**
+After the flush the phone sends at exactly 1x, and its first packet is stamped
+~1.8 s past the anchor (`latencyMax = 88200`). `start decision` lands within
+~15 ms of that packet's due time. Shrinking the 180 ms preroll or the 1 s
+fallback timeout (`audio_engine_v2.cpp`) was considered and **would gain
+nothing**: no audio exists earlier. `latencyMin = 11025` is not the sender's
+working latency.
+
+If resumes regress (silent start, wrong position, `Anchor change detected`
+right after a resume), revert the commit "airplay: reuse the resume anchor
+across a realtime FLUSH".

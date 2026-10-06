@@ -450,6 +450,11 @@ void audio_receiver_set_anchor_time(uint64_t clock_id, uint64_t network_time_ns,
     return;
   }
 
+  receiver.last_anchor_clock_id = clock_id;
+  receiver.last_anchor_network_ns = network_time_ns;
+  receiver.last_anchor_rtp = rtp_time;
+  receiver.last_anchor_received_us = esp_timer_get_time();
+
   int sample_rate = receiver.stream->format.sample_rate;
   if (sample_rate <= 0) {
     sample_rate = 44100;
@@ -711,6 +716,7 @@ esp_err_t audio_receiver_start(uint16_t data_port, uint16_t control_port) {
 
   receiver.timing.ptp_locked = ptp_clock_is_locked();
   audio_receiver_reset_blocks();
+  receiver.realtime_stream_started_us = esp_timer_get_time();
 
   return receiver.stream->ops->start(receiver.stream, data_port);
 }
@@ -924,7 +930,28 @@ void audio_receiver_flush(void) {
   receiver.blocks_read_in_sequence = 1;
 }
 
+// A FLUSH this soon after the anchor is part of the same resume handshake.
+static constexpr int64_t RESUME_ANCHOR_REUSE_WINDOW_US = 500000;
+
 void audio_receiver_seek_flush(void) {
+  // A realtime resume runs start_stream -> sync packet (anchor) -> FLUSH, all
+  // within ~70 ms. The anchor already describes the resumed stream, so dropping
+  // it makes playback wait ~1 s for the next sync packet. Only an anchor
+  // received since this stream started qualifies: one from before a mid-stream
+  // seek maps the old position.
+  const int64_t now_us = esp_timer_get_time();
+  const bool reuse_anchor =
+      receiver.stream != nullptr &&
+      receiver.stream->type == AUDIO_STREAM_REALTIME &&
+      receiver.realtime_stream_started_us > 0 &&
+      receiver.last_anchor_received_us >= receiver.realtime_stream_started_us &&
+      now_us - receiver.last_anchor_received_us <= RESUME_ANCHOR_REUSE_WINDOW_US;
+  const uint64_t anchor_clock_id = receiver.last_anchor_clock_id;
+  const uint64_t anchor_network_ns = receiver.last_anchor_network_ns;
+  const uint32_t anchor_rtp = receiver.last_anchor_rtp;
+  // One use per stream start, so a later seek never replays it.
+  receiver.realtime_stream_started_us = 0;
+
   // Mid-stream seek flush (FLUSH / immediate FLUSHBUFFERED).  Same as
   // audio_receiver_flush(); the timeline re-prerolls from the new anchor by
   // itself.  Also disarms any pending deferred flush (audio_timing_reset
@@ -939,6 +966,13 @@ void audio_receiver_seek_flush(void) {
   // from filling the buffer between FLUSHBUFFERED and SETRATEANCHORTIME, which
   // would cause a second flush and double the startup delay.
   receiver.discard_all_until_anchor = true;
+
+  if (reuse_anchor) {
+    ESP_LOGI(TAG, "seek flush: reusing resume anchor rtp=%lu",
+             (unsigned long)anchor_rtp);
+    audio_receiver_set_anchor_time(anchor_clock_id, anchor_network_ns,
+                                   anchor_rtp);
+  }
 }
 
 void audio_receiver_set_deferred_flush(uint32_t flush_until_ts) {
