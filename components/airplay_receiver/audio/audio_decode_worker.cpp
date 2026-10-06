@@ -24,6 +24,7 @@
 #include "freertos/task.h"
 
 #include "esp_err.h"
+#include "esp_timer.h"
 
 #include "esphome/core/log.h"
 
@@ -59,6 +60,13 @@ static const char *const TAG = "audio_decode";
 #else
 #define AUDIO_DECODE_TASK_CORE 1
 #endif
+
+/* Longest the task decodes back-to-back before giving up the core for a tick.
+ * A buffered sender front-loads seconds of audio after a (re)connect; at ~15 ms
+ * per 5.1 frame that backlog kept this task busy for over 5 s, IDLE1 never ran
+ * and the task watchdog reset the board (Apple TV, 2026-10-06).  In steady
+ * playback the queue runs dry between frames and this never triggers. */
+#define AUDIO_DECODE_MAX_BUSY_US 200000
 
 // Worker handle (opaque outside this file).  Matches the upstream layout: the
 // state pointer, the job pointer queue, the task handle and the two volatile
@@ -102,8 +110,12 @@ void job_free(audio_decode_job_t *job) { airplay_free(job); }
 
 void decode_task(void *arg) {
   audio_decode_worker_t *worker = static_cast<audio_decode_worker_t *>(arg);
+  int64_t busy_since_us = 0;
 
   for (;;) {
+    if (uxQueueMessagesWaiting(worker->queue) == 0) {
+      busy_since_us = 0;  // about to block, which lets IDLE run
+    }
     audio_decode_job_t *job = NULL;
     if (xQueueReceive(worker->queue, &job, portMAX_DELAY) != pdTRUE) {
       continue;
@@ -143,6 +155,14 @@ void decode_task(void *arg) {
     }
 
     job_free(job);
+
+    const int64_t now_us = esp_timer_get_time();
+    if (busy_since_us == 0) {
+      busy_since_us = now_us;
+    } else if (now_us - busy_since_us > AUDIO_DECODE_MAX_BUSY_US) {
+      vTaskDelay(1);
+      busy_since_us = 0;
+    }
   }
 
   worker->task = NULL;
