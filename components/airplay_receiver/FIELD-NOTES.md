@@ -384,7 +384,10 @@ ALAC stays on `esp_audio_codec`.
   to 44.1 kHz stereo.
 - **Senders learn it from `/info` `supportedFormats.bufferStream`**: bit 39 =
   5.1, bit 40 = 7.1 (HomePods set both). `advertise_surround` sets 22 + 39;
-  default off leaves `/info` byte-identical.
+  default off leaves `/info` byte-identical. **That mask breaks Spotify**:
+  senders trust `supportedFormats` once present, and without bit 18 (ALAC
+  44.1k/16/2, what Spotify's realtime stream uses) they tear down before
+  SETUP stream. Add every decodable format before enabling it.
 - **Host-verified, not hardware-verified**: `tests/test_aac_fdk.py` decodes
   ffmpeg- and AudioToolbox-encoded 5.1 with a tone per channel; every channel
   lands on the right side, centre and surrounds at -3 dB, LFE dropped.
