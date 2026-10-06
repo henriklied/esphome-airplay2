@@ -126,6 +126,9 @@ static int64_t g_last_audio_submit_us = 0;
 static uint32_t g_amp_idle_timeout_ms = 60000;  // 0 = disabled
 static int64_t g_amp_idle_since_us = 0;         // ignored when g_amp_idle_muted
 static bool g_amp_idle_muted = false;           // amp auto-muted by the watchdog
+static bool g_amp_on = false;                   // last level written by amp_set()
+// Powers the amp down a while after a stop, instead of at the stop itself.
+static esp_timer_handle_t g_amp_off_timer = nullptr;
 
 // Live output cursor. output_submitted_frames advances after a successful
 // i2s_channel_write(); output_sent_frames is advanced by the TX DMA completion
@@ -192,12 +195,26 @@ static uint32_t queued_frames() {
 // ---------------------------------------------------------------------------
 // Amplifier enable
 // ---------------------------------------------------------------------------
+// Every change of the enable line is an audible pop. A sender's connect used to
+// toggle it several times -- on at PLAYING, off at the probe connection's
+// DISCONNECTED, on again at the real connection's PLAYING -- before any audio
+// existed: the "four ticks" on connect. Now the amp comes on with the first
+// audible frame and goes off only after amp_idle_timeout_ms of silence or of
+// being stopped, so a connect switches it at most once, under the music.
 static void amp_set(bool on) {
-  if (g_config.amp_enable_gpio < 0) {
+  if (g_config.amp_enable_gpio < 0 || on == g_amp_on) {
     return;
   }
+  g_amp_on = on;
   int level = g_config.amp_enable_inverted ? (on ? 0 : 1) : (on ? 1 : 0);
   gpio_set_level((gpio_num_t) g_config.amp_enable_gpio, level);
+  ESP_LOGI(TAG, "Amp %s", on ? "on" : "off");
+}
+
+static void amp_off_timer_cb(void *) {
+  if (g_playback_task == nullptr) {
+    amp_set(false);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -444,11 +461,23 @@ esp_err_t audio_output_init(void) {
     return ESP_ERR_INVALID_ARG;
   }
 
-  // Configure the amp-enable GPIO (de-asserted; start() asserts it).
+  // Configure the amp-enable GPIO (de-asserted; the playback task asserts it on
+  // the first audible frame).
   if (g_config.amp_enable_gpio >= 0) {
     gpio_reset_pin((gpio_num_t) g_config.amp_enable_gpio);
     gpio_set_direction((gpio_num_t) g_config.amp_enable_gpio, GPIO_MODE_OUTPUT);
+    g_amp_on = true;  // force the first write
     amp_set(false);
+    const esp_timer_create_args_t timer_args = {
+        .callback = amp_off_timer_cb,
+        .arg = nullptr,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "amp_off",
+        .skip_unhandled_events = true,
+    };
+    if (esp_timer_create(&timer_args, &g_amp_off_timer) != ESP_OK) {
+      g_amp_off_timer = nullptr;  // stop() then powers the amp down at once
+    }
   }
 
   // Resolve the I2S peripheral port: an explicit AudioOutputConfig::i2s_port
@@ -526,10 +555,13 @@ void audio_output_start(void) {
   // whatever the last session left behind.
   g_volume_ramp_q15 = -1;
   g_amp_idle_since_us = 0;
-  g_amp_idle_muted = false;
+  if (g_amp_off_timer != nullptr) {
+    esp_timer_stop(g_amp_off_timer);
+  }
+  // Not amp_set(true): the playback task asserts it on the first audible frame.
+  g_amp_idle_muted = !g_amp_on;
   g_last_audio_submit_us = 0;
   audio_dsp_reset();
-  amp_set(true);
   xTaskCreatePinnedToCore(playback_task, "audio_play", 4096, nullptr, AIRPLAY_AUDIO_PLAYBACK_TASK_PRIORITY,
                           &g_playback_task, AIRPLAY_PLAYBACK_CORE);
 }
@@ -546,7 +578,12 @@ void audio_output_stop(void) {
   g_amp_idle_since_us = 0;
   g_amp_idle_muted = false;
   g_last_audio_submit_us = 0;
-  amp_set(false);
+  if (g_amp_off_timer == nullptr || g_amp_idle_timeout_ms == 0) {
+    amp_set(false);
+  } else {
+    esp_timer_stop(g_amp_off_timer);
+    esp_timer_start_once(g_amp_off_timer, (uint64_t) g_amp_idle_timeout_ms * 1000ULL);
+  }
   if (g_playback_task != nullptr) {
     ESP_LOGW(TAG, "Playback task did not exit within timeout");
   } else {

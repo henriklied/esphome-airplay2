@@ -77,7 +77,10 @@ struct AudioOutputConfig {
   /// with no PCM frames produced while the stream is active (pause or
   /// sustained underflow), the amp-enable GPIO is de-asserted to mute/power
   /// down the amplifier. It is re-asserted automatically on the next frame.
-  /// 0 disables the watchdog (amp stays on for the whole session).
+  /// The same delay applies after audio_output_stop(), and the amp is first
+  /// asserted by the first audible frame rather than by start(), so a connect
+  /// handshake does not switch it. 0 disables the watchdog (amp stays on until
+  /// stop, then goes off at once).
   uint32_t amp_idle_timeout_ms = 60000;
 };
 

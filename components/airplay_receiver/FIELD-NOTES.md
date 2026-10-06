@@ -405,6 +405,16 @@ ALAC stays on `esp_audio_codec`.
 
 ## Clicks on connect (mechanism inferred, not measured)
 
+> **2026-10-06: the remaining ticks were the amp enable line, now fixed.** The
+> purge fix below did not stop them. A connect switched the amp on at PLAYING
+> (before any audio), off at the probe connection's DISCONNECTED, and on again
+> at the real connection's PLAYING -- the elimination below missed that senders
+> open more than one connection. The amp now comes on with the first audible
+> frame and goes off only after `amp_idle_timeout` (also after a stop), with
+> `Amp on` / `Amp off` logged. An iPhone connect logged one switch, at the
+> first frame, and no ticks were heard.
+
+
 Selecting the board from iOS produced a run of clicks -- "click click click,
 up and down, like the amp turning up and down" -- that Sendspin never made on
 the same hardware.
