@@ -549,3 +549,19 @@ the audio core with the board idle, `-O2` + L1 internal, downmix to stereo.
 5.76 ms (+28%: playback, DSP and network on the same core), so 5.1 while
 streaming projects to ~20.5 ms per 21.3 ms frame, ~96% of the core. Not viable
 without roughly another 25-30% off the decode.
+
+### 5.1 attempt with an Apple TV (2026-10-06, measured)
+
+- **120 MHz octal PSRAM** (experimental, temperature-tracked tuning): 5.1
+  decode 16.0 -> 15.2 ms, stereo 5.76 -> 5.52 ms (-5%), internal RAM -10 KB.
+  Not kept. FDK is compute-bound here, not memory-bound; 5.1 needs decoder
+  work (dual-core decode, or an Xtensa-optimised AAC decoder).
+- **`supportedFormats` breaks senders even when it lists their format.** With
+  bits 18 + 22 + 23 + 39 advertised, the Apple TV (`.175`, AppleTV11,1) tore
+  down before stream SETUP, as Spotify did with 22 + 39. Without the key it
+  plays AAC 44.1k stereo (`audioFormat = 0x400000`, `audioFormatIndex = 22`) --
+  bit 22, which the failing mask included. So the dict itself, not a missing
+  bit, is what senders reject. Untested guess: they also need
+  `supportedAudioFormatsExtended` (HomePods send it, indices up to 75), which
+  the `audioFormatIndex` key in SETUP suggests. Compare a HomePod's full
+  `/info` against ours before trying again.
