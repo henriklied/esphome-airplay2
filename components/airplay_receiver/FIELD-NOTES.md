@@ -643,8 +643,9 @@ Same bench and build as above, ms per frame:
 - **Open: a second RTSP client supersedes a playing one.** Home Assistant
   (Music Assistant, 192.168.0.232) connected after a reflash and the Mac's
   session was dropped silently; Music kept showing "playing".
-- **Open: Mac volume.** Reported not working; the test session was the one
-  dropped above. `Sender volume %.2f dB` is now logged at INFO to settle it.
+- **Mac volume works.** It failed only in the Music app left over from the
+  dropped session; after restarting Music, volume arrived as SET_PARAMETER
+  steps like the iPhone's (`Sender volume %.2f dB`, logged at INFO).
 
 ### 5.1 attempt with an Apple TV (2026-10-06, measured)
 
