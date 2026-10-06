@@ -360,6 +360,17 @@ The stage clamps on output, so a boost without a matching negative `preamp`
 distorts peaks rather than wrapping. `warn_if_dsp_clips_()` names the preamp it
 wants at boot. There is no limiter.
 
+## The opening of each track was dropped (fixed 2026-10-06, unverified)
+
+A track change is a new stream on a new TCP connection to the same port, and
+buffered senders push the opening audio before the anchor that says to play it
+now (`lead` ~0 ms). `audio_receiver_start_buffered()` returned early on an
+unchanged port, so the previous stream's `discard_all_until_anchor` (after a
+flush) or its still-valid anchor (Path B, without one) discarded that audio:
+~1 s lost per track, measured on an audiobook. An unchanged-port SETUP with no
+live connection now resets as a new stream. Measure it as `start decision`
+RTP minus `Anchor set` RTP.
+
 ## Clicks on connect (mechanism inferred, not measured)
 
 Selecting the board from iOS produced a run of clicks -- "click click click,

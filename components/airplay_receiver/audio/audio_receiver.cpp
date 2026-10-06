@@ -715,6 +715,19 @@ esp_err_t audio_receiver_start(uint16_t data_port, uint16_t control_port) {
   return receiver.stream->ops->start(receiver.stream, data_port);
 }
 
+// Starting a stream resets all timing state (including pause tracking) and
+// the RTP gates a previous seek or anchor change left armed.
+static void audio_receiver_reset_for_new_stream(void) {
+  audio_receiver_reset_stats();
+  audio_receiver_flush();
+  // audio_timing defaults to playing; mirror that onto the engine, which
+  // starts paused, so a sender that never sends an explicit rate=1 still
+  // produces audio.
+  audio_engine_v2_set_playing(&receiver.engine_v2, receiver.timing.playing);
+  receiver.timing.ptp_locked = ptp_clock_is_locked();
+  audio_receiver_reset_blocks();
+}
+
 esp_err_t audio_receiver_start_buffered(uint16_t tcp_port) {
   esp_err_t engine_err = audio_receiver_ensure_engine_v2(AUDIO_STREAM_BUFFERED);
   if (engine_err != ESP_OK) {
@@ -743,6 +756,16 @@ esp_err_t audio_receiver_start_buffered(uint16_t tcp_port) {
   // restart.  The realtime path has always restarted unconditionally.
   if (receiver.stream->running) {
     if (receiver.buffered_port == tcp_port) {
+      // With no live connection this SETUP is a new stream (a track change
+      // tears the old one down), and its audio arrives on a new connection
+      // that cannot carry stale data.  The sender pushes the track's opening
+      // *before* the anchor that says to play it now, so a seek flush's
+      // discard-until-anchor gate, or the old track's anchor tripping Path B
+      // in audio_receiver_set_anchor_time(), dropped the first ~1 s of every
+      // track after a change.
+      if (receiver.buffered_client_socket < 0) {
+        audio_receiver_reset_for_new_stream();
+      }
       return ESP_OK;
     }
     ESP_LOGI(TAG, "Buffered port %u -> %u: restarting the listener",
@@ -752,19 +775,7 @@ esp_err_t audio_receiver_start_buffered(uint16_t tcp_port) {
     }
   }
 
-  // Starting a stream resets all timing state (including pause tracking)
-  audio_receiver_reset_stats();
-  audio_receiver_reset_engine_v2();
-  audio_timing_reset(&receiver.timing);
-  // audio_timing defaults to playing; mirror that onto the engine, which
-  // starts paused, so a sender that never sends an explicit rate=1 still
-  // produces audio.
-  audio_engine_v2_set_playing(&receiver.engine_v2, receiver.timing.playing);
-  audio_receiver_reset_resend_state();
-
-  receiver.timing.ptp_locked = ptp_clock_is_locked();
-  audio_receiver_reset_blocks();
-
+  audio_receiver_reset_for_new_stream();
   return receiver.stream->ops->start(receiver.stream, tcp_port);
 }
 
