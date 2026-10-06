@@ -217,6 +217,37 @@ static void amp_off_timer_cb(void *) {
   }
 }
 
+// Rates the I2S clock follows instead of resampling. AirPlay sends 44.1 kHz
+// (ALAC, AAC) and 48 kHz (AAC 5.1 / 7.1 and some stereo); the PCM5100 takes
+// both. Resampling 48 -> 44.1 kHz on the audio core, next to a 5.1 decode,
+// starved IDLE1 and tripped the task watchdog (2026-10-06).
+static constexpr uint32_t NATIVE_OUTPUT_RATES[] = {44100, 48000};
+
+static bool is_native_output_rate(uint32_t rate) {
+  for (uint32_t native : NATIVE_OUTPUT_RATES) {
+    if (rate == native) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Caller owns the channel: the playback task, or anyone while it is stopped.
+// Stopping the clocks clicks if the amp is on; a new stream's rate change
+// lands before its first audible frame, while the amp is still off.
+static void reclock_output(uint32_t rate) {
+  ESP_LOGI(TAG, "Output rate %" PRIu32 " -> %" PRIu32 " Hz", g_output_rate, rate);
+  i2s_channel_disable(g_tx_handle);
+  i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(rate);
+  i2s_channel_reconfig_std_clock(g_tx_handle, &clk_cfg);
+  g_output_rate = rate;
+  // Biquad coefficients are designed against the output rate. The redesign
+  // runs once per rate change, on the thread that runs the filters.
+  audio_dsp_set_sample_rate(rate);
+  cursor_reset();
+  i2s_channel_enable(g_tx_handle);
+}
+
 // ---------------------------------------------------------------------------
 // Flush
 // ---------------------------------------------------------------------------
@@ -327,7 +358,11 @@ static void playback_task(void *arg) {
   while (g_playback_running) {
     if (g_resample_reinit) {
       g_resample_reinit = false;
-      audio_resample_init((uint32_t) g_source_rate, g_output_rate, 2);
+      const uint32_t source_rate = (uint32_t) g_source_rate;
+      if (source_rate != g_output_rate && is_native_output_rate(source_rate)) {
+        reclock_output(source_rate);
+      }
+      audio_resample_init(source_rate, g_output_rate, 2);
       // Size the output buffer to the worst case for the current ratio so the
       // resampler never caps mid-stream. audio_resample_max_output() is 0 when
       // resampling is inactive (rates equal).
@@ -607,18 +642,8 @@ void audio_output_set_sample_rate(uint32_t rate) {
   }
   // Only safe when no writer task is actively using I2S (the caller must stop
   // the playback task first).
-  ESP_LOGI(TAG, "Setting sample rate to %" PRIu32 " Hz", rate);
-  i2s_channel_disable(g_tx_handle);
-  i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(rate);
-  i2s_channel_reconfig_std_clock(g_tx_handle, &clk_cfg);
-  g_output_rate = rate;
+  reclock_output(rate);
   g_resample_reinit = true;  // output rate changed: rebuild the resampler
-  // Biquad coefficients are designed against the output rate, so they are stale
-  // now. Safe here: the caller has stopped the playback task (see above), so
-  // the trig in the redesign is not running on the realtime path.
-  audio_dsp_set_sample_rate(rate);
-  cursor_reset();
-  i2s_channel_enable(g_tx_handle);
 }
 
 void audio_output_flush(void) {
