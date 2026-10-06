@@ -534,3 +534,18 @@ Stereo AAC 44.1k decode per 1024-sample (23.2 ms) frame, from the decoder's
 - Contribution of each change was not measured separately.
 - 5.1 at ~3x stereo work would still be ~22 ms per 23 ms frame: not viable
   without further gains.
+
+### 5.1 decode cost on the board (2026-10-06, measured)
+
+Temporary benchmark firmware (not committed): pink-noise ADTS clips decoded on
+the audio core with the board idle, `-O2` + L1 internal, downmix to stereo.
+
+| Clip | avg | max | frame budget | load |
+|---|---|---|---|---|
+| stereo 44.1k 256 kbps | 5.76 ms | 7.56 ms | 23.2 ms | 24% |
+| 5.1 48k 640 kbps | 16.0 ms | 17.8 ms | 21.3 ms | 75% |
+
+5.1 costs 2.8x stereo. Streaming stereo measured 7.4 ms against the idle
+5.76 ms (+28%: playback, DSP and network on the same core), so 5.1 while
+streaming projects to ~20.5 ms per 21.3 ms frame, ~96% of the core. Not viable
+without roughly another 25-30% off the decode.
