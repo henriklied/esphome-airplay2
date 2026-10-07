@@ -1,5 +1,6 @@
 // airplay_receiver output DSP -- RBJ biquad cascade plus the dynamic stages
-// (loudness, harmonic bass, stereo width, look-ahead limiter) on the playout
+// (loudness, harmonic bass, stereo width, crosstalk cancellation, look-ahead
+// limiter) on the playout
 // path. See audio_dsp.h for the threading contract; it is the load-bearing
 // part of this file.
 
@@ -56,6 +57,16 @@ constexpr float ENHANCER_ENVELOPE_FLOOR = 1.0f;
 constexpr float ENHANCER_H2_WEIGHT = 0.6f;
 constexpr float ENHANCER_H3_WEIGHT = 0.4f;
 
+/// Crosstalk history: a power of two so the ring index is a mask. Holds the
+/// longest delay (CROSSTALK_MAX_DELAY_US at 96 kHz) plus the interpolation tap.
+constexpr uint32_t CROSSTALK_HISTORY = 32;
+constexpr uint32_t CROSSTALK_HISTORY_MASK = CROSSTALK_HISTORY - 1;
+constexpr float CROSSTALK_MAX_DELAY_SAMPLES = (float) (CROSSTALK_HISTORY - 3);
+constexpr float CROSSTALK_MIN_DELAY_SAMPLES = 1.0f;
+/// Recursion must decay: keep the loop gain strictly below unity.
+constexpr float CROSSTALK_MAX_AMOUNT = 0.95f;
+constexpr float US_PER_S = 1000000.0f;
+
 /// Look-ahead long enough to ramp gain down over a full cycle of ~700 Hz, short
 /// enough to be irrelevant to AirPlay sync.
 constexpr float LIMITER_LOOKAHEAD_MS = 1.5f;
@@ -108,6 +119,13 @@ struct CoeffBank {
   /// width - 1: the extra side signal added above the corner.
   float width_extra = 0.0f;
 
+  bool crosstalk_on = false;
+  Biquad crosstalk_high_pass;
+  Biquad crosstalk_low_pass;
+  float crosstalk_amount = 0.0f;
+  uint32_t crosstalk_delay_whole = 1;  // integer part of the delay, samples
+  float crosstalk_delay_fraction = 0.0f;
+
   bool limiter_on = false;
   uint32_t limiter_lookahead = 0;
   float limiter_inv_lookahead = 0.0f;
@@ -145,6 +163,16 @@ EnhancerState g_enhancer_state;
 
 BiquadState g_width_state;
 
+/// Past crosstalk-stage outputs per channel, newest at `pos`, plus the band
+/// filter state on each feedback path.
+struct CrosstalkState {
+  float history[CROSSTALK_HISTORY][CHANNELS];
+  uint32_t pos = 0;
+  BiquadState high_pass[CHANNELS];
+  BiquadState low_pass[CHANNELS];
+};
+CrosstalkState g_crosstalk_state;
+
 /**
  * Look-ahead limiter state. Gain computation, per frame n:
  *   required[n] = min(1, threshold / peak[n])
@@ -176,6 +204,7 @@ LimiterState g_limiter;
 bool g_was_loudness_on = false;
 bool g_was_enhancer_on = false;
 bool g_was_width_on = false;
+bool g_was_crosstalk_on = false;
 
 std::atomic<uint32_t> g_peak_samples{0};
 /// Lowest limiter gain since the last take, as gain * LIMITER_GAIN_SCALE.
@@ -199,6 +228,11 @@ float g_enhancer_amount = 0.0f;
 
 float g_width = 1.0f;
 float g_width_frequency_hz = 300.0f;
+
+float g_crosstalk_amount = 0.0f;
+float g_crosstalk_delay_us = 60.0f;
+float g_crosstalk_low_hz = 250.0f;
+float g_crosstalk_high_hz = 5000.0f;
 
 bool g_limiter_enabled = false;
 float g_limiter_threshold_db = -1.0f;
@@ -370,6 +404,19 @@ void design_width(CoeffBank &bank) {
   bank.width_extra = g_width - 1.0f;
 }
 
+void design_crosstalk(CoeffBank &bank) {
+  bank.crosstalk_on =
+      g_crosstalk_amount > 0.0f &&
+      design_section(AIRPLAY_DSP_HIGH_PASS, g_crosstalk_low_hz, DEFAULT_Q, 0.0f, &bank.crosstalk_high_pass) &&
+      design_section(AIRPLAY_DSP_LOW_PASS, g_crosstalk_high_hz, DEFAULT_Q, 0.0f, &bank.crosstalk_low_pass);
+  bank.crosstalk_amount = fminf(g_crosstalk_amount, CROSSTALK_MAX_AMOUNT);
+  const float delay_samples =
+      fminf(fmaxf(g_crosstalk_delay_us / US_PER_S * (float) g_sample_rate, CROSSTALK_MIN_DELAY_SAMPLES),
+            CROSSTALK_MAX_DELAY_SAMPLES);
+  bank.crosstalk_delay_whole = (uint32_t) delay_samples;
+  bank.crosstalk_delay_fraction = delay_samples - (float) bank.crosstalk_delay_whole;
+}
+
 void design_limiter(CoeffBank &bank) {
   bank.limiter_on = g_limiter_enabled;
   uint32_t lookahead = (uint32_t) lroundf(LIMITER_LOOKAHEAD_MS / MS_PER_S * (float) g_sample_rate);
@@ -412,6 +459,7 @@ void rebuild_and_publish() {
   design_loudness(bank);
   design_enhancer(bank);
   design_width(bank);
+  design_crosstalk(bank);
   design_limiter(bank);
 
   g_latency_frames.store(bank.limiter_on ? bank.limiter_lookahead - 1 : 0, std::memory_order_relaxed);
@@ -461,6 +509,7 @@ void clear_all_state() {
   }
   g_enhancer_state = EnhancerState{};
   g_width_state = BiquadState{};
+  g_crosstalk_state = CrosstalkState{};
   limiter_reset(g_limiter.lookahead);
 }
 
@@ -487,7 +536,11 @@ void sync_state_to(const CoeffBank &bank) {
   }
   g_was_loudness_on = bank.loudness_on;
   g_was_enhancer_on = bank.enhancer_on;
+  if (bank.crosstalk_on && !g_was_crosstalk_on) {
+    g_crosstalk_state = CrosstalkState{};
+  }
   g_was_width_on = bank.width_on;
+  g_was_crosstalk_on = bank.crosstalk_on;
   if (!bank.limiter_on) {
     g_limiter.lookahead = 0;  // a later enable starts clean
   } else if (bank.limiter_lookahead != g_limiter.lookahead) {
@@ -521,6 +574,30 @@ inline float enhancer_run(const CoeffBank &bank, float mono) {
   generated = e.output_high_pass.run(bank.enhancer_output_high_pass, generated);
   generated = e.output_low_pass.run(bank.enhancer_output_low_pass, generated);
   return generated * bank.enhancer_amount;
+}
+
+/// Output of channel `channel`, `delay` samples (whole + fraction) before the
+/// one about to be written. Linear interpolation: its slight treble loss is
+/// below the band's own low-pass.
+inline float crosstalk_past(uint32_t channel, uint32_t whole, float fraction) {
+  const CrosstalkState &x = g_crosstalk_state;
+  // The newest stored output is one sample back, at pos.
+  const float near = x.history[(x.pos + 1 - whole) & CROSSTALK_HISTORY_MASK][channel];
+  const float far = x.history[(x.pos - whole) & CROSSTALK_HISTORY_MASK][channel];
+  return near + (far - near) * fraction;
+}
+
+inline void crosstalk_run(const CoeffBank &bank, float *left, float *right) {
+  CrosstalkState &x = g_crosstalk_state;
+  float from_right = crosstalk_past(1, bank.crosstalk_delay_whole, bank.crosstalk_delay_fraction);
+  float from_left = crosstalk_past(0, bank.crosstalk_delay_whole, bank.crosstalk_delay_fraction);
+  from_right = x.low_pass[0].run(bank.crosstalk_low_pass, x.high_pass[0].run(bank.crosstalk_high_pass, from_right));
+  from_left = x.low_pass[1].run(bank.crosstalk_low_pass, x.high_pass[1].run(bank.crosstalk_high_pass, from_left));
+  *left -= bank.crosstalk_amount * from_right;
+  *right -= bank.crosstalk_amount * from_left;
+  x.pos = (x.pos + 1) & CROSSTALK_HISTORY_MASK;
+  x.history[x.pos][0] = *left;
+  x.history[x.pos][1] = *right;
 }
 
 /// See LimiterState for the algorithm. Returns the gain applied.
@@ -591,7 +668,7 @@ inline int16_t to_pcm(float x) {
 }
 
 bool bank_is_active(const CoeffBank &bank) {
-  return bank.count > 0 || bank.preamp_lin != 1.0f || bank.loudness_on || bank.enhancer_on || bank.width_on ||
+  return bank.count > 0 || bank.preamp_lin != 1.0f || bank.loudness_on || bank.enhancer_on || bank.width_on || bank.crosstalk_on ||
          bank.limiter_on;
 }
 
@@ -710,6 +787,15 @@ void audio_dsp_set_stereo_width(float width, float frequency_hz) {
   rebuild_and_publish();
 }
 
+void audio_dsp_set_crosstalk(float amount, float delay_us, float low_hz, float high_hz) {
+  std::lock_guard<std::mutex> lock(g_writer_mutex);
+  g_crosstalk_amount = amount > 0.0f ? amount : 0.0f;
+  g_crosstalk_delay_us = delay_us;
+  g_crosstalk_low_hz = low_hz;
+  g_crosstalk_high_hz = high_hz;
+  rebuild_and_publish();
+}
+
 void audio_dsp_set_limiter(bool enabled, float threshold_db, float release_ms) {
   std::lock_guard<std::mutex> lock(g_writer_mutex);
   g_limiter_enabled = enabled;
@@ -791,6 +877,10 @@ void audio_dsp_process(int16_t *buf, size_t frames) {
       right = mid - side;
     }
 
+    if (bank.crosstalk_on) {
+      crosstalk_run(bank, &left, &right);
+    }
+
     if (bank.limiter_on) {
       const float gain = limiter_run(bank, &left, &right);
       if (gain < min_gain) {
@@ -839,6 +929,10 @@ void audio_dsp_log_cascade(const char *tag, int level) {
   }
   if (bank.width_on) {
     esp_log_printf_(level, tag, __LINE__, "    stereo width %.2f above %.0f Hz", g_width, g_width_frequency_hz);
+  }
+  if (bank.crosstalk_on) {
+    esp_log_printf_(level, tag, __LINE__, "    crosstalk cancel %.2f, %.0f us, %.0f-%.0f Hz", bank.crosstalk_amount,
+                    g_crosstalk_delay_us, g_crosstalk_low_hz, g_crosstalk_high_hz);
   }
   if (bank.limiter_on) {
     esp_log_printf_(level, tag, __LINE__, "    limiter %.1f dBFS, release %.0f ms, look-ahead %u frames",

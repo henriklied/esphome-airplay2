@@ -52,6 +52,8 @@ void AirPlayReceiver::setup() {
   audio_dsp_set_loudness(this->loudness_frequency_hz_, this->loudness_max_boost_db_, this->loudness_range_db_);
   audio_dsp_set_bass_enhancer(this->enhancer_frequency_hz_, this->enhancer_amount_);
   audio_dsp_set_stereo_width(this->width_, this->width_frequency_hz_);
+  audio_dsp_set_crosstalk(this->crosstalk_amount_, this->crosstalk_delay_us_, this->crosstalk_low_hz_,
+                          this->crosstalk_high_hz_);
   audio_dsp_set_limiter(this->limiter_enabled_, this->limiter_threshold_db_, this->limiter_release_ms_);
   if (!this->dsp_filters_.empty()) {
     audio_dsp_set_filters(this->dsp_filters_.data(), this->dsp_filters_.size());
@@ -216,6 +218,22 @@ void AirPlayReceiver::set_dsp_stereo_width(float width, float frequency_hz) {
 
 void AirPlayReceiver::set_dsp_stereo_width_amount(float width) {
   this->set_dsp_stereo_width(width, this->width_frequency_hz_);
+}
+
+void AirPlayReceiver::set_dsp_crosstalk(float amount, float delay_us, float low_hz, float high_hz) {
+  this->crosstalk_amount_ = amount;
+  this->crosstalk_delay_us_ = delay_us;
+  this->crosstalk_low_hz_ = low_hz;
+  this->crosstalk_high_hz_ = high_hz;
+  audio_dsp_set_crosstalk(amount, delay_us, low_hz, high_hz);
+}
+
+void AirPlayReceiver::set_dsp_crosstalk_amount(float amount) {
+  this->set_dsp_crosstalk(amount, this->crosstalk_delay_us_, this->crosstalk_low_hz_, this->crosstalk_high_hz_);
+}
+
+void AirPlayReceiver::set_dsp_crosstalk_delay(float delay_us) {
+  this->set_dsp_crosstalk(this->crosstalk_amount_, delay_us, this->crosstalk_low_hz_, this->crosstalk_high_hz_);
 }
 
 void AirPlayReceiver::set_dsp_limiter(bool enabled, float threshold_db, float release_ms) {

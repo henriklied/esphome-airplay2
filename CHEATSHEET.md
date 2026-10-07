@@ -108,6 +108,7 @@ Dynamic stages (all optional, off until configured; order after `filters`):
 | `loudness` | `frequency` 100Hz, `max_boost` (req), `range` 30dB | shelf lift follows volume; flat at full volume. Redesigned from `loop()` via `audio_dsp_service()` |
 | `bass_enhancer` | `frequency` 90Hz, `amount` 1.0 | 2nd+3rd harmonics of the band below `frequency`, Chebyshev on the envelope-normalised band; taps pre-cascade so the high-pass cannot starve it |
 | `stereo_width` | `width` (req), `frequency` 300Hz | M/S, side boosted above the corner only |
+| `crosstalk_cancel` | `amount` (req), `delay` 60us, `low_frequency` 250Hz, `high_frequency` 5000Hz | RACE: out_l = in_l - amount * band(out_r delayed); fractional delay by linear interpolation, min 1 sample |
 | `limiter` | `enabled` true, `threshold` -1dB, `release` 100ms | look-ahead (1.5 ms), min-hold + box ramp: no overshoot. Delay is added to the playout clock (`audio_dsp_get_latency_frames()`) |
 
 Host tests: `uv run tests/test_dsp_stages.py`.

@@ -142,7 +142,8 @@ float audio_dsp_take_peak(void);
 // ---- Dynamic stages ------------------------------------------------------
 // Processing order per stereo frame:
 //   preamp -> biquad cascade -> loudness shelf -> + synthesized bass harmonics
-//   -> stereo width -> look-ahead limiter -> round and clamp
+//   -> stereo width -> crosstalk cancellation -> look-ahead limiter
+//   -> round and clamp
 // The harmonic generator taps the signal after the preamp but BEFORE the
 // cascade, so a protective high-pass cannot starve it of the very bass it is
 // standing in for. Each stage is off until configured, and an off stage costs
@@ -203,6 +204,31 @@ void audio_dsp_set_bass_enhancer(float frequency_hz, float amount);
  * so the low end keeps its weight in the centre.
  */
 void audio_dsp_set_stereo_width(float width, float frequency_hz);
+
+/**
+ * Recursive crosstalk cancellation (RACE). Each output subtracts a delayed,
+ * band-limited, attenuated copy of the OTHER channel's output:
+ *
+ *   out_l[n] = in_l[n] - amount * band(out_r[n - delay])
+ *   out_r[n] = in_r[n] - amount * band(out_l[n - delay])
+ *
+ * The delay matches the extra path from each driver to the far ear, so the
+ * subtraction arrives there with the crosstalk it cancels; the recursion
+ * cancels the cancellation's own crosstalk in turn. Sound then images beyond
+ * the cabinet. Within the band the side signal rises by up to
+ * 1 / (1 - amount) and the mid falls by up to 1 / (1 + amount); outside it the
+ * signal is untouched. Bass is excluded because cancelling it from closely
+ * spaced drivers costs far more level than the image gains.
+ *
+ * @param amount     crossfeed gain, 0 (off) to below 1. Stable for any value
+ *                   below 1: the band filter never exceeds unity.
+ * @param delay_us   driver-to-far-ear path difference in microseconds; at least
+ *                   one sample is used, since the recursion needs a past output.
+ * @param low_hz     lower band edge (2nd-order high-pass).
+ * @param high_hz    upper band edge (2nd-order low-pass) -- the head shadows
+ *                   crosstalk above a few kHz anyway.
+ */
+void audio_dsp_set_crosstalk(float amount, float delay_us, float low_hz, float high_hz);
 
 /**
  * Look-ahead peak limiter on the final output, stereo-linked. Gain reduction

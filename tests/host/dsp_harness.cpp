@@ -1,6 +1,6 @@
 // Host checks for the dynamic stages in audio/audio_dsp.cpp: limiter ceiling,
-// latency and release, volume-following loudness, harmonic bass and stereo
-// width. Exits non-zero with a message on the first failure. Driven by
+// latency and release, volume-following loudness, harmonic bass, stereo width
+// and crosstalk cancellation. Exits non-zero with a message on the first failure. Driven by
 // tests/test_dsp_stages.py.
 
 #include "audio/audio_dsp.h"
@@ -47,6 +47,7 @@ static void reset_all() {
   audio_dsp_set_loudness(100.0f, 0.0f, 30.0f);
   audio_dsp_set_bass_enhancer(90.0f, 0.0f);
   audio_dsp_set_stereo_width(1.0f, 300.0f);
+  audio_dsp_set_crosstalk(0.0f, 60.0f, 250.0f, 5000.0f);
   audio_dsp_set_limiter(false, -1.0f, 100.0f);
   audio_dsp_set_volume_q15(UNITY_Q15);
   audio_dsp_service();
@@ -222,6 +223,45 @@ static void test_stereo_width() {
   CHECK(std::fabs(amplitude(bass, 1, 40.0)) < 0.05 * 8000.0);
 }
 
+static void test_crosstalk_cancellation() {
+  reset_all();
+  const double amount = 0.7;
+  audio_dsp_set_crosstalk((float) amount, 60.0f, 250.0f, 5000.0f);
+
+  // In band the recursion lifts side toward 1 / (1 - amount) and drops mid
+  // toward 1 / (1 + amount); band filter phase and the delay keep it short of
+  // both limits.
+  Stereo side = tone(1000.0, 4000.0, -4000.0);
+  process(side);
+  const double side_db = 20.0 * std::log10(std::fabs(amplitude(side, 0, 1000.0)) / 4000.0);
+  CHECK(side_db > 6.0);
+  CHECK(side_db < 20.0 * std::log10(1.0 / (1.0 - amount)) + 0.1);
+  CHECK_NEAR(amplitude(side, 0, 1000.0), -amplitude(side, 1, 1000.0), 10.0);
+
+  audio_dsp_reset();
+  Stereo mid = tone(1000.0, 4000.0, 4000.0);
+  process(mid);
+  const double mid_db = 20.0 * std::log10(std::fabs(amplitude(mid, 0, 1000.0)) / 4000.0);
+  CHECK(mid_db < -2.0);
+  CHECK(mid_db > 20.0 * std::log10(1.0 / (1.0 + amount)) - 0.1);
+
+  // Bass is outside the band and passes nearly untouched.
+  audio_dsp_reset();
+  Stereo bass = tone(50.0, 4000.0, -4000.0);
+  process(bass);
+  CHECK_NEAR(20.0 * std::log10(std::fabs(amplitude(bass, 0, 50.0)) / 4000.0), 0.0, 0.5);
+
+  // Impulse response decays: the recursion is stable at the maximum amount.
+  audio_dsp_set_crosstalk(0.95f, 300.0f, 250.0f, 5000.0f);
+  audio_dsp_reset();
+  Stereo impulse(SAMPLE_RATE * 2, 0);
+  impulse[0] = 30000;
+  process(impulse);
+  for (size_t i = impulse.size() / 2; i < impulse.size(); i++) {
+    CHECK(impulse[i] == 0);
+  }
+}
+
 static void test_sample_rate_change_rescales_lookahead() {
   reset_all();
   audio_dsp_set_limiter(true, -1.0f, 100.0f);
@@ -240,6 +280,7 @@ int main() {
   test_loudness_follows_volume();
   test_bass_enhancer_adds_linear_harmonics();
   test_stereo_width();
+  test_crosstalk_cancellation();
   test_sample_rate_change_rescales_lookahead();
   std::printf("ok\n");
   return 0;

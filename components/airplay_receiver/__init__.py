@@ -58,6 +58,10 @@ _CONFIG_DSP_LOUDNESS = "loudness"
 _CONFIG_DSP_BASS_ENHANCER = "bass_enhancer"
 _CONFIG_DSP_STEREO_WIDTH = "stereo_width"
 _CONFIG_DSP_LIMITER = "limiter"
+_CONFIG_DSP_CROSSTALK = "crosstalk_cancel"
+_CONFIG_DELAY = "delay"
+_CONFIG_LOW_FREQUENCY = "low_frequency"
+_CONFIG_HIGH_FREQUENCY = "high_frequency"
 _CONFIG_MAX_BOOST = "max_boost"
 _CONFIG_RANGE = "range"
 _CONFIG_AMOUNT = "amount"
@@ -155,6 +159,20 @@ _DSP_STEREO_WIDTH_SCHEMA = cv.Schema(
     }
 )
 
+# Recursive crosstalk cancellation (RACE). `delay` is the extra path from a
+# driver to the far ear; `amount` below 1 keeps the recursion decaying.
+_DSP_CROSSTALK_SCHEMA = cv.Schema(
+    {
+        cv.Required(_CONFIG_AMOUNT): cv.float_range(min=0.0, max=0.95),
+        cv.Optional(_CONFIG_DELAY, default="60us"): cv.All(
+            cv.positive_time_period_microseconds,
+            cv.Range(min=cv.TimePeriod(microseconds=10), max=cv.TimePeriod(microseconds=300)),
+        ),
+        cv.Optional(_CONFIG_LOW_FREQUENCY, default="250Hz"): cv.frequency,
+        cv.Optional(_CONFIG_HIGH_FREQUENCY, default="5000Hz"): cv.frequency,
+    }
+)
+
 # Look-ahead peak limiter, last in the chain. Adds 1.5 ms of output delay,
 # which the playout clock accounts for.
 _DSP_LIMITER_SCHEMA = cv.Schema(
@@ -175,6 +193,7 @@ _DSP_SCHEMA = cv.Schema(
         cv.Optional(_CONFIG_DSP_LOUDNESS): _DSP_LOUDNESS_SCHEMA,
         cv.Optional(_CONFIG_DSP_BASS_ENHANCER): _DSP_BASS_ENHANCER_SCHEMA,
         cv.Optional(_CONFIG_DSP_STEREO_WIDTH): _DSP_STEREO_WIDTH_SCHEMA,
+        cv.Optional(_CONFIG_DSP_CROSSTALK): _DSP_CROSSTALK_SCHEMA,
         cv.Optional(_CONFIG_DSP_LIMITER): _DSP_LIMITER_SCHEMA,
         cv.Optional(_CONFIG_DSP_ENABLED, default=True): cv.boolean,
         # Negative preamp buys back the headroom a positive shelf spends. The
@@ -325,6 +344,15 @@ def _add_dsp(var, dsp_config) -> None:
         cg.add(var.set_dsp_bass_enhancer(enhancer[_CONFIG_FILTER_FREQUENCY], enhancer[_CONFIG_AMOUNT]))
     if width := dsp_config.get(_CONFIG_DSP_STEREO_WIDTH):
         cg.add(var.set_dsp_stereo_width(width[_CONFIG_WIDTH], width[_CONFIG_FILTER_FREQUENCY]))
+    if crosstalk := dsp_config.get(_CONFIG_DSP_CROSSTALK):
+        cg.add(
+            var.set_dsp_crosstalk(
+                crosstalk[_CONFIG_AMOUNT],
+                float(crosstalk[_CONFIG_DELAY].total_microseconds),
+                crosstalk[_CONFIG_LOW_FREQUENCY],
+                crosstalk[_CONFIG_HIGH_FREQUENCY],
+            )
+        )
     if limiter := dsp_config.get(_CONFIG_DSP_LIMITER):
         cg.add(
             var.set_dsp_limiter(

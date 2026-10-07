@@ -101,6 +101,9 @@ class AirPlayReceiver : public Component, public media_player::MediaPlayer {
   void set_dsp_bass_enhancer_amount(float amount);
   void set_dsp_stereo_width(float width, float frequency_hz);
   void set_dsp_stereo_width_amount(float width);
+  void set_dsp_crosstalk(float amount, float delay_us, float low_hz, float high_hz);
+  void set_dsp_crosstalk_amount(float amount);
+  void set_dsp_crosstalk_delay(float delay_us);
   void set_dsp_limiter(bool enabled, float threshold_db, float release_ms);
   void set_dsp_limiter_enabled(bool enabled);
   void set_dsp_limiter_threshold(float threshold_db);
@@ -193,6 +196,10 @@ class AirPlayReceiver : public Component, public media_player::MediaPlayer {
   float enhancer_amount_{0.0f};
   float width_{1.0f};
   float width_frequency_hz_{300.0f};
+  float crosstalk_amount_{0.0f};
+  float crosstalk_delay_us_{60.0f};
+  float crosstalk_low_hz_{250.0f};
+  float crosstalk_high_hz_{5000.0f};
   bool limiter_enabled_{false};
   float limiter_threshold_db_{-1.0f};
   float limiter_release_ms_{100.0f};
