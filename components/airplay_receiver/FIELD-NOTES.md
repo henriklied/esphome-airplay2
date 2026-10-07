@@ -723,3 +723,32 @@ config keeps `advertise_surround: false`.
   identical to the build that plays Spotify and Apple TV stereo. **Superseded:**
   the anchor/RTP mismatch was buffered port reuse, and 5.1 now plays; see
   "Apple TV 5.1 plays".
+
+## Buffered stream: ~1 s dropouts from a shut TCP window (fixed 2026-10-07, measured)
+
+Mac (Apple Music) to both boards, buffered type 103. Every 10-40 s, per board
+and independently: `buffered` full at ~190, then `ins=0` for ~4 s while it
+drains, `stalled: PREROLL`, ~1 s silence, then a burst. Captured live on the
+Mac with `netstat` sampled at 4 Hz: its send queue to the board froze at
+54,272 bytes for 5.0 s with nothing sent, and the board went silent 5 s in.
+A 5 s freeze with data queued is the macOS TCP persist timer: the Mac saw a
+zero window and missed the reopen.
+
+Cause: the reader read the socket only while the pipeline had room, and the
+PCM timeline holds 192 x 1024 samples (~4.5 s, ~140 KB of AAC) while SETUP
+advertised `audioBufferSize` 512 KB. The sender pushes toward 512 KB, so the
+window sat at zero. Whether the reopen was lost on air or deferred by lwIP's
+update threshold (`tcp_recved()` sends an explicit update only past
+`TCP_WND_UPDATE_THRESHOLD`) was not captured; the fix does not depend on it.
+
+Fix (`audio/buffered_ring.h`): the socket drains into a PSRAM ring of
+`BUFFERED_AUDIO_BUFFER_BYTES` (the same constant SETUP advertises), and
+frames leave the ring only while the pipeline has room. Stale audio in the
+ring after a skip drains through the RTP gates before decrypt.
+
+Measured over 15.5 min, same session, Geneva on the fix and the X90 board
+not: Geneva 0 mid-play stalls, longest send-queue freeze 0.5 s; X90 5 stalls,
+freezes up to 5 s. Post-skip startup was the same on both (~1.5 s), so the
+ring does not slow track changes. The close line now reports
+`ring peak N/512 KB, N full passes`; a non-zero full count means the sender
+pushed past the advertised size.
