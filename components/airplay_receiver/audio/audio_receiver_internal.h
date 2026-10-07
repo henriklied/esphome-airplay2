@@ -150,6 +150,8 @@ typedef struct audio_receiver_state {
   uint16_t buffered_port;
   TaskHandle_t buffered_task_handle;
   uint8_t *buffered_recv_buffer;
+  uint8_t *buffered_ring_storage;
+  size_t buffered_ring_capacity;
 
   uint8_t *decrypt_buffer;
   size_t decrypt_buffer_size;

@@ -29,6 +29,7 @@
 #include "freertos/task.h"
 
 #include "../allocator.h"
+#include "../audio/buffered_ring.h"
 #include "../timing/ntp_clock.h"
 #include "../timing/ptp_clock.h"
 #include "bplist.h"
@@ -56,7 +57,6 @@ static const char *const TAG = "airplay_transport";
 #define RTSP_EVENT_STACK_SIZE 4096
 // How long event_port_task() sleeps between non-blocking accept() attempts.
 #define EVENT_ACCEPT_POLL_MS 100
-#define RTSP_AP2_AUDIO_BUFFER_SIZE (512 * 1024)        // buffered (type 103) TCP pre-fill
 #define RTSP_AP2_REALTIME_AUDIO_BUFFER_SIZE (1 * 1024 * 1024)  // realtime (type 96) UDP
 
 // ---------------------------------------------------------------------------
@@ -1045,7 +1045,7 @@ static void handle_setup(int socket, RtspConn *conn, const RtspRequest *req, con
   // Realtime (type 96) plays out latencyMin samples after the anchor; buffered
   // (type 103) plays at the anchor (0). 11025 = 250 ms default (upstream).
   audio.playout_latency_samples = buffered ? 0 : (latency_min > 0 ? latency_min : 11025);
-  audio.audio_buffer_size = buffered ? RTSP_AP2_AUDIO_BUFFER_SIZE : RTSP_AP2_REALTIME_AUDIO_BUFFER_SIZE;
+  audio.audio_buffer_size = buffered ? BUFFERED_AUDIO_BUFFER_BYTES : RTSP_AP2_REALTIME_AUDIO_BUFFER_SIZE;
 
   // Hand the fully-configured stream to the audio engine.
   TransportEventData data{};
@@ -1059,7 +1059,7 @@ static void handle_setup(int socket, RtspConn *conn, const RtspRequest *req, con
     uint16_t ad_port = buffered ? conn->buffered_port : conn->data_port;
     size_t plist_len = bplist_build_stream_setup(plist_body, sizeof(plist_body), stream_type, ad_port,
                                                  conn->control_port,
-                                                 buffered ? RTSP_AP2_AUDIO_BUFFER_SIZE
+                                                 buffered ? BUFFERED_AUDIO_BUFFER_BYTES
                                                           : RTSP_AP2_REALTIME_AUDIO_BUFFER_SIZE);
     if (plist_len == 0) {
       rtsp_send_response(socket, conn, 500, "Internal Error", req->cseq, nullptr, nullptr, 0);
