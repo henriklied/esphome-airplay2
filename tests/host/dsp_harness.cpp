@@ -1,6 +1,6 @@
 // Host checks for the dynamic stages in audio/audio_dsp.cpp: limiter ceiling,
 // latency and release, volume-following loudness, harmonic bass, stereo width
-// and crosstalk cancellation. Exits non-zero with a message on the first failure. Driven by
+// crosstalk cancellation and the bass-band limiter. Exits non-zero with a message on the first failure. Driven by
 // tests/test_dsp_stages.py.
 
 #include "audio/audio_dsp.h"
@@ -48,6 +48,8 @@ static void reset_all() {
   audio_dsp_set_bass_enhancer(90.0f, 0.0f);
   audio_dsp_set_stereo_width(1.0f, 300.0f);
   audio_dsp_set_crosstalk(0.0f, 60.0f, 250.0f, 5000.0f);
+  audio_dsp_set_bass_limiter(false, 120.0f, -6.0f, 200.0f);
+  audio_dsp_take_bass_limiter_reduction_db();
   audio_dsp_set_limiter(false, -1.0f, 100.0f);
   audio_dsp_set_volume_q15(UNITY_Q15);
   audio_dsp_service();
@@ -262,6 +264,43 @@ static void test_crosstalk_cancellation() {
   }
 }
 
+static void test_bass_limiter() {
+  reset_all();
+  audio_dsp_set_bass_limiter(true, 120.0f, -12.0f, 200.0f);
+  CHECK(audio_dsp_get_latency_frames() == 65);
+
+  // Below threshold the split and recombine is flat (Linkwitz-Riley sums to an
+  // allpass), bass and treble alike.
+  CHECK_NEAR(gain_db(60.0, 2000.0), 0.0, 0.1);
+  audio_dsp_reset();
+  CHECK_NEAR(gain_db(120.0, 2000.0), 0.0, 0.1);
+  audio_dsp_reset();
+  CHECK_NEAR(gain_db(3000.0, 2000.0), 0.0, 0.1);
+
+  // A loud bass note under a loud treble tone: the bass is held near the
+  // ceiling while the treble keeps its level. A full-band limiter would have
+  // pulled both down together.
+  audio_dsp_reset();
+  const double ceiling = std::pow(10.0, -12.0 / 20.0) * 32768.0;
+  Stereo mix(TONE_FRAMES * 2);
+  for (size_t i = 0; i < TONE_FRAMES; i++) {
+    const double t = (double) i / SAMPLE_RATE;
+    const double v = 20000.0 * std::sin(2.0 * PI * 50.0 * t) + 8000.0 * std::sin(2.0 * PI * 2000.0 * t);
+    mix[i * 2] = mix[i * 2 + 1] = (int16_t) std::lround(v);
+  }
+  process(mix);
+  // The ceiling applies to the low band. The high band still carries the 50 Hz
+  // note at the LR4 high-pass's (50/120)^4 -- about 600 here -- unlimited.
+  const double high_band_leak = 20000.0 * std::pow(50.0 / 120.0, 4.0);
+  CHECK_NEAR(std::fabs(amplitude(mix, 0, 50.0)), ceiling + high_band_leak, 0.03 * ceiling);
+  CHECK_NEAR(std::fabs(amplitude(mix, 0, 2000.0)), 8000.0, 80.0);
+  CHECK(audio_dsp_take_bass_limiter_reduction_db() < -3.0f);
+
+  // Both limiters: the delays add.
+  audio_dsp_set_limiter(true, -1.0f, 100.0f);
+  CHECK(audio_dsp_get_latency_frames() == 130);
+}
+
 static void test_sample_rate_change_rescales_lookahead() {
   reset_all();
   audio_dsp_set_limiter(true, -1.0f, 100.0f);
@@ -281,6 +320,7 @@ int main() {
   test_bass_enhancer_adds_linear_harmonics();
   test_stereo_width();
   test_crosstalk_cancellation();
+  test_bass_limiter();
   test_sample_rate_change_rescales_lookahead();
   std::printf("ok\n");
   return 0;

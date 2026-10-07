@@ -142,8 +142,8 @@ float audio_dsp_take_peak(void);
 // ---- Dynamic stages ------------------------------------------------------
 // Processing order per stereo frame:
 //   preamp -> biquad cascade -> loudness shelf -> + synthesized bass harmonics
-//   -> stereo width -> crosstalk cancellation -> look-ahead limiter
-//   -> round and clamp
+//   -> stereo width -> crosstalk cancellation -> bass limiter
+//   -> look-ahead limiter -> round and clamp
 // The harmonic generator taps the signal after the preamp but BEFORE the
 // cascade, so a protective high-pass cannot starve it of the very bass it is
 // standing in for. Each stage is off until configured, and an off stage costs
@@ -231,6 +231,19 @@ void audio_dsp_set_stereo_width(float width, float frequency_hz);
 void audio_dsp_set_crosstalk(float amount, float delay_us, float low_hz, float high_hz);
 
 /**
+ * Bass-band limiter. Splits at `frequency_hz` (Linkwitz-Riley 4th order, so the
+ * bands sum back flat), runs the look-ahead limiter on the lows alone, and
+ * delays the highs to match. Bass peaks -- the ones the loudness lift and the
+ * harmonic generator push hardest -- are held below `threshold_db` without
+ * ducking vocals the way the full-band limiter would. Adds one more look-ahead
+ * of delay, included in audio_dsp_get_latency_frames().
+ */
+void audio_dsp_set_bass_limiter(bool enabled, float frequency_hz, float threshold_db, float release_ms);
+
+/// Deepest bass-limiter gain reduction since the last call, in dB (<= 0).
+float audio_dsp_take_bass_limiter_reduction_db(void);
+
+/**
  * Look-ahead peak limiter on the final output, stereo-linked. Gain reduction
  * is guaranteed to be in place before a peak reaches the output (no
  * overshoot), and recovers with an exponential release. Adds
@@ -242,8 +255,8 @@ void audio_dsp_set_crosstalk(float amount, float delay_us, float low_hz, float h
 void audio_dsp_set_limiter(bool enabled, float threshold_db, float release_ms);
 
 /**
- * Frames of delay the stage adds to the output: the limiter's look-ahead when
- * it is in the path, else 0. The playout clock adds this so AirPlay sync holds.
+ * Frames of delay the stage adds to the output: one look-ahead per limiter in
+ * the path, else 0. The playout clock adds this so AirPlay sync holds.
  */
 uint32_t audio_dsp_get_latency_frames(void);
 

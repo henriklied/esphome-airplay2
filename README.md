@@ -148,9 +148,9 @@ peaks, not noise.
 
 ### Dynamic stages
 
-Five optional stages make a small speaker sound larger than its static EQ allows. Each is off until
+Six optional stages make a small speaker sound larger than its static EQ allows. Each is off until
 configured. Order: preamp, `filters`, loudness, bass enhancer, stereo width, crosstalk
-cancellation, limiter.
+cancellation, bass limiter, limiter.
 
 ```yaml
   dsp:
@@ -167,6 +167,10 @@ cancellation, limiter.
     crosstalk_cancel:
       amount: 0.6
       delay: 60us
+    bass_limiter:
+      frequency: 120Hz
+      threshold: -6dB
+      release: 200ms
     limiter:
       threshold: -1dB
       release: 100ms
@@ -185,15 +189,18 @@ cancellation, limiter.
   past the cabinet. `delay` is the extra path from a driver to the far ear (10-300us); `amount`
   (0-0.95) sets the depth. In band it lifts side by up to 1/(1-amount) and lowers mid by up to
   1/(1+amount), so pair it with a lower `stereo_width`.
+* **bass_limiter**: Splits at `frequency` (Linkwitz-Riley, so the bands sum back flat), limits the
+  lows to `threshold` on their own and delays the highs to match. Bass peaks no longer duck the whole
+  mix. Adds another 1.5 ms, also included in the playout clock.
 * **limiter**: Stereo-linked look-ahead peak limiter, last in the chain. Peaks never exceed
   `threshold`. Adds 1.5 ms of delay, which the playout clock includes, so AirPlay sync holds. With it
   enabled, boosts no longer need a matching negative `preamp`.
 
 Runtime setters: `set_dsp_loudness_boost(db)`, `set_dsp_bass_enhancer_amount(x)`,
 `set_dsp_stereo_width_amount(x)`, `set_dsp_crosstalk_amount(x)`, `set_dsp_crosstalk_delay(us)`,
-`set_dsp_limiter_enabled(bool)`, `set_dsp_limiter_threshold(db)`.
+`set_dsp_bass_limiter_threshold(db)`, `set_dsp_limiter_enabled(bool)`, `set_dsp_limiter_threshold(db)`.
 `get_dsp_loudness_now()` returns the lift in effect; `take_dsp_limiter_reduction()` returns the
-deepest gain reduction since the last call.
+deepest gain reduction since the last call (`take_dsp_bass_limiter_reduction()` for the bass band).
 
 ### Runtime tuning
 

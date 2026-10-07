@@ -104,6 +104,8 @@ class AirPlayReceiver : public Component, public media_player::MediaPlayer {
   void set_dsp_crosstalk(float amount, float delay_us, float low_hz, float high_hz);
   void set_dsp_crosstalk_amount(float amount);
   void set_dsp_crosstalk_delay(float delay_us);
+  void set_dsp_bass_limiter(bool enabled, float frequency_hz, float threshold_db, float release_ms);
+  void set_dsp_bass_limiter_threshold(float threshold_db);
   void set_dsp_limiter(bool enabled, float threshold_db, float release_ms);
   void set_dsp_limiter_enabled(bool enabled);
   void set_dsp_limiter_threshold(float threshold_db);
@@ -112,6 +114,8 @@ class AirPlayReceiver : public Component, public media_player::MediaPlayer {
   float get_dsp_loudness_now() const { return audio_dsp_get_loudness_boost_db(); }
   /// Deepest limiter gain reduction since the last call, in dB (<= 0).
   float take_dsp_limiter_reduction() { return audio_dsp_take_limiter_reduction_db(); }
+  /// Same, for the bass-band limiter.
+  float take_dsp_bass_limiter_reduction() { return audio_dsp_take_bass_limiter_reduction_db(); }
 
   uint32_t get_buffer_size() const { return this->buffer_size_; }
 
@@ -200,6 +204,10 @@ class AirPlayReceiver : public Component, public media_player::MediaPlayer {
   float crosstalk_delay_us_{60.0f};
   float crosstalk_low_hz_{250.0f};
   float crosstalk_high_hz_{5000.0f};
+  bool bass_limiter_enabled_{false};
+  float bass_limiter_frequency_hz_{120.0f};
+  float bass_limiter_threshold_db_{-6.0f};
+  float bass_limiter_release_ms_{200.0f};
   bool limiter_enabled_{false};
   float limiter_threshold_db_{-1.0f};
   float limiter_release_ms_{100.0f};

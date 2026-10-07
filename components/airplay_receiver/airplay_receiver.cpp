@@ -54,6 +54,8 @@ void AirPlayReceiver::setup() {
   audio_dsp_set_stereo_width(this->width_, this->width_frequency_hz_);
   audio_dsp_set_crosstalk(this->crosstalk_amount_, this->crosstalk_delay_us_, this->crosstalk_low_hz_,
                           this->crosstalk_high_hz_);
+  audio_dsp_set_bass_limiter(this->bass_limiter_enabled_, this->bass_limiter_frequency_hz_,
+                             this->bass_limiter_threshold_db_, this->bass_limiter_release_ms_);
   audio_dsp_set_limiter(this->limiter_enabled_, this->limiter_threshold_db_, this->limiter_release_ms_);
   if (!this->dsp_filters_.empty()) {
     audio_dsp_set_filters(this->dsp_filters_.data(), this->dsp_filters_.size());
@@ -234,6 +236,19 @@ void AirPlayReceiver::set_dsp_crosstalk_amount(float amount) {
 
 void AirPlayReceiver::set_dsp_crosstalk_delay(float delay_us) {
   this->set_dsp_crosstalk(this->crosstalk_amount_, delay_us, this->crosstalk_low_hz_, this->crosstalk_high_hz_);
+}
+
+void AirPlayReceiver::set_dsp_bass_limiter(bool enabled, float frequency_hz, float threshold_db, float release_ms) {
+  this->bass_limiter_enabled_ = enabled;
+  this->bass_limiter_frequency_hz_ = frequency_hz;
+  this->bass_limiter_threshold_db_ = threshold_db;
+  this->bass_limiter_release_ms_ = release_ms;
+  audio_dsp_set_bass_limiter(enabled, frequency_hz, threshold_db, release_ms);
+}
+
+void AirPlayReceiver::set_dsp_bass_limiter_threshold(float threshold_db) {
+  this->set_dsp_bass_limiter(this->bass_limiter_enabled_, this->bass_limiter_frequency_hz_, threshold_db,
+                             this->bass_limiter_release_ms_);
 }
 
 void AirPlayReceiver::set_dsp_limiter(bool enabled, float threshold_db, float release_ms) {

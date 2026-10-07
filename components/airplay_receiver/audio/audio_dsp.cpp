@@ -1,6 +1,6 @@
 // airplay_receiver output DSP -- RBJ biquad cascade plus the dynamic stages
-// (loudness, harmonic bass, stereo width, crosstalk cancellation, look-ahead
-// limiter) on the playout
+// (loudness, harmonic bass, stereo width, crosstalk cancellation, bass and
+// full-band look-ahead limiters) on the playout
 // path. See audio_dsp.h for the threading contract; it is the load-bearing
 // part of this file.
 
@@ -126,7 +126,14 @@ struct CoeffBank {
   uint32_t crosstalk_delay_whole = 1;  // integer part of the delay, samples
   float crosstalk_delay_fraction = 0.0f;
 
+  bool bass_limiter_on = false;
+  Biquad crossover_low_pass;   // each run twice: Linkwitz-Riley 4th order
+  Biquad crossover_high_pass;
+  float bass_limiter_threshold = 0.0f;  // sample units
+  float bass_limiter_release = 0.0f;
+
   bool limiter_on = false;
+  /// Shared by both limiters; designed whether or not either is on.
   uint32_t limiter_lookahead = 0;
   float limiter_inv_lookahead = 0.0f;
   float limiter_threshold = 0.0f;  // sample units
@@ -199,6 +206,17 @@ struct LimiterState {
   float released = 1.0f;
 };
 LimiterState g_limiter;
+LimiterState g_bass_limiter;
+
+/// Bass-limiter band split, per channel, and the delay that keeps the highs
+/// aligned with the limited (delayed) lows.
+struct CrossoverState {
+  BiquadState low_pass[2][CHANNELS];
+  BiquadState high_pass[2][CHANNELS];
+  float high_delay[LIMITER_MAX_LOOKAHEAD][CHANNELS];
+  uint32_t high_delay_pos = 0;
+};
+CrossoverState g_crossover;
 
 // Previous block's stage switches, to clear a stage's state as it comes on.
 bool g_was_loudness_on = false;
@@ -210,6 +228,7 @@ std::atomic<uint32_t> g_peak_samples{0};
 /// Lowest limiter gain since the last take, as gain * LIMITER_GAIN_SCALE.
 constexpr float LIMITER_GAIN_SCALE = 1000000.0f;
 std::atomic<uint32_t> g_limiter_min_gain{(uint32_t) LIMITER_GAIN_SCALE};
+std::atomic<uint32_t> g_bass_limiter_min_gain{(uint32_t) LIMITER_GAIN_SCALE};
 
 // ---- Configuration in human units. Writer side, under g_writer_mutex. ----
 
@@ -233,6 +252,11 @@ float g_crosstalk_amount = 0.0f;
 float g_crosstalk_delay_us = 60.0f;
 float g_crosstalk_low_hz = 250.0f;
 float g_crosstalk_high_hz = 5000.0f;
+
+bool g_bass_limiter_enabled = false;
+float g_bass_limiter_frequency_hz = 120.0f;
+float g_bass_limiter_threshold_db = -6.0f;
+float g_bass_limiter_release_ms = 200.0f;
 
 bool g_limiter_enabled = false;
 float g_limiter_threshold_db = -1.0f;
@@ -417,6 +441,19 @@ void design_crosstalk(CoeffBank &bank) {
   bank.crosstalk_delay_fraction = delay_samples - (float) bank.crosstalk_delay_whole;
 }
 
+float threshold_samples(float threshold_db) {
+  return fminf(powf(10.0f, threshold_db / 20.0f) * PCM_FULL_SCALE, PCM_MAX);
+}
+
+void design_bass_limiter(CoeffBank &bank) {
+  bank.bass_limiter_on =
+      g_bass_limiter_enabled &&
+      design_section(AIRPLAY_DSP_LOW_PASS, g_bass_limiter_frequency_hz, DEFAULT_Q, 0.0f, &bank.crossover_low_pass) &&
+      design_section(AIRPLAY_DSP_HIGH_PASS, g_bass_limiter_frequency_hz, DEFAULT_Q, 0.0f, &bank.crossover_high_pass);
+  bank.bass_limiter_threshold = threshold_samples(g_bass_limiter_threshold_db);
+  bank.bass_limiter_release = time_constant_coefficient(g_bass_limiter_release_ms);
+}
+
 void design_limiter(CoeffBank &bank) {
   bank.limiter_on = g_limiter_enabled;
   uint32_t lookahead = (uint32_t) lroundf(LIMITER_LOOKAHEAD_MS / MS_PER_S * (float) g_sample_rate);
@@ -427,7 +464,7 @@ void design_limiter(CoeffBank &bank) {
   }
   bank.limiter_lookahead = lookahead;
   bank.limiter_inv_lookahead = 1.0f / (float) lookahead;
-  bank.limiter_threshold = fminf(powf(10.0f, g_limiter_threshold_db / 20.0f) * PCM_FULL_SCALE, PCM_MAX);
+  bank.limiter_threshold = threshold_samples(g_limiter_threshold_db);
   bank.limiter_release = time_constant_coefficient(g_limiter_release_ms);
 }
 
@@ -461,8 +498,11 @@ void rebuild_and_publish() {
   design_width(bank);
   design_crosstalk(bank);
   design_limiter(bank);
+  design_bass_limiter(bank);
 
-  g_latency_frames.store(bank.limiter_on ? bank.limiter_lookahead - 1 : 0, std::memory_order_relaxed);
+  const uint32_t limiter_delay = bank.limiter_lookahead - 1;
+  g_latency_frames.store((bank.limiter_on ? limiter_delay : 0) + (bank.bass_limiter_on ? limiter_delay : 0),
+                         std::memory_order_relaxed);
   // Release: every write above must be visible before the audio task, running
   // on the other core, can observe the new index.
   g_active_bank.store(target, std::memory_order_release);
@@ -482,8 +522,7 @@ float loudness_target_db(int32_t volume_q15) {
 
 // ---- Audio task ------------------------------------------------------------
 
-void limiter_reset(uint32_t lookahead) {
-  LimiterState &s = g_limiter;
+void limiter_reset(LimiterState &s, uint32_t lookahead) {
   s.lookahead = lookahead;
   memset(s.delay, 0, sizeof(s.delay));
   s.delay_pos = 0;
@@ -510,7 +549,9 @@ void clear_all_state() {
   g_enhancer_state = EnhancerState{};
   g_width_state = BiquadState{};
   g_crosstalk_state = CrosstalkState{};
-  limiter_reset(g_limiter.lookahead);
+  limiter_reset(g_limiter, g_limiter.lookahead);
+  limiter_reset(g_bass_limiter, g_bass_limiter.lookahead);
+  g_crossover = CrossoverState{};
 }
 
 size_t g_state_count = 0;
@@ -544,7 +585,13 @@ void sync_state_to(const CoeffBank &bank) {
   if (!bank.limiter_on) {
     g_limiter.lookahead = 0;  // a later enable starts clean
   } else if (bank.limiter_lookahead != g_limiter.lookahead) {
-    limiter_reset(bank.limiter_lookahead);
+    limiter_reset(g_limiter, bank.limiter_lookahead);
+  }
+  if (!bank.bass_limiter_on) {
+    g_bass_limiter.lookahead = 0;
+  } else if (bank.limiter_lookahead != g_bass_limiter.lookahead) {
+    limiter_reset(g_bass_limiter, bank.limiter_lookahead);
+    g_crossover = CrossoverState{};
   }
 }
 
@@ -601,12 +648,12 @@ inline void crosstalk_run(const CoeffBank &bank, float *left, float *right) {
 }
 
 /// See LimiterState for the algorithm. Returns the gain applied.
-inline float limiter_run(const CoeffBank &bank, float *left, float *right) {
-  LimiterState &s = g_limiter;
+inline float limiter_run(LimiterState &s, float threshold, float release, float inv_lookahead, float *left,
+                         float *right) {
   const uint32_t lookahead = s.lookahead;
 
   const float peak = fmaxf(fabsf(*left), fabsf(*right));
-  const float required = peak > bank.limiter_threshold ? bank.limiter_threshold / peak : 1.0f;
+  const float required = peak > threshold ? threshold / peak : 1.0f;
 
   while (s.deque_size > 0) {
     const uint32_t back = (s.deque_head + s.deque_size - 1) % LIMITER_MAX_LOOKAHEAD;
@@ -626,7 +673,7 @@ inline float limiter_run(const CoeffBank &bank, float *left, float *right) {
   }
   const float held = s.deque_value[s.deque_head];
 
-  s.released = held < s.released ? held : held + (s.released - held) * bank.limiter_release;
+  s.released = held < s.released ? held : held + (s.released - held) * release;
 
   s.box_sum += s.released - s.box[s.box_pos];
   s.box[s.box_pos] = s.released;
@@ -639,7 +686,7 @@ inline float limiter_run(const CoeffBank &bank, float *left, float *right) {
     }
     s.box_sum = sum;
   }
-  const float gain = s.box_sum * bank.limiter_inv_lookahead;
+  const float gain = s.box_sum * inv_lookahead;
 
   float *delayed = s.delay[s.delay_pos];
   const float out_left = delayed[0] * gain;
@@ -652,6 +699,34 @@ inline float limiter_run(const CoeffBank &bank, float *left, float *right) {
   s.frame++;
   *left = out_left;
   *right = out_right;
+  return gain;
+}
+
+/**
+ * Split at the crossover (Linkwitz-Riley: the two bands sum back flat), limit
+ * the lows on their own, delay the highs by the same look-ahead, and recombine.
+ * Bass peaks then no longer pull the whole mix down. Returns the bass gain.
+ */
+inline float bass_limiter_run(const CoeffBank &bank, float *left, float *right) {
+  CrossoverState &x = g_crossover;
+  float low[CHANNELS] = {*left, *right};
+  float high[CHANNELS] = {*left, *right};
+  for (size_t ch = 0; ch < CHANNELS; ch++) {
+    for (size_t stage = 0; stage < 2; stage++) {
+      low[ch] = x.low_pass[stage][ch].run(bank.crossover_low_pass, low[ch]);
+      high[ch] = x.high_pass[stage][ch].run(bank.crossover_high_pass, high[ch]);
+    }
+  }
+  const float gain = limiter_run(g_bass_limiter, bank.bass_limiter_threshold, bank.bass_limiter_release,
+                                 bank.limiter_inv_lookahead, &low[0], &low[1]);
+  float *delayed = x.high_delay[x.high_delay_pos];
+  *left = low[0] + delayed[0];
+  *right = low[1] + delayed[1];
+  delayed[0] = high[0];
+  delayed[1] = high[1];
+  if (++x.high_delay_pos == g_bass_limiter.lookahead - 1) {
+    x.high_delay_pos = 0;
+  }
   return gain;
 }
 
@@ -668,7 +743,7 @@ inline int16_t to_pcm(float x) {
 }
 
 bool bank_is_active(const CoeffBank &bank) {
-  return bank.count > 0 || bank.preamp_lin != 1.0f || bank.loudness_on || bank.enhancer_on || bank.width_on || bank.crosstalk_on ||
+  return bank.count > 0 || bank.preamp_lin != 1.0f || bank.loudness_on || bank.enhancer_on || bank.width_on || bank.crosstalk_on || bank.bass_limiter_on ||
          bank.limiter_on;
 }
 
@@ -796,6 +871,15 @@ void audio_dsp_set_crosstalk(float amount, float delay_us, float low_hz, float h
   rebuild_and_publish();
 }
 
+void audio_dsp_set_bass_limiter(bool enabled, float frequency_hz, float threshold_db, float release_ms) {
+  std::lock_guard<std::mutex> lock(g_writer_mutex);
+  g_bass_limiter_enabled = enabled;
+  g_bass_limiter_frequency_hz = frequency_hz;
+  g_bass_limiter_threshold_db = threshold_db < 0.0f ? threshold_db : 0.0f;
+  g_bass_limiter_release_ms = release_ms;
+  rebuild_and_publish();
+}
+
 void audio_dsp_set_limiter(bool enabled, float threshold_db, float release_ms) {
   std::lock_guard<std::mutex> lock(g_writer_mutex);
   g_limiter_enabled = enabled;
@@ -808,11 +892,17 @@ uint32_t audio_dsp_get_latency_frames(void) {
   return g_enabled.load(std::memory_order_relaxed) ? g_latency_frames.load(std::memory_order_relaxed) : 0;
 }
 
-float audio_dsp_take_limiter_reduction_db(void) {
-  const uint32_t scaled = g_limiter_min_gain.exchange((uint32_t) LIMITER_GAIN_SCALE, std::memory_order_relaxed);
+namespace {
+float take_reduction_db(std::atomic<uint32_t> &min_gain) {
+  const uint32_t scaled = min_gain.exchange((uint32_t) LIMITER_GAIN_SCALE, std::memory_order_relaxed);
   const float gain = (float) scaled / LIMITER_GAIN_SCALE;
   return gain > 0.0f ? 20.0f * log10f(gain) : -120.0f;
 }
+}  // namespace
+
+float audio_dsp_take_limiter_reduction_db(void) { return take_reduction_db(g_limiter_min_gain); }
+
+float audio_dsp_take_bass_limiter_reduction_db(void) { return take_reduction_db(g_bass_limiter_min_gain); }
 
 void audio_dsp_set_enabled(bool enabled) {
   if (g_enabled.exchange(enabled, std::memory_order_relaxed) != enabled && enabled) {
@@ -852,6 +942,7 @@ void audio_dsp_process(int16_t *buf, size_t frames) {
   const float preamp = bank.preamp_lin;
   float peak = 0.0f;
   float min_gain = 1.0f;
+  float min_bass_gain = 1.0f;
   for (size_t i = 0; i < frames; i++) {
     float left = (float) buf[i * CHANNELS] * preamp;
     float right = (float) buf[i * CHANNELS + 1] * preamp;
@@ -881,8 +972,16 @@ void audio_dsp_process(int16_t *buf, size_t frames) {
       crosstalk_run(bank, &left, &right);
     }
 
+    if (bank.bass_limiter_on) {
+      const float gain = bass_limiter_run(bank, &left, &right);
+      if (gain < min_bass_gain) {
+        min_bass_gain = gain;
+      }
+    }
+
     if (bank.limiter_on) {
-      const float gain = limiter_run(bank, &left, &right);
+      const float gain = limiter_run(g_limiter, bank.limiter_threshold, bank.limiter_release,
+                                     bank.limiter_inv_lookahead, &left, &right);
       if (gain < min_gain) {
         min_gain = gain;
       }
@@ -896,6 +995,7 @@ void audio_dsp_process(int16_t *buf, size_t frames) {
   // Held in raw sample units; audio_dsp_take_peak() scales to full scale.
   store_max(g_peak_samples, (uint32_t) peak);
   store_min(g_limiter_min_gain, (uint32_t) (min_gain * LIMITER_GAIN_SCALE));
+  store_min(g_bass_limiter_min_gain, (uint32_t) (min_bass_gain * LIMITER_GAIN_SCALE));
 }
 
 float audio_dsp_take_peak(void) {
@@ -933,6 +1033,10 @@ void audio_dsp_log_cascade(const char *tag, int level) {
   if (bank.crosstalk_on) {
     esp_log_printf_(level, tag, __LINE__, "    crosstalk cancel %.2f, %.0f us, %.0f-%.0f Hz", bank.crosstalk_amount,
                     g_crosstalk_delay_us, g_crosstalk_low_hz, g_crosstalk_high_hz);
+  }
+  if (bank.bass_limiter_on) {
+    esp_log_printf_(level, tag, __LINE__, "    bass limiter below %.0f Hz, %.1f dBFS, release %.0f ms",
+                    g_bass_limiter_frequency_hz, g_bass_limiter_threshold_db, g_bass_limiter_release_ms);
   }
   if (bank.limiter_on) {
     esp_log_printf_(level, tag, __LINE__, "    limiter %.1f dBFS, release %.0f ms, look-ahead %u frames",

@@ -59,6 +59,7 @@ _CONFIG_DSP_BASS_ENHANCER = "bass_enhancer"
 _CONFIG_DSP_STEREO_WIDTH = "stereo_width"
 _CONFIG_DSP_LIMITER = "limiter"
 _CONFIG_DSP_CROSSTALK = "crosstalk_cancel"
+_CONFIG_DSP_BASS_LIMITER = "bass_limiter"
 _CONFIG_DELAY = "delay"
 _CONFIG_LOW_FREQUENCY = "low_frequency"
 _CONFIG_HIGH_FREQUENCY = "high_frequency"
@@ -173,6 +174,22 @@ _DSP_CROSSTALK_SCHEMA = cv.Schema(
     }
 )
 
+# Limits the band below `frequency` on its own, so bass peaks stop ducking the
+# whole mix. Adds another 1.5 ms of delay, also accounted for.
+_DSP_BASS_LIMITER_SCHEMA = cv.Schema(
+    {
+        cv.Optional(_CONFIG_DSP_ENABLED, default=True): cv.boolean,
+        cv.Optional(_CONFIG_FILTER_FREQUENCY, default="120Hz"): cv.All(
+            cv.frequency, cv.float_range(min=40.0, max=400.0)
+        ),
+        cv.Optional(_CONFIG_THRESHOLD, default="-6dB"): cv.All(cv.decibel, cv.float_range(min=-30.0, max=0.0)),
+        cv.Optional(_CONFIG_RELEASE, default="200ms"): cv.All(
+            cv.positive_time_period_milliseconds,
+            cv.Range(min=cv.TimePeriod(milliseconds=20), max=cv.TimePeriod(milliseconds=2000)),
+        ),
+    }
+)
+
 # Look-ahead peak limiter, last in the chain. Adds 1.5 ms of output delay,
 # which the playout clock accounts for.
 _DSP_LIMITER_SCHEMA = cv.Schema(
@@ -194,6 +211,7 @@ _DSP_SCHEMA = cv.Schema(
         cv.Optional(_CONFIG_DSP_BASS_ENHANCER): _DSP_BASS_ENHANCER_SCHEMA,
         cv.Optional(_CONFIG_DSP_STEREO_WIDTH): _DSP_STEREO_WIDTH_SCHEMA,
         cv.Optional(_CONFIG_DSP_CROSSTALK): _DSP_CROSSTALK_SCHEMA,
+        cv.Optional(_CONFIG_DSP_BASS_LIMITER): _DSP_BASS_LIMITER_SCHEMA,
         cv.Optional(_CONFIG_DSP_LIMITER): _DSP_LIMITER_SCHEMA,
         cv.Optional(_CONFIG_DSP_ENABLED, default=True): cv.boolean,
         # Negative preamp buys back the headroom a positive shelf spends. The
@@ -351,6 +369,15 @@ def _add_dsp(var, dsp_config) -> None:
                 float(crosstalk[_CONFIG_DELAY].total_microseconds),
                 crosstalk[_CONFIG_LOW_FREQUENCY],
                 crosstalk[_CONFIG_HIGH_FREQUENCY],
+            )
+        )
+    if bass_limiter := dsp_config.get(_CONFIG_DSP_BASS_LIMITER):
+        cg.add(
+            var.set_dsp_bass_limiter(
+                bass_limiter[_CONFIG_DSP_ENABLED],
+                bass_limiter[_CONFIG_FILTER_FREQUENCY],
+                bass_limiter[_CONFIG_THRESHOLD],
+                float(bass_limiter[_CONFIG_RELEASE].total_milliseconds),
             )
         )
     if limiter := dsp_config.get(_CONFIG_DSP_LIMITER):
