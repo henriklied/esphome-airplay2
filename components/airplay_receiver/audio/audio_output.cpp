@@ -114,6 +114,14 @@ static int32_t g_volume_q15 = 32768;  // unity
 // outright instead of sliding up to it from the previous session's gain.
 static int32_t g_volume_ramp_q15 = -1;
 
+// DSP cost accounting (audio_output_take_dsp_load). Written by the playback
+// task; read and reset by the 1 Hz telemetry, which runs on the same task.
+static constexpr uint64_t PERMILLE = 1000ULL;
+static constexpr uint64_t US_PER_S = 1000000ULL;
+static uint64_t g_dsp_busy_us = 0;
+static uint64_t g_dsp_frames = 0;
+static uint32_t g_dsp_peak_permille = 0;
+
 // Wall-clock of the last frame of real audio handed to I2S, and how long after
 // it the DMA ring can still be holding some. Used to decide whether a flush has
 // anything to purge (see the flush branch in playback_task).
@@ -443,7 +451,16 @@ static void playback_task(void *arg) {
       // Last stage before the DAC, so the filters see exactly what is played --
       // and running after the volume attenuation leaves headroom for a shelf
       // with positive gain instead of clipping it at high volume.
+      const int64_t dsp_start_us = esp_timer_get_time();
       audio_dsp_process(play_buf, play_frames);
+      const uint64_t dsp_busy_us = (uint64_t) (esp_timer_get_time() - dsp_start_us);
+      g_dsp_busy_us += dsp_busy_us;
+      g_dsp_frames += play_frames;
+      const uint32_t block_permille =
+          (uint32_t) (dsp_busy_us * g_output_rate * PERMILLE / ((uint64_t) play_frames * US_PER_S));
+      if (block_permille > g_dsp_peak_permille) {
+        g_dsp_peak_permille = block_permille;
+      }
       if (i2s_channel_write(g_tx_handle, play_buf, play_frames * 2 * sizeof(int16_t), &written,
                             portMAX_DELAY) == ESP_OK) {
         g_submitted_frames += (uint32_t) (written / stride);
@@ -746,6 +763,15 @@ int64_t audio_output_get_next_playout_time_ns(int64_t now_us) {
   }
   return (sampled_us + (int64_t) pipeline_us + OUTPUT_PIPELINE_LATENCY_US) *
          1000LL;
+}
+
+void audio_output_take_dsp_load(uint32_t *avg_permille, uint32_t *peak_permille) {
+  const uint64_t audio_us = g_output_rate > 0 ? g_dsp_frames * US_PER_S / g_output_rate : 0;
+  *avg_permille = audio_us > 0 ? (uint32_t) (g_dsp_busy_us * PERMILLE / audio_us) : 0;
+  *peak_permille = g_dsp_peak_permille;
+  g_dsp_busy_us = 0;
+  g_dsp_frames = 0;
+  g_dsp_peak_permille = 0;
 }
 
 uint32_t audio_output_get_underruns(void) {

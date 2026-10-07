@@ -352,6 +352,16 @@ bool audio_engine_v2_push_pcm(audio_engine_v2_t *engine, uint32_t epoch,
   return true;
 }
 
+void audio_engine_v2_abort_push_waits(audio_engine_v2_t *engine) {
+  if (!engine || !engine->initialized) {
+    return;
+  }
+  (void)__atomic_add_fetch(&engine->push_abort_generation, 1U, __ATOMIC_RELEASE);
+  if (engine->timeline.space_available) {
+    xSemaphoreGive(engine->timeline.space_available);  // wake a blocked waiter
+  }
+}
+
 bool audio_engine_v2_push_pcm_wait(audio_engine_v2_t *engine, uint32_t epoch,
                                    uint32_t first_rtp, const int16_t *pcm,
                                    size_t samples, uint8_t channels,
@@ -362,8 +372,12 @@ bool audio_engine_v2_push_pcm_wait(audio_engine_v2_t *engine, uint32_t epoch,
 
   const int64_t deadline_us =
       esp_timer_get_time() + (int64_t)timeout_ms * 1000LL;
+  const uint32_t abort_generation =
+      __atomic_load_n(&engine->push_abort_generation, __ATOMIC_ACQUIRE);
 
-  while (audio_epoch_matches(&engine->epoch, epoch)) {
+  while (audio_epoch_matches(&engine->epoch, epoch) &&
+         __atomic_load_n(&engine->push_abort_generation, __ATOMIC_ACQUIRE) ==
+             abort_generation) {
     if (!audio_timeline_phase_blocked(&engine->timeline, epoch, first_rtp) &&
         audio_timeline_free_slots(&engine->timeline) > 0U) {
       return audio_engine_v2_push_pcm(engine, epoch, first_rtp, pcm, samples,
@@ -536,13 +550,17 @@ size_t audio_engine_v2_render(audio_engine_v2_t *engine,
         __atomic_load_n(&engine->diag_pcm_inserted, __ATOMIC_RELAXED);
     const uint32_t new_pcm_inserted = pcm_inserted_now - engine->pcm_inserted_logged;
     engine->pcm_inserted_logged = pcm_inserted_now;
+    uint32_t dsp_avg_permille = 0;
+    uint32_t dsp_peak_permille = 0;
+    audio_output_take_dsp_load(&dsp_avg_permille, &dsp_peak_permille);
     ESP_LOGI(TAG,
              "playout: raw=%s%" PRIu32 ".%03" PRIu32 " ms span=%" PRId32
              " us filt=%s%" PRIu32 ".%03" PRIu32 " ms (%" PRId32
              " smp) drift=%" PRId32 " ppm trims=%" PRIu32 "/s (%" PRIu32
              ") buffered=%u concealed=%" PRIu64 " holes=%" PRIu64 " (+%" PRIu64
              ") under=%" PRIu32 " dfail=%" PRIu32 " qdrop=%" PRIu32
-             " edrop=%" PRIu32 " ins=%" PRIu32,
+             " edrop=%" PRIu32 " ins=%" PRIu32 " dsp=%" PRIu32 ".%" PRIu32
+             "%% pk=%" PRIu32 ".%" PRIu32 "%%",
              raw_us < 0 ? "-" : "", raw_abs_us / 1000U, raw_abs_us % 1000U,
              span_us, filtered_us < 0 ? "-" : "", filtered_abs_us / 1000U,
              filtered_abs_us % 1000U, filtered_samples,
@@ -551,7 +569,8 @@ size_t audio_engine_v2_render(audio_engine_v2_t *engine,
              (unsigned)audio_timeline_count(&engine->timeline),
              engine->concealed_samples, engine->conceal_events, new_conceals,
              new_underruns, new_decode_fail, new_queue_drops, new_epoch_drops,
-             new_pcm_inserted);
+             new_pcm_inserted, dsp_avg_permille / 10U, dsp_avg_permille % 10U,
+             dsp_peak_permille / 10U, dsp_peak_permille % 10U);
   } else if (engine->playing &&
              engine->scheduler.state != AUDIO_SCHED_PLAYING &&
              now_us - engine->last_status_log_us >= 1000000LL) {

@@ -60,6 +60,10 @@ _CONFIG_DSP_STEREO_WIDTH = "stereo_width"
 _CONFIG_DSP_LIMITER = "limiter"
 _CONFIG_DSP_CROSSTALK = "crosstalk_cancel"
 _CONFIG_DSP_BASS_LIMITER = "bass_limiter"
+_CONFIG_DSP_AMBIENCE = "ambience"
+_CONFIG_CENTRE_LOCK = "centre_lock"
+_CONFIG_DECAY = "decay"
+_CONFIG_DAMPING = "damping"
 _CONFIG_DELAY = "delay"
 _CONFIG_LOW_FREQUENCY = "low_frequency"
 _CONFIG_HIGH_FREQUENCY = "high_frequency"
@@ -157,6 +161,21 @@ _DSP_STEREO_WIDTH_SCHEMA = cv.Schema(
     {
         cv.Required(_CONFIG_WIDTH): cv.float_range(min=0.0, max=3.0),
         cv.Optional(_CONFIG_FILTER_FREQUENCY, default="300Hz"): cv.frequency,
+        # 0 widens the plain side signal; 1 widens only what is orthogonal to
+        # the dominant source, so vocals keep their place and level.
+        cv.Optional(_CONFIG_CENTRE_LOCK, default=0.0): cv.float_range(min=0.0, max=1.0),
+    }
+)
+
+# Room-fill reverb fed by the ambient part of the mix above the width corner.
+_DSP_AMBIENCE_SCHEMA = cv.Schema(
+    {
+        cv.Required(_CONFIG_AMOUNT): cv.float_range(min=0.0, max=1.0),
+        cv.Optional(_CONFIG_DECAY, default="400ms"): cv.All(
+            cv.positive_time_period_milliseconds,
+            cv.Range(min=cv.TimePeriod(milliseconds=100), max=cv.TimePeriod(milliseconds=3000)),
+        ),
+        cv.Optional(_CONFIG_DAMPING, default="5000Hz"): cv.All(cv.frequency, cv.float_range(min=500.0, max=15000.0)),
     }
 )
 
@@ -210,6 +229,7 @@ _DSP_SCHEMA = cv.Schema(
         cv.Optional(_CONFIG_DSP_LOUDNESS): _DSP_LOUDNESS_SCHEMA,
         cv.Optional(_CONFIG_DSP_BASS_ENHANCER): _DSP_BASS_ENHANCER_SCHEMA,
         cv.Optional(_CONFIG_DSP_STEREO_WIDTH): _DSP_STEREO_WIDTH_SCHEMA,
+        cv.Optional(_CONFIG_DSP_AMBIENCE): _DSP_AMBIENCE_SCHEMA,
         cv.Optional(_CONFIG_DSP_CROSSTALK): _DSP_CROSSTALK_SCHEMA,
         cv.Optional(_CONFIG_DSP_BASS_LIMITER): _DSP_BASS_LIMITER_SCHEMA,
         cv.Optional(_CONFIG_DSP_LIMITER): _DSP_LIMITER_SCHEMA,
@@ -362,6 +382,15 @@ def _add_dsp(var, dsp_config) -> None:
         cg.add(var.set_dsp_bass_enhancer(enhancer[_CONFIG_FILTER_FREQUENCY], enhancer[_CONFIG_AMOUNT]))
     if width := dsp_config.get(_CONFIG_DSP_STEREO_WIDTH):
         cg.add(var.set_dsp_stereo_width(width[_CONFIG_WIDTH], width[_CONFIG_FILTER_FREQUENCY]))
+        cg.add(var.set_dsp_centre_lock(width[_CONFIG_CENTRE_LOCK]))
+    if ambience := dsp_config.get(_CONFIG_DSP_AMBIENCE):
+        cg.add(
+            var.set_dsp_ambience(
+                ambience[_CONFIG_AMOUNT],
+                float(ambience[_CONFIG_DECAY].total_milliseconds),
+                ambience[_CONFIG_DAMPING],
+            )
+        )
     if crosstalk := dsp_config.get(_CONFIG_DSP_CROSSTALK):
         cg.add(
             var.set_dsp_crosstalk(

@@ -1,5 +1,6 @@
 // airplay_receiver output DSP -- RBJ biquad cascade plus the dynamic stages
-// (loudness, harmonic bass, stereo width, crosstalk cancellation, bass and
+// (loudness, harmonic bass, centre-locked stereo width, ambience, crosstalk
+// cancellation, bass and
 // full-band look-ahead limiters) on the playout
 // path. See audio_dsp.h for the threading contract; it is the load-bearing
 // part of this file.
@@ -10,6 +11,7 @@
 
 #include <atomic>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 
@@ -67,6 +69,24 @@ constexpr float CROSSTALK_MIN_DELAY_SAMPLES = 1.0f;
 constexpr float CROSSTALK_MAX_AMOUNT = 0.95f;
 constexpr float US_PER_S = 1000000.0f;
 
+/// Width/ambience analysis: covariance smoothing time. Long enough to see a
+/// source's direction across a note, short enough to follow a mix change.
+constexpr float SPATIAL_COVARIANCE_MS = 30.0f;
+/// Below this smoothed energy (sample units squared) the direction estimate is
+/// noise; the previous one is kept.
+constexpr float SPATIAL_ENERGY_FLOOR = 1.0f;
+/// The direction of a centred source, and of the M/S width it reduces to.
+constexpr float CENTRE_ANGLE = PI_F * 0.25f;
+
+/// Ambience reverb: a 4-line feedback delay network. Mutually prime-ish
+/// lengths spread the echo density; all are past ~30 ms so the reverb reads
+/// as room, not as colouration of the direct sound.
+constexpr size_t AMBIENCE_LINES = 4;
+constexpr float AMBIENCE_LINE_MS[AMBIENCE_LINES] = {31.3f, 37.1f, 41.9f, 47.3f};
+/// Holds the longest line at 48 kHz with margin; higher rates clamp.
+constexpr uint32_t AMBIENCE_MAX_LINE = 2400;
+constexpr float AMBIENCE_DECAY_DB = 60.0f;
+
 /// Look-ahead long enough to ramp gain down over a full cycle of ~700 Hz, short
 /// enough to be irrelevant to AirPlay sync.
 constexpr float LIMITER_LOOKAHEAD_MS = 1.5f;
@@ -114,10 +134,23 @@ struct CoeffBank {
   float enhancer_amount = 0.0f;
   float enhancer_release = 0.0f;
 
+  /// Analysis/processing band for width and ambience: above this high-pass.
+  bool spatial_on = false;  // width_on || ambience_on
+  Biquad spatial_high_pass;
+  float spatial_smoothing = 0.0f;  // per-sample covariance coefficient
   bool width_on = false;
-  Biquad width_side_high_pass;
-  /// width - 1: the extra side signal added above the corner.
+  /// width - 1: the extra ambient component added above the corner.
   float width_extra = 0.0f;
+  /// 0: widen along the fixed side axis (plain M/S). 1: widen only what is
+  /// orthogonal to the dominant source, wherever it is panned.
+  float centre_lock = 0.0f;
+
+  bool ambience_on = false;
+  float *ambience_buffer = nullptr;  // AMBIENCE_LINES * AMBIENCE_MAX_LINE
+  uint32_t ambience_length[AMBIENCE_LINES] = {};
+  float ambience_feedback[AMBIENCE_LINES] = {};
+  float ambience_damping = 0.0f;  // one-pole low-pass coefficient in the loop
+  float ambience_wet = 0.0f;
 
   bool crosstalk_on = false;
   Biquad crosstalk_high_pass;
@@ -168,7 +201,25 @@ struct EnhancerState {
 };
 EnhancerState g_enhancer_state;
 
-BiquadState g_width_state;
+struct SpatialState {
+  BiquadState high_pass[CHANNELS];
+  float cov_ll = 0.0f;
+  float cov_rr = 0.0f;
+  float cov_lr = 0.0f;
+  float angle = CENTRE_ANGLE;  // dominant-source direction estimate
+  float dominance = 0.0f;      // how much one source dominates, 0..1
+  // Ambient axis at the end of the last block, for per-sample interpolation.
+  float width_axis[CHANNELS] = {0.70710678f, -0.70710678f};
+  float feed_axis[CHANNELS] = {0.70710678f, -0.70710678f};
+};
+SpatialState g_spatial;
+
+struct AmbienceState {
+  uint32_t pos[AMBIENCE_LINES] = {};
+  float damped[AMBIENCE_LINES] = {};
+  uint32_t length[AMBIENCE_LINES] = {};  // what the buffer was cleared for
+};
+AmbienceState g_ambience;
 
 /// Past crosstalk-stage outputs per channel, newest at `pos`, plus the band
 /// filter state on each feedback path.
@@ -221,7 +272,7 @@ CrossoverState g_crossover;
 // Previous block's stage switches, to clear a stage's state as it comes on.
 bool g_was_loudness_on = false;
 bool g_was_enhancer_on = false;
-bool g_was_width_on = false;
+bool g_was_spatial_on = false;
 bool g_was_crosstalk_on = false;
 
 std::atomic<uint32_t> g_peak_samples{0};
@@ -247,6 +298,12 @@ float g_enhancer_amount = 0.0f;
 
 float g_width = 1.0f;
 float g_width_frequency_hz = 300.0f;
+float g_centre_lock = 0.0f;
+
+float g_ambience_amount = 0.0f;
+float g_ambience_decay_ms = 400.0f;
+float g_ambience_damping_hz = 5000.0f;
+float *g_ambience_buffer = nullptr;  // allocated once on first enable, never freed
 
 float g_crosstalk_amount = 0.0f;
 float g_crosstalk_delay_us = 60.0f;
@@ -421,11 +478,32 @@ void design_enhancer(CoeffBank &bank) {
   bank.enhancer_release = time_constant_coefficient(ENHANCER_ENVELOPE_RELEASE_MS);
 }
 
-void design_width(CoeffBank &bank) {
-  bank.width_on = g_width != 1.0f &&
-                  design_section(AIRPLAY_DSP_HIGH_PASS, g_width_frequency_hz, DEFAULT_Q, 0.0f,
-                                 &bank.width_side_high_pass);
+void design_spatial(CoeffBank &bank) {
+  bank.width_on = g_width != 1.0f;
   bank.width_extra = g_width - 1.0f;
+  bank.centre_lock = g_centre_lock;
+
+  bank.ambience_on = g_ambience_amount > 0.0f && g_ambience_buffer != nullptr;
+  bank.ambience_buffer = g_ambience_buffer;
+  bank.ambience_wet = g_ambience_amount;
+  for (size_t i = 0; i < AMBIENCE_LINES; i++) {
+    uint32_t length = (uint32_t) lroundf(AMBIENCE_LINE_MS[i] / MS_PER_S * (float) g_sample_rate);
+    length = length < 2 ? 2 : (length > AMBIENCE_MAX_LINE ? AMBIENCE_MAX_LINE : length);
+    bank.ambience_length[i] = length;
+    // Per-pass gain that loses 60 dB over the decay time.
+    const float line_ms = (float) length / (float) g_sample_rate * MS_PER_S;
+    bank.ambience_feedback[i] = powf(10.0f, -AMBIENCE_DECAY_DB / 20.0f * line_ms / g_ambience_decay_ms);
+  }
+  bank.ambience_damping = 1.0f - expf(-2.0f * PI_F * g_ambience_damping_hz / (float) g_sample_rate);
+
+  bank.spatial_on = (bank.width_on || bank.ambience_on) &&
+                    design_section(AIRPLAY_DSP_HIGH_PASS, g_width_frequency_hz, DEFAULT_Q, 0.0f,
+                                   &bank.spatial_high_pass);
+  if (!bank.spatial_on) {
+    bank.width_on = false;
+    bank.ambience_on = false;
+  }
+  bank.spatial_smoothing = 1.0f - time_constant_coefficient(SPATIAL_COVARIANCE_MS);
 }
 
 void design_crosstalk(CoeffBank &bank) {
@@ -495,7 +573,7 @@ void rebuild_and_publish() {
   bank.preamp_lin = powf(10.0f, g_preamp_db / 20.0f);
   design_loudness(bank);
   design_enhancer(bank);
-  design_width(bank);
+  design_spatial(bank);
   design_crosstalk(bank);
   design_limiter(bank);
   design_bass_limiter(bank);
@@ -547,7 +625,8 @@ void clear_all_state() {
     channel = BiquadState{};
   }
   g_enhancer_state = EnhancerState{};
-  g_width_state = BiquadState{};
+  g_spatial = SpatialState{};
+  g_ambience.length[0] = 0;  // forces sync_state_to() to clear the reverb
   g_crosstalk_state = CrosstalkState{};
   limiter_reset(g_limiter, g_limiter.lookahead);
   limiter_reset(g_bass_limiter, g_bass_limiter.lookahead);
@@ -572,15 +651,23 @@ void sync_state_to(const CoeffBank &bank) {
   if (bank.enhancer_on && !g_was_enhancer_on) {
     g_enhancer_state = EnhancerState{};
   }
-  if (bank.width_on && !g_was_width_on) {
-    g_width_state = BiquadState{};
+  if (bank.spatial_on && !g_was_spatial_on) {
+    g_spatial = SpatialState{};
+  }
+  if (bank.ambience_on &&
+      memcmp(g_ambience.length, bank.ambience_length, sizeof(g_ambience.length)) != 0) {
+    // New lengths (first enable, rate change, or reset): stale echoes at the
+    // wrong spacing would ring on, so start from silence.
+    memset(bank.ambience_buffer, 0, sizeof(float) * AMBIENCE_LINES * AMBIENCE_MAX_LINE);
+    g_ambience = AmbienceState{};
+    memcpy(g_ambience.length, bank.ambience_length, sizeof(g_ambience.length));
   }
   g_was_loudness_on = bank.loudness_on;
   g_was_enhancer_on = bank.enhancer_on;
   if (bank.crosstalk_on && !g_was_crosstalk_on) {
     g_crosstalk_state = CrosstalkState{};
   }
-  g_was_width_on = bank.width_on;
+  g_was_spatial_on = bank.spatial_on;
   g_was_crosstalk_on = bank.crosstalk_on;
   if (!bank.limiter_on) {
     g_limiter.lookahead = 0;  // a later enable starts clean
@@ -621,6 +708,80 @@ inline float enhancer_run(const CoeffBank &bank, float mono) {
   generated = e.output_high_pass.run(bank.enhancer_output_high_pass, generated);
   generated = e.output_low_pass.run(bank.enhancer_output_low_pass, generated);
   return generated * bank.enhancer_amount;
+}
+
+/// Unit vector orthogonal to a source at `angle`: the ambient axis.
+inline void ambient_axis(float angle, float axis[CHANNELS]) {
+  axis[0] = -sinf(angle);
+  axis[1] = cosf(angle);
+}
+
+/**
+ * Once per block: turn the smoothed covariance into the dominant-source angle
+ * (principal axis of the 2x2 covariance) and the two ambient axes for this
+ * block -- the estimated one, which feeds the ambience, and the one width uses,
+ * blended from the fixed side axis toward it by `centre_lock`.
+ */
+void spatial_update_axes(const CoeffBank &bank, float width_axis[CHANNELS], float feed_axis[CHANNELS]) {
+  SpatialState &sp = g_spatial;
+  const float energy = sp.cov_ll + sp.cov_rr;
+  if (energy > SPATIAL_ENERGY_FLOOR) {
+    sp.angle = 0.5f * atan2f(2.0f * sp.cov_lr, sp.cov_ll - sp.cov_rr);
+    // Eigenvalue spread over the sum: 1 for one source, 0 for diffuse sound
+    // whose principal axis is meaningless. Steering scales with it, so diffuse
+    // sound falls back to the plain side axis instead of a wandering one.
+    const float difference = sp.cov_ll - sp.cov_rr;
+    sp.dominance = fminf(sqrtf(difference * difference + 4.0f * sp.cov_lr * sp.cov_lr) / energy, 1.0f);
+  }
+  const float steer = sp.angle - CENTRE_ANGLE;
+  ambient_axis(CENTRE_ANGLE + sp.dominance * steer, feed_axis);
+  ambient_axis(CENTRE_ANGLE + bank.centre_lock * sp.dominance * steer, width_axis);
+  // The axis sign is arbitrary; keep it continuous so interpolation between
+  // blocks never passes through zero.
+  if (width_axis[0] * sp.width_axis[0] + width_axis[1] * sp.width_axis[1] < 0.0f) {
+    width_axis[0] = -width_axis[0];
+    width_axis[1] = -width_axis[1];
+  }
+  if (feed_axis[0] * sp.feed_axis[0] + feed_axis[1] * sp.feed_axis[1] < 0.0f) {
+    feed_axis[0] = -feed_axis[0];
+    feed_axis[1] = -feed_axis[1];
+  }
+}
+
+/// Small FDN reverb fed by the ambient component. Returns the wet pair.
+inline void ambience_run(const CoeffBank &bank, float feed, float *wet_left, float *wet_right) {
+  AmbienceState &a = g_ambience;
+  float *const buffer = bank.ambience_buffer;
+  float out[AMBIENCE_LINES];
+  for (size_t i = 0; i < AMBIENCE_LINES; i++) {
+    const float delayed = buffer[i * AMBIENCE_MAX_LINE + a.pos[i]];
+    // Damping in the loop: highs die faster than lows, as in a furnished room.
+    a.damped[i] += (delayed - a.damped[i]) * bank.ambience_damping;
+    out[i] = a.damped[i];
+  }
+  // Orthonormal 4x4 Hadamard feedback: energy-preserving mixing between lines.
+  const float g0 = out[0] * bank.ambience_feedback[0];
+  const float g1 = out[1] * bank.ambience_feedback[1];
+  const float g2 = out[2] * bank.ambience_feedback[2];
+  const float g3 = out[3] * bank.ambience_feedback[3];
+  const float mixed[AMBIENCE_LINES] = {
+      0.5f * (g0 + g1 + g2 + g3),
+      0.5f * (g0 - g1 + g2 - g3),
+      0.5f * (g0 + g1 - g2 - g3),
+      0.5f * (g0 - g1 - g2 + g3),
+  };
+  // Alternating input signs keep the feed from exciting one mode only.
+  const float input = 0.5f * feed;
+  const float input_sign[AMBIENCE_LINES] = {1.0f, -1.0f, 1.0f, -1.0f};
+  for (size_t i = 0; i < AMBIENCE_LINES; i++) {
+    buffer[i * AMBIENCE_MAX_LINE + a.pos[i]] = mixed[i] + input * input_sign[i];
+    if (++a.pos[i] == bank.ambience_length[i]) {
+      a.pos[i] = 0;
+    }
+  }
+  // Two orthogonal output taps: the left and right tails are decorrelated.
+  *wet_left = 0.5f * (out[0] + out[1] - out[2] - out[3]) * bank.ambience_wet;
+  *wet_right = 0.5f * (out[0] - out[1] + out[2] - out[3]) * bank.ambience_wet;
 }
 
 /// Output of channel `channel`, `delay` samples (whole + fraction) before the
@@ -743,7 +904,7 @@ inline int16_t to_pcm(float x) {
 }
 
 bool bank_is_active(const CoeffBank &bank) {
-  return bank.count > 0 || bank.preamp_lin != 1.0f || bank.loudness_on || bank.enhancer_on || bank.width_on || bank.crosstalk_on || bank.bass_limiter_on ||
+  return bank.count > 0 || bank.preamp_lin != 1.0f || bank.loudness_on || bank.enhancer_on || bank.spatial_on || bank.crosstalk_on || bank.bass_limiter_on ||
          bank.limiter_on;
 }
 
@@ -855,6 +1016,27 @@ void audio_dsp_set_bass_enhancer(float frequency_hz, float amount) {
   rebuild_and_publish();
 }
 
+void audio_dsp_set_centre_lock(float lock) {
+  std::lock_guard<std::mutex> lock_guard(g_writer_mutex);
+  g_centre_lock = fminf(fmaxf(lock, 0.0f), 1.0f);
+  rebuild_and_publish();
+}
+
+void audio_dsp_set_ambience(float amount, float decay_ms, float damping_hz) {
+  std::lock_guard<std::mutex> lock(g_writer_mutex);
+  g_ambience_amount = amount > 0.0f ? amount : 0.0f;
+  g_ambience_decay_ms = decay_ms > 1.0f ? decay_ms : 1.0f;
+  g_ambience_damping_hz = damping_hz;
+  if (g_ambience_amount > 0.0f && g_ambience_buffer == nullptr) {
+    // Off the audio path, once. Large enough that malloc places it in PSRAM.
+    g_ambience_buffer = static_cast<float *>(std::malloc(sizeof(float) * AMBIENCE_LINES * AMBIENCE_MAX_LINE));
+    if (g_ambience_buffer == nullptr) {
+      ESP_LOGW(TAG, "Ambience disabled: no memory for the reverb");
+    }
+  }
+  rebuild_and_publish();
+}
+
 void audio_dsp_set_stereo_width(float width, float frequency_hz) {
   std::lock_guard<std::mutex> lock(g_writer_mutex);
   g_width = width > 0.0f ? width : 0.0f;
@@ -940,6 +1122,27 @@ void audio_dsp_process(int16_t *buf, size_t frames) {
 
   const size_t sections = bank.count;
   const float preamp = bank.preamp_lin;
+
+  // Spatial axes move once per block and are interpolated per sample, so a
+  // change of direction never steps.
+  float width_axis[CHANNELS] = {};
+  float feed_axis[CHANNELS] = {};
+  float width_step[CHANNELS] = {};
+  float feed_step[CHANNELS] = {};
+  if (bank.spatial_on) {
+    float next_width[CHANNELS];
+    float next_feed[CHANNELS];
+    spatial_update_axes(bank, next_width, next_feed);
+    const float per_frame = 1.0f / (float) frames;
+    for (size_t ch = 0; ch < CHANNELS; ch++) {
+      width_axis[ch] = g_spatial.width_axis[ch];
+      feed_axis[ch] = g_spatial.feed_axis[ch];
+      width_step[ch] = (next_width[ch] - width_axis[ch]) * per_frame;
+      feed_step[ch] = (next_feed[ch] - feed_axis[ch]) * per_frame;
+      g_spatial.width_axis[ch] = next_width[ch];
+      g_spatial.feed_axis[ch] = next_feed[ch];
+    }
+  }
   float peak = 0.0f;
   float min_gain = 1.0f;
   float min_bass_gain = 1.0f;
@@ -960,12 +1163,31 @@ void audio_dsp_process(int16_t *buf, size_t frames) {
     left += harmonics;
     right += harmonics;
 
-    if (bank.width_on) {
-      const float mid = (left + right) * 0.5f;
-      float side = (left - right) * 0.5f;
-      side += bank.width_extra * g_width_state.run(bank.width_side_high_pass, side);
-      left = mid + side;
-      right = mid - side;
+    if (bank.spatial_on) {
+      SpatialState &sp = g_spatial;
+      for (size_t ch = 0; ch < CHANNELS; ch++) {
+        width_axis[ch] += width_step[ch];
+        feed_axis[ch] += feed_step[ch];
+      }
+      const float high_left = sp.high_pass[0].run(bank.spatial_high_pass, left);
+      const float high_right = sp.high_pass[1].run(bank.spatial_high_pass, right);
+      sp.cov_ll += (high_left * high_left - sp.cov_ll) * bank.spatial_smoothing;
+      sp.cov_rr += (high_right * high_right - sp.cov_rr) * bank.spatial_smoothing;
+      sp.cov_lr += (high_left * high_right - sp.cov_lr) * bank.spatial_smoothing;
+      if (bank.width_on) {
+        // Project onto the ambient axis and add (width - 1) more of it. On
+        // the fixed side axis this is exactly side += (width - 1) * HP(side).
+        const float ambient = high_left * width_axis[0] + high_right * width_axis[1];
+        left += bank.width_extra * ambient * width_axis[0];
+        right += bank.width_extra * ambient * width_axis[1];
+      }
+      if (bank.ambience_on) {
+        float wet_left;
+        float wet_right;
+        ambience_run(bank, high_left * feed_axis[0] + high_right * feed_axis[1], &wet_left, &wet_right);
+        left += wet_left;
+        right += wet_right;
+      }
     }
 
     if (bank.crosstalk_on) {
@@ -1028,7 +1250,12 @@ void audio_dsp_log_cascade(const char *tag, int level) {
                     g_enhancer_amount);
   }
   if (bank.width_on) {
-    esp_log_printf_(level, tag, __LINE__, "    stereo width %.2f above %.0f Hz", g_width, g_width_frequency_hz);
+    esp_log_printf_(level, tag, __LINE__, "    stereo width %.2f above %.0f Hz, centre lock %.2f", g_width,
+                    g_width_frequency_hz, g_centre_lock);
+  }
+  if (bank.ambience_on) {
+    esp_log_printf_(level, tag, __LINE__, "    ambience %.2f, decay %.0f ms, damping %.0f Hz", g_ambience_amount,
+                    g_ambience_decay_ms, g_ambience_damping_hz);
   }
   if (bank.crosstalk_on) {
     esp_log_printf_(level, tag, __LINE__, "    crosstalk cancel %.2f, %.0f us, %.0f-%.0f Hz", bank.crosstalk_amount,

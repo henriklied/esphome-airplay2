@@ -226,6 +226,7 @@ without removing the counters.
 ```
 playout: raw=.. span=.. filt=.. drift=..ppm trims=../s (N) buffered=N
          concealed=N holes=N (+N) under=N dfail=N qdrop=N edrop=N ins=N
+         dsp=N.N% pk=N.N%
 resend:  sent=N recovered=N stale=N unmarked_ok=N unmarked_stale=N
 rxpath:  stack=N task=N gap=N
 ```
@@ -239,6 +240,10 @@ rxpath:  stack=N task=N gap=N
   a different problem entirely.
 - `ins` -- steady ~125/s resampler insertion. Flat regardless of artefacts; not
   a fault signal.
+- `dsp` / `pk` -- output DSP cost as a share of one core's real time: the
+  average over the second and the worst block. It runs at priority 9 on the
+  core the decoder (priority 6) shares, so every point here is taken from AAC
+  decode. Watch `pk` when adding stages.
 - `resend:` is **suppressed entirely when every counter is zero**, so no
   `resend:` lines at all is the healthy state -- no sequence gap was detected.
 

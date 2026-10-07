@@ -183,6 +183,13 @@ int64_t audio_output_get_next_playout_time_ns(int64_t now_us);
 uint32_t audio_output_get_underruns(void);
 
 /**
+ * Output DSP cost since the last call, as permille of one core's real time:
+ * time spent in audio_dsp_process() over the duration of the audio it made.
+ * `avg` covers the whole interval, `peak` the worst single block. Resets both.
+ */
+void audio_output_take_dsp_load(uint32_t *avg_permille, uint32_t *peak_permille);
+
+/**
  * Cycle the output channel mode: STEREO -> LEFT -> RIGHT -> MONO -> STEREO.
  * @return the new mode after cycling.
  */

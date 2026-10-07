@@ -142,7 +142,7 @@ float audio_dsp_take_peak(void);
 // ---- Dynamic stages ------------------------------------------------------
 // Processing order per stereo frame:
 //   preamp -> biquad cascade -> loudness shelf -> + synthesized bass harmonics
-//   -> stereo width -> crosstalk cancellation -> bass limiter
+//   -> stereo width + ambience -> crosstalk cancellation -> bass limiter
 //   -> look-ahead limiter -> round and clamp
 // The harmonic generator taps the signal after the preamp but BEFORE the
 // cascade, so a protective high-pass cannot starve it of the very bass it is
@@ -204,6 +204,28 @@ void audio_dsp_set_bass_enhancer(float frequency_hz, float amount);
  * so the low end keeps its weight in the centre.
  */
 void audio_dsp_set_stereo_width(float width, float frequency_hz);
+
+/**
+ * Centre lock for the width stage, 0 to 1. At 0 width boosts the plain side
+ * signal, which also pushes off-centre and centre sources around. At 1 it
+ * boosts only what is orthogonal to the dominant source (principal component
+ * of the band above the width corner, tracked over ~30 ms), so vocals and
+ * panned instruments keep their place and level while reverb and room sound
+ * spread.
+ */
+void audio_dsp_set_centre_lock(float lock);
+
+/**
+ * Room-fill ambience: a small, damped feedback-delay-network reverb fed only
+ * by the ambient component above the width corner (the part of the mix that
+ * is not the dominant source), mixed back with decorrelated left and right
+ * tails. A dry mono source feeds it nothing.
+ *
+ * @param amount      wet level, 0 (off) upward; 0.1-0.3 is subtle.
+ * @param decay_ms    time for the tail to fall 60 dB.
+ * @param damping_hz  low-pass inside the loop; lower is warmer and darker.
+ */
+void audio_dsp_set_ambience(float amount, float decay_ms, float damping_hz);
 
 /**
  * Recursive crosstalk cancellation (RACE). Each output subtracts a delayed,

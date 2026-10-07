@@ -249,6 +249,9 @@ void audio_decode_worker_destroy(audio_decode_worker_t *worker) {
 
   if (worker->task) {
     worker->running = false;
+    // The task may be parked in push_pcm_wait() for up to its 6 s bound while
+    // the timeline is full; release it so it reaches the sentinel in time.
+    audio_engine_v2_abort_push_waits(&worker->state->engine_v2);
     audio_decode_job_t *stop = NULL;
     (void) xQueueSend(worker->queue, &stop, 0);
     for (int i = 0; i < 100 && worker->task; ++i) {

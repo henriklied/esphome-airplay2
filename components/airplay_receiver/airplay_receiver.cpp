@@ -52,6 +52,8 @@ void AirPlayReceiver::setup() {
   audio_dsp_set_loudness(this->loudness_frequency_hz_, this->loudness_max_boost_db_, this->loudness_range_db_);
   audio_dsp_set_bass_enhancer(this->enhancer_frequency_hz_, this->enhancer_amount_);
   audio_dsp_set_stereo_width(this->width_, this->width_frequency_hz_);
+  audio_dsp_set_centre_lock(this->centre_lock_);
+  audio_dsp_set_ambience(this->ambience_amount_, this->ambience_decay_ms_, this->ambience_damping_hz_);
   audio_dsp_set_crosstalk(this->crosstalk_amount_, this->crosstalk_delay_us_, this->crosstalk_low_hz_,
                           this->crosstalk_high_hz_);
   audio_dsp_set_bass_limiter(this->bass_limiter_enabled_, this->bass_limiter_frequency_hz_,
@@ -220,6 +222,26 @@ void AirPlayReceiver::set_dsp_stereo_width(float width, float frequency_hz) {
 
 void AirPlayReceiver::set_dsp_stereo_width_amount(float width) {
   this->set_dsp_stereo_width(width, this->width_frequency_hz_);
+}
+
+void AirPlayReceiver::set_dsp_centre_lock(float lock) {
+  this->centre_lock_ = lock;
+  audio_dsp_set_centre_lock(lock);
+}
+
+void AirPlayReceiver::set_dsp_ambience(float amount, float decay_ms, float damping_hz) {
+  this->ambience_amount_ = amount;
+  this->ambience_decay_ms_ = decay_ms;
+  this->ambience_damping_hz_ = damping_hz;
+  audio_dsp_set_ambience(amount, decay_ms, damping_hz);
+}
+
+void AirPlayReceiver::set_dsp_ambience_amount(float amount) {
+  this->set_dsp_ambience(amount, this->ambience_decay_ms_, this->ambience_damping_hz_);
+}
+
+void AirPlayReceiver::set_dsp_ambience_decay(float decay_ms) {
+  this->set_dsp_ambience(this->ambience_amount_, decay_ms, this->ambience_damping_hz_);
 }
 
 void AirPlayReceiver::set_dsp_crosstalk(float amount, float delay_us, float low_hz, float high_hz) {

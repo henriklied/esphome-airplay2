@@ -1,6 +1,6 @@
 // Host checks for the dynamic stages in audio/audio_dsp.cpp: limiter ceiling,
 // latency and release, volume-following loudness, harmonic bass, stereo width
-// crosstalk cancellation and the bass-band limiter. Exits non-zero with a message on the first failure. Driven by
+// crosstalk cancellation, the bass-band limiter, centre lock and ambience. Exits non-zero with a message on the first failure. Driven by
 // tests/test_dsp_stages.py.
 
 #include "audio/audio_dsp.h"
@@ -47,6 +47,8 @@ static void reset_all() {
   audio_dsp_set_loudness(100.0f, 0.0f, 30.0f);
   audio_dsp_set_bass_enhancer(90.0f, 0.0f);
   audio_dsp_set_stereo_width(1.0f, 300.0f);
+  audio_dsp_set_centre_lock(0.0f);
+  audio_dsp_set_ambience(0.0f, 400.0f, 5000.0f);
   audio_dsp_set_crosstalk(0.0f, 60.0f, 250.0f, 5000.0f);
   audio_dsp_set_bass_limiter(false, 120.0f, -6.0f, 200.0f);
   audio_dsp_take_bass_limiter_reduction_db();
@@ -301,6 +303,113 @@ static void test_bass_limiter() {
   CHECK(audio_dsp_get_latency_frames() == 130);
 }
 
+/// Power of one channel over frames [first, last).
+static double power(const Stereo &pcm, size_t channel, size_t first, size_t last) {
+  double sum = 0.0;
+  for (size_t i = first; i < last; i++) {
+    sum += (double) pcm[i * 2 + channel] * pcm[i * 2 + channel];
+  }
+  return sum / (double) (last - first);
+}
+
+static Stereo independent_noise(double sigma, size_t frames, unsigned seed) {
+  std::mt19937 rng(seed);
+  std::normal_distribution<double> noise(0.0, sigma);
+  Stereo pcm(frames * 2);
+  for (size_t i = 0; i < frames * 2; i++) {
+    pcm[i] = (int16_t) std::clamp(noise(rng), -32768.0, 32767.0);
+  }
+  return pcm;
+}
+
+static void test_centre_lock() {
+  // A source panned left of centre (R at 40% of L). Plain width moves it;
+  // centre lock leaves it where it is.
+  reset_all();
+  audio_dsp_set_stereo_width(2.0f, 300.0f);
+  Stereo plain = tone(2000.0, 10000.0, 4000.0);
+  process(plain);
+  const double plain_ratio = amplitude(plain, 1, 2000.0) / amplitude(plain, 0, 2000.0);
+  CHECK(std::fabs(plain_ratio - 0.4) > 0.3);  // R swung well away from 0.4
+
+  reset_all();
+  audio_dsp_set_stereo_width(2.0f, 300.0f);
+  audio_dsp_set_centre_lock(1.0f);
+  Stereo locked = tone(2000.0, 10000.0, 4000.0);
+  process(locked);
+  CHECK_NEAR(amplitude(locked, 1, 2000.0) / amplitude(locked, 0, 2000.0), 0.4, 0.02);
+  CHECK_NEAR(amplitude(locked, 0, 2000.0), 10000.0, 200.0);
+
+  // Diffuse sound (independent L and R) has no dominant source, so it still
+  // widens: side energy rises against mid.
+  reset_all();
+  audio_dsp_set_stereo_width(2.0f, 300.0f);
+  audio_dsp_set_centre_lock(1.0f);
+  Stereo diffuse = independent_noise(3000.0, TONE_FRAMES, 11);
+  process(diffuse);
+  double mid = 0.0, side = 0.0;
+  for (size_t i = TONE_FRAMES / 2; i < TONE_FRAMES; i++) {
+    const double l = diffuse[i * 2], r = diffuse[i * 2 + 1];
+    mid += (l + r) * (l + r);
+    side += (l - r) * (l - r);
+  }
+  CHECK(side / mid > 2.0);  // 1.0 before; full width 2 above 300 Hz lands near 3
+}
+
+static void test_ambience() {
+  reset_all();
+  audio_dsp_set_ambience(0.3f, 400.0f, 5000.0f);
+
+  // A mono source feeds no ambience: the output is the input.
+  Stereo mono = tone(1000.0, 8000.0, 8000.0);
+  const Stereo mono_in = mono;
+  process(mono);
+  for (size_t i = TONE_FRAMES / 2; i < TONE_FRAMES; i++) {
+    CHECK(std::abs(mono[i * 2] - mono_in[i * 2]) <= 2);
+    CHECK(std::abs(mono[i * 2 + 1] - mono_in[i * 2 + 1]) <= 2);
+  }
+
+  // An anti-phase (ambient) noise burst, then silence: a decorrelated tail
+  // that decays at roughly the configured rate. Full wet level so the tail
+  // stays well above the 16-bit floor across the measured span.
+  audio_dsp_set_ambience(1.0f, 400.0f, 5000.0f);
+  audio_dsp_reset();
+  const size_t burst = SAMPLE_RATE / 10;
+  Stereo pcm(SAMPLE_RATE * 2, 0);
+  std::mt19937 rng(5);
+  std::normal_distribution<double> noise(0.0, 6000.0);
+  for (size_t i = 0; i < burst; i++) {
+    const double v = std::clamp(noise(rng), -32000.0, 32000.0);
+    pcm[i * 2] = (int16_t) v;
+    pcm[i * 2 + 1] = (int16_t) -v;
+  }
+  process(pcm);
+  const size_t ms = SAMPLE_RATE / 1000;
+  const double early = power(pcm, 0, burst + 20 * ms, burst + 120 * ms);
+  const double late = power(pcm, 0, burst + 220 * ms, burst + 320 * ms);
+  CHECK(early > 1000.0);  // there is a tail
+  // 200 ms of a 400 ms RT60 is 30 dB; the in-loop damping makes the highs,
+  // and so the total, fall somewhat faster.
+  const double decay_db = 10.0 * std::log10(early / std::max(late, 1e-9));
+  CHECK(decay_db > 25.0 && decay_db < 45.0);
+
+  double ll = 0.0, rr = 0.0, lr = 0.0;
+  for (size_t i = burst + 20 * ms; i < burst + 200 * ms; i++) {
+    const double l = pcm[i * 2], r = pcm[i * 2 + 1];
+    ll += l * l;
+    rr += r * r;
+    lr += l * r;
+  }
+  CHECK(std::fabs(lr / std::sqrt(ll * rr)) < 0.5);
+
+  // Stable under sustained drive.
+  audio_dsp_set_ambience(1.0f, 3000.0f, 15000.0f);
+  audio_dsp_reset();
+  Stereo loud = independent_noise(8000.0, SAMPLE_RATE * 5, 3);
+  process(loud);
+  CHECK(power(loud, 0, SAMPLE_RATE * 4, SAMPLE_RATE * 5) < 4.0 * power(loud, 0, SAMPLE_RATE, SAMPLE_RATE * 2));
+}
+
 static void test_sample_rate_change_rescales_lookahead() {
   reset_all();
   audio_dsp_set_limiter(true, -1.0f, 100.0f);
@@ -321,6 +430,8 @@ int main() {
   test_stereo_width();
   test_crosstalk_cancellation();
   test_bass_limiter();
+  test_centre_lock();
+  test_ambience();
   test_sample_rate_change_rescales_lookahead();
   std::printf("ok\n");
   return 0;

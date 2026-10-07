@@ -148,9 +148,9 @@ peaks, not noise.
 
 ### Dynamic stages
 
-Six optional stages make a small speaker sound larger than its static EQ allows. Each is off until
-configured. Order: preamp, `filters`, loudness, bass enhancer, stereo width, crosstalk
-cancellation, bass limiter, limiter.
+Seven optional stages make a small speaker sound larger than its static EQ allows. Each is off until
+configured. Order: preamp, `filters`, loudness, bass enhancer, stereo width, ambience,
+crosstalk cancellation, bass limiter, limiter.
 
 ```yaml
   dsp:
@@ -164,6 +164,10 @@ cancellation, bass limiter, limiter.
     stereo_width:
       width: 1.4
       frequency: 300Hz
+      centre_lock: 0.8
+    ambience:
+      amount: 0.15
+      decay: 400ms
     crosstalk_cancel:
       amount: 0.6
       delay: 60us
@@ -181,8 +185,14 @@ cancellation, bass limiter, limiter.
 * **bass_enhancer**: Replaces bass below `frequency` (the speaker's lower limit) with its 2nd and 3rd
   harmonics, which the ear reads as the missing fundamental. `amount` 1.0 is roughly equal level.
   The harmonics track the bass level linearly; they are not distortion that grows with drive.
-* **stereo_width**: Mid/side width above `frequency`. 1.0 is unchanged, 0 is mono; bass keeps its
-  width.
+* **stereo_width**: Width above `frequency`. 1.0 is unchanged, 0 is mono; bass keeps its width.
+  `centre_lock` (0-1) tracks the dominant source (principal component, ~30 ms) and widens only what is
+  orthogonal to it, so panned and centred sources keep their place and level; diffuse sound, which has
+  no dominant source, still widens fully. At 0 it is plain mid/side.
+* **ambience**: Room-fill reverb: a damped 4-line feedback delay network fed only by the ambient
+  component above the width corner, with decorrelated left/right tails. A dry mono source feeds it
+  nothing. `amount` is the wet level (0.1-0.3 is subtle), `decay` the 60 dB decay time, `damping`
+  (default 5000Hz) the in-loop low-pass. The 38 KB delay buffer is allocated on first enable.
 * **crosstalk_cancel**: Recursive crosstalk cancellation (RACE). Each channel subtracts a delayed,
   band-limited (`low_frequency` 250Hz to `high_frequency` 5000Hz), attenuated copy of the other
   channel's output, so the sound from each driver is cancelled at the far ear and the image extends
@@ -197,7 +207,8 @@ cancellation, bass limiter, limiter.
   enabled, boosts no longer need a matching negative `preamp`.
 
 Runtime setters: `set_dsp_loudness_boost(db)`, `set_dsp_bass_enhancer_amount(x)`,
-`set_dsp_stereo_width_amount(x)`, `set_dsp_crosstalk_amount(x)`, `set_dsp_crosstalk_delay(us)`,
+`set_dsp_stereo_width_amount(x)`, `set_dsp_centre_lock(x)`, `set_dsp_ambience_amount(x)`,
+`set_dsp_ambience_decay(ms)`, `set_dsp_crosstalk_amount(x)`, `set_dsp_crosstalk_delay(us)`,
 `set_dsp_bass_limiter_threshold(db)`, `set_dsp_limiter_enabled(bool)`, `set_dsp_limiter_threshold(db)`.
 `get_dsp_loudness_now()` returns the lift in effect; `take_dsp_limiter_reduction()` returns the
 deepest gain reduction since the last call (`take_dsp_bass_limiter_reduction()` for the bass band).
