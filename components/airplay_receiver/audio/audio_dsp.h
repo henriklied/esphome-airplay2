@@ -142,7 +142,8 @@ float audio_dsp_take_peak(void);
 // ---- Dynamic stages ------------------------------------------------------
 // Processing order per stereo frame:
 //   preamp -> biquad cascade -> loudness shelf -> + synthesized bass harmonics
-//   -> stereo width + ambience -> crosstalk cancellation -> bass limiter
+//   -> stereo width + ambience -> crosstalk cancellation -> bass protection
+//   -> bass limiter
 //   -> look-ahead limiter -> round and clamp
 // The harmonic generator taps the signal after the preamp but BEFORE the
 // cascade, so a protective high-pass cannot starve it of the very bass it is
@@ -251,6 +252,15 @@ void audio_dsp_set_ambience(float amount, float decay_ms, float damping_hz);
  *                   crosstalk above a few kHz anyway.
  */
 void audio_dsp_set_crosstalk(float amount, float delay_us, float low_hz, float high_hz);
+
+/**
+ * Bass protection: a 4th-order Butterworth high-pass placed after every stage
+ * that adds bass. A shelf or loudness lift below a cascade high-pass cancels
+ * it (a +13 dB loudness shelf undoes an 80 Hz 2nd-order high-pass at 50 Hz),
+ * and the deepest notes then overdrive small drivers and their supply. Here
+ * nothing downstream can add them back. 0 disables.
+ */
+void audio_dsp_set_bass_protection(float frequency_hz);
 
 /**
  * Bass-band limiter. Splits at `frequency_hz` (Linkwitz-Riley 4th order, so the

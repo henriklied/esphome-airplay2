@@ -61,6 +61,7 @@ _CONFIG_DSP_LIMITER = "limiter"
 _CONFIG_DSP_CROSSTALK = "crosstalk_cancel"
 _CONFIG_DSP_BASS_LIMITER = "bass_limiter"
 _CONFIG_DSP_AMBIENCE = "ambience"
+_CONFIG_DSP_BASS_PROTECTION = "bass_protection"
 _CONFIG_CENTRE_LOCK = "centre_lock"
 _CONFIG_DECAY = "decay"
 _CONFIG_DAMPING = "damping"
@@ -209,6 +210,14 @@ _DSP_BASS_LIMITER_SCHEMA = cv.Schema(
     }
 )
 
+# Steep high-pass after every bass-adding stage, so loudness and shelves cannot
+# push the deepest notes back into a small driver.
+_DSP_BASS_PROTECTION_SCHEMA = cv.Schema(
+    {
+        cv.Required(_CONFIG_FILTER_FREQUENCY): cv.All(cv.frequency, cv.float_range(min=20.0, max=200.0)),
+    }
+)
+
 # Look-ahead peak limiter, last in the chain. Adds 1.5 ms of output delay,
 # which the playout clock accounts for.
 _DSP_LIMITER_SCHEMA = cv.Schema(
@@ -231,6 +240,7 @@ _DSP_SCHEMA = cv.Schema(
         cv.Optional(_CONFIG_DSP_STEREO_WIDTH): _DSP_STEREO_WIDTH_SCHEMA,
         cv.Optional(_CONFIG_DSP_AMBIENCE): _DSP_AMBIENCE_SCHEMA,
         cv.Optional(_CONFIG_DSP_CROSSTALK): _DSP_CROSSTALK_SCHEMA,
+        cv.Optional(_CONFIG_DSP_BASS_PROTECTION): _DSP_BASS_PROTECTION_SCHEMA,
         cv.Optional(_CONFIG_DSP_BASS_LIMITER): _DSP_BASS_LIMITER_SCHEMA,
         cv.Optional(_CONFIG_DSP_LIMITER): _DSP_LIMITER_SCHEMA,
         cv.Optional(_CONFIG_DSP_ENABLED, default=True): cv.boolean,
@@ -400,6 +410,8 @@ def _add_dsp(var, dsp_config) -> None:
                 crosstalk[_CONFIG_HIGH_FREQUENCY],
             )
         )
+    if protection := dsp_config.get(_CONFIG_DSP_BASS_PROTECTION):
+        cg.add(var.set_dsp_bass_protection(protection[_CONFIG_FILTER_FREQUENCY]))
     if bass_limiter := dsp_config.get(_CONFIG_DSP_BASS_LIMITER):
         cg.add(
             var.set_dsp_bass_limiter(

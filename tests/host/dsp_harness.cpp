@@ -1,6 +1,7 @@
 // Host checks for the dynamic stages in audio/audio_dsp.cpp: limiter ceiling,
 // latency and release, volume-following loudness, harmonic bass, stereo width
-// crosstalk cancellation, the bass-band limiter, centre lock and ambience. Exits non-zero with a message on the first failure. Driven by
+// crosstalk cancellation, the bass-band limiter, centre lock, ambience and
+// bass protection. Exits non-zero with a message on the first failure. Driven by
 // tests/test_dsp_stages.py.
 
 #include "audio/audio_dsp.h"
@@ -51,6 +52,7 @@ static void reset_all() {
   audio_dsp_set_ambience(0.0f, 400.0f, 5000.0f);
   audio_dsp_set_crosstalk(0.0f, 60.0f, 250.0f, 5000.0f);
   audio_dsp_set_bass_limiter(false, 120.0f, -6.0f, 200.0f);
+  audio_dsp_set_bass_protection(0.0f);
   audio_dsp_take_bass_limiter_reduction_db();
   audio_dsp_set_limiter(false, -1.0f, 100.0f);
   audio_dsp_set_volume_q15(UNITY_Q15);
@@ -410,6 +412,38 @@ static void test_ambience() {
   CHECK(power(loud, 0, SAMPLE_RATE * 4, SAMPLE_RATE * 5) < 4.0 * power(loud, 0, SAMPLE_RATE, SAMPLE_RATE * 2));
 }
 
+static void test_bass_protection() {
+  // The X90 case: an 80 Hz cascade high-pass plus a 13.5 dB loudness lift at
+  // low volume. The shelf undoes the high-pass and 50 Hz comes out louder
+  // than it went in.
+  reset_all();
+  AirPlayDspFilter high_pass;
+  high_pass.type = AIRPLAY_DSP_HIGH_PASS;
+  high_pass.frequency_hz = 80.0f;
+  high_pass.q = 0.7f;
+  audio_dsp_set_filters(&high_pass, 1);
+  audio_dsp_set_loudness(120.0f, 13.5f, 30.0f);
+  audio_dsp_set_volume_q15((int32_t) std::lround(UNITY_Q15 * std::pow(10.0, -40.0 / 20.0)));
+  audio_dsp_service();
+  CHECK(gain_db(50.0) > 2.0);
+
+  // Protection after the shelf puts the deepest notes back below their input.
+  audio_dsp_set_bass_protection(80.0f);
+  audio_dsp_reset();
+  CHECK(gain_db(50.0) < -3.0);
+  audio_dsp_reset();
+  CHECK(gain_db(41.0) < -10.0);  // low E on a double bass
+  audio_dsp_reset();
+  CHECK_NEAR(gain_db(1000.0), 0.0, 0.1);
+
+  // 4th order: 24 dB/octave below the corner, -3 dB at it.
+  reset_all();
+  audio_dsp_set_bass_protection(80.0f);
+  CHECK_NEAR(gain_db(80.0), -3.0, 0.3);
+  audio_dsp_reset();
+  CHECK_NEAR(gain_db(40.0), -24.1, 0.6);
+}
+
 static void test_sample_rate_change_rescales_lookahead() {
   reset_all();
   audio_dsp_set_limiter(true, -1.0f, 100.0f);
@@ -432,6 +466,7 @@ int main() {
   test_bass_limiter();
   test_centre_lock();
   test_ambience();
+  test_bass_protection();
   test_sample_rate_change_rescales_lookahead();
   std::printf("ok\n");
   return 0;

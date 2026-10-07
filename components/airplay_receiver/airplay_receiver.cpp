@@ -58,6 +58,7 @@ void AirPlayReceiver::setup() {
   audio_dsp_set_ambience(this->ambience_amount_, this->ambience_decay_ms_, this->ambience_damping_hz_);
   audio_dsp_set_crosstalk(this->crosstalk_amount_, this->crosstalk_delay_us_, this->crosstalk_low_hz_,
                           this->crosstalk_high_hz_);
+  audio_dsp_set_bass_protection(this->bass_protection_hz_);
   audio_dsp_set_bass_limiter(this->bass_limiter_enabled_, this->bass_limiter_frequency_hz_,
                              this->bass_limiter_threshold_db_, this->bass_limiter_release_ms_);
   audio_dsp_set_limiter(this->limiter_enabled_, this->limiter_threshold_db_, this->limiter_release_ms_);
@@ -265,6 +266,11 @@ void AirPlayReceiver::set_dsp_crosstalk_amount(float amount) {
 
 void AirPlayReceiver::set_dsp_crosstalk_delay(float delay_us) {
   this->set_dsp_crosstalk(this->crosstalk_amount_, delay_us, this->crosstalk_low_hz_, this->crosstalk_high_hz_);
+}
+
+void AirPlayReceiver::set_dsp_bass_protection(float frequency_hz) {
+  this->bass_protection_hz_ = frequency_hz;
+  audio_dsp_set_bass_protection(frequency_hz);
 }
 
 void AirPlayReceiver::set_dsp_bass_limiter(bool enabled, float frequency_hz, float threshold_db, float release_ms) {

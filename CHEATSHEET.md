@@ -110,6 +110,7 @@ Dynamic stages (all optional, off until configured; order after `filters`):
 | `stereo_width` | `width` (req), `frequency` 300Hz, `centre_lock` 0 | widens the ambient axis above the corner; lock steers it orthogonal to the dominant source (PCA, scaled by eigenvalue spread); 0 is plain M/S |
 | `ambience` | `amount` (req), `decay` 400ms, `damping` 5000Hz | 4-line Hadamard FDN fed by the ambient component; buffer malloc'd once (PSRAM) |
 | `crosstalk_cancel` | `amount` (req), `delay` 60us, `low_frequency` 250Hz, `high_frequency` 5000Hz | RACE: out_l = in_l - amount * band(out_r delayed); fractional delay by linear interpolation, min 1 sample |
+| `bass_protection` | `frequency` (req) | 4th-order HP after loudness/enhancer/width/crosstalk, before the limiters |
 | `bass_limiter` | `enabled` true, `frequency` 120Hz, `threshold` -6dB, `release` 200ms | LR4 split, same look-ahead limiter on the lows, highs delayed to match; latency adds to the full-band limiter's |
 | `limiter` | `enabled` true, `threshold` -1dB, `release` 100ms | look-ahead (1.5 ms), min-hold + box ramp: no overshoot. Delay is added to the playout clock (`audio_dsp_get_latency_frames()`) |
 

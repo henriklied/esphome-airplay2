@@ -73,6 +73,10 @@ constexpr float CROSSTALK_MIN_DELAY_SAMPLES = 1.0f;
 constexpr float CROSSTALK_MAX_AMOUNT = 0.95f;
 constexpr float US_PER_S = 1000000.0f;
 
+/// Bass protection: 4th-order Butterworth high-pass as two biquads.
+constexpr size_t PROTECTION_SECTIONS = 2;
+constexpr float PROTECTION_Q[PROTECTION_SECTIONS] = {0.54119610f, 1.30656296f};
+
 /// Width/ambience analysis: covariance smoothing time. Long enough to see a
 /// source's direction across a note, short enough to follow a mix change.
 constexpr float SPATIAL_COVARIANCE_MS = 30.0f;
@@ -162,6 +166,9 @@ struct CoeffBank {
   float crosstalk_amount = 0.0f;
   uint32_t crosstalk_delay_whole = 1;  // integer part of the delay, samples
   float crosstalk_delay_fraction = 0.0f;
+
+  bool protection_on = false;
+  Biquad protection[PROTECTION_SECTIONS];
 
   bool bass_limiter_on = false;
   Biquad crossover_low_pass;   // each run twice: Linkwitz-Riley 4th order
@@ -260,6 +267,9 @@ struct LimiterState {
   uint32_t frame = 0;
   float released = 1.0f;
 };
+BiquadState g_protection_state[PROTECTION_SECTIONS][CHANNELS];
+bool g_was_protection_on = false;
+
 LimiterState g_limiter;
 LimiterState g_bass_limiter;
 
@@ -328,6 +338,8 @@ float g_crosstalk_amount = 0.0f;
 float g_crosstalk_delay_us = 60.0f;
 float g_crosstalk_low_hz = 250.0f;
 float g_crosstalk_high_hz = 5000.0f;
+
+float g_protection_hz = 0.0f;
 
 bool g_bass_limiter_enabled = false;
 float g_bass_limiter_frequency_hz = 120.0f;
@@ -542,6 +554,14 @@ float threshold_samples(float threshold_db) {
   return fminf(powf(10.0f, threshold_db / 20.0f) * PCM_FULL_SCALE, PCM_MAX);
 }
 
+void design_protection(CoeffBank &bank) {
+  bank.protection_on = g_protection_hz > 0.0f;
+  for (size_t i = 0; i < PROTECTION_SECTIONS && bank.protection_on; i++) {
+    bank.protection_on =
+        design_section(AIRPLAY_DSP_HIGH_PASS, g_protection_hz, PROTECTION_Q[i], 0.0f, &bank.protection[i]);
+  }
+}
+
 void design_bass_limiter(CoeffBank &bank) {
   bank.bass_limiter_on =
       g_bass_limiter_enabled &&
@@ -596,6 +616,7 @@ void rebuild_and_publish() {
   design_crosstalk(bank);
   design_limiter(bank);
   design_bass_limiter(bank);
+  design_protection(bank);
 
   const uint32_t limiter_delay = bank.limiter_lookahead - 1;
   g_latency_frames.store((bank.limiter_on ? limiter_delay : 0) + (bank.bass_limiter_on ? limiter_delay : 0),
@@ -650,6 +671,11 @@ void clear_all_state() {
   limiter_reset(g_limiter, g_limiter.lookahead);
   limiter_reset(g_bass_limiter, g_bass_limiter.lookahead);
   g_crossover = CrossoverState{};
+  for (auto &section : g_protection_state) {
+    for (auto &channel : section) {
+      channel = BiquadState{};
+    }
+  }
 }
 
 size_t g_state_count = 0;
@@ -687,6 +713,14 @@ void sync_state_to(const CoeffBank &bank) {
     g_crosstalk_state = CrosstalkState{};
   }
   g_was_spatial_on = bank.spatial_on;
+  if (bank.protection_on && !g_was_protection_on) {
+    for (auto &section : g_protection_state) {
+      for (auto &channel : section) {
+        channel = BiquadState{};
+      }
+    }
+  }
+  g_was_protection_on = bank.protection_on;
   g_was_crosstalk_on = bank.crosstalk_on;
   if (!bank.limiter_on) {
     g_limiter.lookahead = 0;  // a later enable starts clean
@@ -923,7 +957,7 @@ inline int16_t to_pcm(float x) {
 }
 
 bool bank_is_active(const CoeffBank &bank) {
-  return bank.count > 0 || bank.preamp_lin != 1.0f || bank.loudness_on || bank.enhancer_on || bank.spatial_on || bank.crosstalk_on || bank.bass_limiter_on ||
+  return bank.count > 0 || bank.preamp_lin != 1.0f || bank.loudness_on || bank.enhancer_on || bank.spatial_on || bank.crosstalk_on || bank.bass_limiter_on || bank.protection_on ||
          bank.limiter_on;
 }
 
@@ -1072,6 +1106,12 @@ void audio_dsp_set_crosstalk(float amount, float delay_us, float low_hz, float h
   rebuild_and_publish();
 }
 
+void audio_dsp_set_bass_protection(float frequency_hz) {
+  std::lock_guard<std::mutex> lock(g_writer_mutex);
+  g_protection_hz = frequency_hz > 0.0f ? frequency_hz : 0.0f;
+  rebuild_and_publish();
+}
+
 void audio_dsp_set_bass_limiter(bool enabled, float frequency_hz, float threshold_db, float release_ms) {
   std::lock_guard<std::mutex> lock(g_writer_mutex);
   g_bass_limiter_enabled = enabled;
@@ -1213,6 +1253,15 @@ void audio_dsp_process(int16_t *buf, size_t frames) {
       crosstalk_run(bank, &left, &right);
     }
 
+    // After every stage that adds bass, so no combination of loudness,
+    // shelf and harmonics can push the deepest notes back past the corner.
+    if (bank.protection_on) {
+      for (size_t s = 0; s < PROTECTION_SECTIONS; s++) {
+        left = g_protection_state[s][0].run(bank.protection[s], left);
+        right = g_protection_state[s][1].run(bank.protection[s], right);
+      }
+    }
+
     if (bank.bass_limiter_on) {
       const float gain = bass_limiter_run(bank, &left, &right);
       if (gain < min_bass_gain) {
@@ -1279,6 +1328,9 @@ void audio_dsp_log_cascade(const char *tag, int level) {
   if (bank.crosstalk_on) {
     esp_log_printf_(level, tag, __LINE__, "    crosstalk cancel %.2f, %.0f us, %.0f-%.0f Hz", bank.crosstalk_amount,
                     g_crosstalk_delay_us, g_crosstalk_low_hz, g_crosstalk_high_hz);
+  }
+  if (bank.protection_on) {
+    esp_log_printf_(level, tag, __LINE__, "    bass protection 4th-order high-pass at %.0f Hz", g_protection_hz);
   }
   if (bank.bass_limiter_on) {
     esp_log_printf_(level, tag, __LINE__, "    bass limiter below %.0f Hz, %.1f dBFS, release %.0f ms",
