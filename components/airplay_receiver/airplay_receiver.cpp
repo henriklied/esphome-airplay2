@@ -49,6 +49,10 @@ void AirPlayReceiver::setup() {
   // the coefficients are designed against the rate actually being clocked.
   audio_dsp_set_preamp_db(this->dsp_preamp_db_);
   audio_dsp_set_enabled(this->dsp_enabled_);
+  audio_dsp_set_loudness(this->loudness_frequency_hz_, this->loudness_max_boost_db_, this->loudness_range_db_);
+  audio_dsp_set_bass_enhancer(this->enhancer_frequency_hz_, this->enhancer_amount_);
+  audio_dsp_set_stereo_width(this->width_, this->width_frequency_hz_);
+  audio_dsp_set_limiter(this->limiter_enabled_, this->limiter_threshold_db_, this->limiter_release_ms_);
   if (!this->dsp_filters_.empty()) {
     audio_dsp_set_filters(this->dsp_filters_.data(), this->dsp_filters_.size());
     this->warn_if_dsp_clips_();
@@ -88,6 +92,9 @@ void AirPlayReceiver::setup() {
 void AirPlayReceiver::loop() {
   this->start_ptp_when_network_up_();
   this->transport_.loop();
+  // The loudness shelf follows the volume; its redesign belongs here, off the
+  // RTSP task that reports the volume and the audio task that plays it.
+  audio_dsp_service();
 
   // publish_state() must run on the main loop; the RTSP task only sets these.
   // Without this the HA entity freezes at whatever it last showed, which is
@@ -180,6 +187,52 @@ void AirPlayReceiver::set_dsp_enabled(bool enabled) {
   audio_dsp_set_enabled(enabled);
 }
 
+void AirPlayReceiver::set_dsp_loudness(float frequency_hz, float max_boost_db, float range_db) {
+  this->loudness_frequency_hz_ = frequency_hz;
+  this->loudness_max_boost_db_ = max_boost_db;
+  this->loudness_range_db_ = range_db;
+  audio_dsp_set_loudness(frequency_hz, max_boost_db, range_db);
+}
+
+void AirPlayReceiver::set_dsp_loudness_boost(float max_boost_db) {
+  this->set_dsp_loudness(this->loudness_frequency_hz_, max_boost_db, this->loudness_range_db_);
+}
+
+void AirPlayReceiver::set_dsp_bass_enhancer(float frequency_hz, float amount) {
+  this->enhancer_frequency_hz_ = frequency_hz;
+  this->enhancer_amount_ = amount;
+  audio_dsp_set_bass_enhancer(frequency_hz, amount);
+}
+
+void AirPlayReceiver::set_dsp_bass_enhancer_amount(float amount) {
+  this->set_dsp_bass_enhancer(this->enhancer_frequency_hz_, amount);
+}
+
+void AirPlayReceiver::set_dsp_stereo_width(float width, float frequency_hz) {
+  this->width_ = width;
+  this->width_frequency_hz_ = frequency_hz;
+  audio_dsp_set_stereo_width(width, frequency_hz);
+}
+
+void AirPlayReceiver::set_dsp_stereo_width_amount(float width) {
+  this->set_dsp_stereo_width(width, this->width_frequency_hz_);
+}
+
+void AirPlayReceiver::set_dsp_limiter(bool enabled, float threshold_db, float release_ms) {
+  this->limiter_enabled_ = enabled;
+  this->limiter_threshold_db_ = threshold_db;
+  this->limiter_release_ms_ = release_ms;
+  audio_dsp_set_limiter(enabled, threshold_db, release_ms);
+}
+
+void AirPlayReceiver::set_dsp_limiter_enabled(bool enabled) {
+  this->set_dsp_limiter(enabled, this->limiter_threshold_db_, this->limiter_release_ms_);
+}
+
+void AirPlayReceiver::set_dsp_limiter_threshold(float threshold_db) {
+  this->set_dsp_limiter(this->limiter_enabled_, threshold_db, this->limiter_release_ms_);
+}
+
 void AirPlayReceiver::publish_dsp_filter_(int index) {
   audio_dsp_set_filter((size_t) index, this->dsp_filters_[(size_t) index]);
 }
@@ -243,6 +296,9 @@ void AirPlayReceiver::warn_if_dsp_clips_() {
     }
   }
   const float headroom_db = boost_db + this->dsp_preamp_db_;
+  if (this->limiter_enabled_) {
+    return;  // the limiter holds peaks under its ceiling; nothing clips
+  }
   if (headroom_db > 0.0f) {
     ESP_LOGW(TAG, "DSP boosts up to %+.1f dB with preamp %+.1f dB: peaks above -%.1f dBFS will clip. "
                   "Set dsp.preamp to %+.1f dB to stay clear.",

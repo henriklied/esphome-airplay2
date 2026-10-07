@@ -13,12 +13,17 @@
 //
 // Threading contract -- this is the part that matters:
 //   * audio_dsp_process() and audio_dsp_reset() run ON the playback task. They
-//     never allocate, never take a lock, and never call libm.
+//     never allocate, never take a lock, and never call libm on the per-sample
+//     path.
 //   * Every audio_dsp_set_*() recomputes coefficients (sin/cos/pow) and MUST be
 //     called from a non-realtime context -- component setup() or the ESPHome
-//     main loop. They publish by filling the inactive coefficient bank and then
-//     flipping a single index, so the audio task always reads one coherent
-//     bank without blocking.
+//     main loop -- with one exception: audio_dsp_set_sample_rate(), which the
+//     playback task calls while reclocking, before the new stream is audible.
+//     Writers serialise on a mutex the audio task never takes. They publish by
+//     filling the inactive coefficient bank and then flipping a single index;
+//     the audio task snapshots the active bank once per block.
+//   * audio_dsp_set_volume_q15() is the other exception: it only stores a value
+//     and is safe from any task.
 // Filter *state* deliberately lives outside the banks and survives a
 // coefficient swap; zeroing it on every edit would click on each knob turn.
 
@@ -104,9 +109,9 @@ void audio_dsp_set_enabled(bool enabled);
 bool audio_dsp_is_enabled(void);
 
 /**
- * True when the stage would alter the signal: enabled, and either a preamp
- * other than 0 dB or at least one section. Lets the caller skip the whole
- * conversion when nothing is configured.
+ * True when the stage would alter the signal: enabled, and a preamp other than
+ * 0 dB, at least one section, or any dynamic stage. Lets the caller skip the
+ * whole conversion when nothing is configured.
  */
 bool audio_dsp_is_active(void);
 
@@ -133,6 +138,95 @@ void audio_dsp_process(int16_t *buf, size_t frames);
  * preamp is too high. Diagnostic only.
  */
 float audio_dsp_take_peak(void);
+
+// ---- Dynamic stages ------------------------------------------------------
+// Processing order per stereo frame:
+//   preamp -> biquad cascade -> loudness shelf -> + synthesized bass harmonics
+//   -> stereo width -> look-ahead limiter -> round and clamp
+// The harmonic generator taps the signal after the preamp but BEFORE the
+// cascade, so a protective high-pass cannot starve it of the very bass it is
+// standing in for. Each stage is off until configured, and an off stage costs
+// nothing per sample.
+
+/**
+ * Volume-following bass lift (loudness compensation). The ear loses bass
+ * faster than mids as level drops, so the shelf boosts more the further the
+ * volume sits below full scale:
+ *
+ *   boost_db = max_boost_db * clamp(-volume_db / range_db, 0, 1)
+ *
+ * where volume_db is the playback gain (audio_dsp_set_volume_q15). At full
+ * volume the shelf is flat, so the limiter sees no extra bass where headroom
+ * is scarcest.
+ *
+ * @param frequency_hz  shelf corner.
+ * @param max_boost_db  lift at or below -range_db volume. 0 disables.
+ * @param range_db      volume attenuation (positive dB) at which the full
+ *                      boost is reached.
+ */
+void audio_dsp_set_loudness(float frequency_hz, float max_boost_db, float range_db);
+
+/**
+ * Report the playback gain the loudness stage follows. Safe from any task: it
+ * only stores the value; audio_dsp_service() turns it into coefficients.
+ *
+ * @param volume_q15  linear gain, 32768 = unity, as applied by audio_output.
+ */
+void audio_dsp_set_volume_q15(int32_t volume_q15);
+
+/**
+ * Apply a pending loudness change. Call from the ESPHome main loop; it does
+ * the libm work audio_dsp_set_volume_q15() deliberately avoids.
+ */
+void audio_dsp_service(void);
+
+/// Loudness lift currently designed into the shelf, in dB.
+float audio_dsp_get_loudness_boost_db(void);
+
+/**
+ * Psychoacoustic bass. Bass below `frequency_hz` -- where a small cabinet runs
+ * out -- is isolated from the mono sum and replaced by its 2nd and 3rd
+ * harmonics, which the speaker can play. The ear infers the missing
+ * fundamental from the harmonic series. The harmonics are built from
+ * Chebyshev polynomials of the envelope-normalised band, so their level tracks
+ * the bass linearly instead of growing with drive like a distortion would.
+ *
+ * @param frequency_hz  upper edge of the band to synthesize from.
+ * @param amount        harmonic level relative to the source band; 1.0 is
+ *                      roughly equal energy. 0 disables.
+ */
+void audio_dsp_set_bass_enhancer(float frequency_hz, float amount);
+
+/**
+ * Mid/side stereo width above `frequency_hz`. 1.0 is unchanged, above widens,
+ * below narrows (0 is mono above the corner). Bass stays at its original width
+ * so the low end keeps its weight in the centre.
+ */
+void audio_dsp_set_stereo_width(float width, float frequency_hz);
+
+/**
+ * Look-ahead peak limiter on the final output, stereo-linked. Gain reduction
+ * is guaranteed to be in place before a peak reaches the output (no
+ * overshoot), and recovers with an exponential release. Adds
+ * audio_dsp_get_latency_frames() of delay while enabled.
+ *
+ * @param threshold_db  ceiling in dBFS (negative).
+ * @param release_ms    time constant of the gain recovery.
+ */
+void audio_dsp_set_limiter(bool enabled, float threshold_db, float release_ms);
+
+/**
+ * Frames of delay the stage adds to the output: the limiter's look-ahead when
+ * it is in the path, else 0. The playout clock adds this so AirPlay sync holds.
+ */
+uint32_t audio_dsp_get_latency_frames(void);
+
+/**
+ * Deepest limiter gain reduction since the last call, in dB (<= 0), then
+ * reset. Diagnostic: a value that sits at several dB while the volume is low
+ * means the loudness lift or the enhancer is set too hot.
+ */
+float audio_dsp_take_limiter_reduction_db(void);
 
 /**
  * Log the active cascade.

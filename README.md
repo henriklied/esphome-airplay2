@@ -101,7 +101,7 @@ airplay_receiver:
 * **sample_rate** (Optional, int): Output sample rate (default: 44100);
 * **audio_channel_mode** (Optional, string): `stereo`, `mono`, `left` or `right`. Use `left`/`right` for a stereo pair of boards (default: stereo);
 * **buffer_size** (Optional, int): Internal buffer size in bytes (default: 1000000);
-* **dsp** (Optional): Output filter cascade, see [Output DSP](#output-dsp).
+* **dsp** (Optional): Output filter cascade and dynamic stages, see [Output DSP](#output-dsp).
 
 Leaving the three I2S pins unset is valid. You get a receiver that pairs and plays silently, which is
 occasionally useful for testing pairing on a board with no DAC attached.
@@ -145,6 +145,44 @@ Each filter:
 A positive `gain` without a matching negative `preamp` clips at high volume. The component logs the
 preamp it wants at boot. The stage clamps instead of wrapping, so what you hear is distortion on
 peaks, not noise.
+
+### Dynamic stages
+
+Four optional stages make a small speaker sound larger than its static EQ allows. Each is off until
+configured. Order: preamp, `filters`, loudness, bass enhancer, stereo width, limiter.
+
+```yaml
+  dsp:
+    loudness:
+      frequency: 120Hz
+      max_boost: 8dB
+      range: 30dB
+    bass_enhancer:
+      frequency: 80Hz
+      amount: 1.0
+    stereo_width:
+      width: 1.4
+      frequency: 300Hz
+    limiter:
+      threshold: -1dB
+      release: 100ms
+```
+
+* **loudness**: Low shelf whose lift follows the playback volume: flat at full volume, `max_boost`
+  once the volume is `range` below it. Compensates for the ear losing bass at low level.
+* **bass_enhancer**: Replaces bass below `frequency` (the speaker's lower limit) with its 2nd and 3rd
+  harmonics, which the ear reads as the missing fundamental. `amount` 1.0 is roughly equal level.
+  The harmonics track the bass level linearly; they are not distortion that grows with drive.
+* **stereo_width**: Mid/side width above `frequency`. 1.0 is unchanged, 0 is mono; bass keeps its
+  width.
+* **limiter**: Stereo-linked look-ahead peak limiter, last in the chain. Peaks never exceed
+  `threshold`. Adds 1.5 ms of delay, which the playout clock includes, so AirPlay sync holds. With it
+  enabled, boosts no longer need a matching negative `preamp`.
+
+Runtime setters: `set_dsp_loudness_boost(db)`, `set_dsp_bass_enhancer_amount(x)`,
+`set_dsp_stereo_width_amount(x)`, `set_dsp_limiter_enabled(bool)`, `set_dsp_limiter_threshold(db)`.
+`get_dsp_loudness_now()` returns the lift in effect; `take_dsp_limiter_reduction()` returns the
+deepest gain reduction since the last call.
 
 ### Runtime tuning
 

@@ -54,6 +54,16 @@ _CONFIG_FILTER_TYPE = "type"
 _CONFIG_FILTER_FREQUENCY = "frequency"
 _CONFIG_FILTER_Q = "q"
 _CONFIG_FILTER_GAIN = "gain"
+_CONFIG_DSP_LOUDNESS = "loudness"
+_CONFIG_DSP_BASS_ENHANCER = "bass_enhancer"
+_CONFIG_DSP_STEREO_WIDTH = "stereo_width"
+_CONFIG_DSP_LIMITER = "limiter"
+_CONFIG_MAX_BOOST = "max_boost"
+_CONFIG_RANGE = "range"
+_CONFIG_AMOUNT = "amount"
+_CONFIG_WIDTH = "width"
+_CONFIG_THRESHOLD = "threshold"
+_CONFIG_RELEASE = "release"
 
 # Output channel mode -> audio_channel_mode_t (audio/audio_output.h): 0=STEREO
 # 1=LEFT 2=RIGHT 3=MONO. Applied after audio_output_init() so the AuMONO
@@ -116,10 +126,56 @@ _DSP_FILTER_SCHEMA = cv.All(
     _validate_dsp_filter,
 )
 
+# Volume-following bass lift: the shelf reaches max_boost once the volume is
+# `range` below full scale, and is flat at full volume.
+_DSP_LOUDNESS_SCHEMA = cv.Schema(
+    {
+        cv.Optional(_CONFIG_FILTER_FREQUENCY, default="100Hz"): cv.frequency,
+        cv.Required(_CONFIG_MAX_BOOST): cv.All(cv.decibel, cv.float_range(min=0.0, max=15.0)),
+        cv.Optional(_CONFIG_RANGE, default="30dB"): cv.All(cv.decibel, cv.float_range(min=1.0, max=60.0)),
+    }
+)
+
+# Synthesizes 2nd/3rd harmonics of the bass below `frequency` -- the speaker's
+# lower limit -- so the ear hears the fundamental the cabinet cannot play.
+_DSP_BASS_ENHANCER_SCHEMA = cv.Schema(
+    {
+        cv.Optional(_CONFIG_FILTER_FREQUENCY, default="90Hz"): cv.All(
+            cv.frequency, cv.float_range(min=30.0, max=300.0)
+        ),
+        cv.Optional(_CONFIG_AMOUNT, default=1.0): cv.float_range(min=0.0, max=3.0),
+    }
+)
+
+# Mid/side width above `frequency`; bass keeps its original width.
+_DSP_STEREO_WIDTH_SCHEMA = cv.Schema(
+    {
+        cv.Required(_CONFIG_WIDTH): cv.float_range(min=0.0, max=3.0),
+        cv.Optional(_CONFIG_FILTER_FREQUENCY, default="300Hz"): cv.frequency,
+    }
+)
+
+# Look-ahead peak limiter, last in the chain. Adds 1.5 ms of output delay,
+# which the playout clock accounts for.
+_DSP_LIMITER_SCHEMA = cv.Schema(
+    {
+        cv.Optional(_CONFIG_DSP_ENABLED, default=True): cv.boolean,
+        cv.Optional(_CONFIG_THRESHOLD, default="-1dB"): cv.All(cv.decibel, cv.float_range(min=-24.0, max=0.0)),
+        cv.Optional(_CONFIG_RELEASE, default="100ms"): cv.All(
+            cv.positive_time_period_milliseconds,
+            cv.Range(min=cv.TimePeriod(milliseconds=10), max=cv.TimePeriod(milliseconds=2000)),
+        ),
+    }
+)
+
 # Output DSP. Direct AirPlay never passes through Music Assistant, so the
 # speaker correction MA would have applied has to run on the board instead.
 _DSP_SCHEMA = cv.Schema(
     {
+        cv.Optional(_CONFIG_DSP_LOUDNESS): _DSP_LOUDNESS_SCHEMA,
+        cv.Optional(_CONFIG_DSP_BASS_ENHANCER): _DSP_BASS_ENHANCER_SCHEMA,
+        cv.Optional(_CONFIG_DSP_STEREO_WIDTH): _DSP_STEREO_WIDTH_SCHEMA,
+        cv.Optional(_CONFIG_DSP_LIMITER): _DSP_LIMITER_SCHEMA,
         cv.Optional(_CONFIG_DSP_ENABLED, default=True): cv.boolean,
         # Negative preamp buys back the headroom a positive shelf spends. The
         # component warns at boot if the configured boost exceeds it.
@@ -257,6 +313,24 @@ def _add_dsp(var, dsp_config) -> None:
                 filter_config[_CONFIG_FILTER_FREQUENCY],
                 filter_config[_CONFIG_FILTER_Q],
                 filter_config[_CONFIG_FILTER_GAIN],
+            )
+        )
+    if loudness := dsp_config.get(_CONFIG_DSP_LOUDNESS):
+        cg.add(
+            var.set_dsp_loudness(
+                loudness[_CONFIG_FILTER_FREQUENCY], loudness[_CONFIG_MAX_BOOST], loudness[_CONFIG_RANGE]
+            )
+        )
+    if enhancer := dsp_config.get(_CONFIG_DSP_BASS_ENHANCER):
+        cg.add(var.set_dsp_bass_enhancer(enhancer[_CONFIG_FILTER_FREQUENCY], enhancer[_CONFIG_AMOUNT]))
+    if width := dsp_config.get(_CONFIG_DSP_STEREO_WIDTH):
+        cg.add(var.set_dsp_stereo_width(width[_CONFIG_WIDTH], width[_CONFIG_FILTER_FREQUENCY]))
+    if limiter := dsp_config.get(_CONFIG_DSP_LIMITER):
+        cg.add(
+            var.set_dsp_limiter(
+                limiter[_CONFIG_DSP_ENABLED],
+                limiter[_CONFIG_THRESHOLD],
+                float(limiter[_CONFIG_RELEASE].total_milliseconds),
             )
         )
 

@@ -1,6 +1,7 @@
-// airplay_receiver output DSP -- RBJ biquad cascade on the playout path.
-// See audio_dsp.h for the threading contract; it is the load-bearing part of
-// this file.
+// airplay_receiver output DSP -- RBJ biquad cascade plus the dynamic stages
+// (loudness, harmonic bass, stereo width, look-ahead limiter) on the playout
+// path. See audio_dsp.h for the threading contract; it is the load-bearing
+// part of this file.
 
 #include "audio_dsp.h"
 
@@ -9,6 +10,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <mutex>
 
 namespace esphome {
 namespace airplay_receiver {
@@ -31,6 +33,35 @@ constexpr float MAX_FREQUENCY_FRACTION = 0.49f;
 constexpr float MIN_Q = 0.05f;
 /// M_PI is not guaranteed by <cmath> under a strict -std=c++NN, so carry it.
 constexpr float PI_F = 3.14159265358979323846f;
+constexpr float MS_PER_S = 1000.0f;
+
+/// Loudness is redesigned only when the lift moves by at least this much, so a
+/// volume ramp does not churn coefficients on every step.
+constexpr float LOUDNESS_STEP_DB = 0.1f;
+
+/// Harmonic bass: the source band starts this fraction of the corner below it
+/// (nothing useful lives under ~20 Hz, and rumble would only feed the envelope).
+constexpr float ENHANCER_SOURCE_LOW_FRACTION = 0.25f;
+constexpr float ENHANCER_SOURCE_LOW_MIN_HZ = 20.0f;
+/// The 3rd harmonic of the corner frequency must survive the output band.
+constexpr float ENHANCER_OUTPUT_HIGH_MULTIPLE = 4.0f;
+/// Envelope release. Longer than the period of the lowest bass note so the
+/// normalisation does not ripple at the fundamental (which would add
+/// intermodulation of its own).
+constexpr float ENHANCER_ENVELOPE_RELEASE_MS = 100.0f;
+/// Below this envelope (sample units) the band is silence and normalising it
+/// would only amplify noise.
+constexpr float ENHANCER_ENVELOPE_FLOOR = 1.0f;
+/// Harmonic mix: 2nd for weight, 3rd so the series (2f, 3f) implies f.
+constexpr float ENHANCER_H2_WEIGHT = 0.6f;
+constexpr float ENHANCER_H3_WEIGHT = 0.4f;
+
+/// Look-ahead long enough to ramp gain down over a full cycle of ~700 Hz, short
+/// enough to be irrelevant to AirPlay sync.
+constexpr float LIMITER_LOOKAHEAD_MS = 1.5f;
+/// Covers the look-ahead at 96 kHz, plus the one extra entry the min-deque holds
+/// between a push and the pop that follows it.
+constexpr uint32_t LIMITER_MAX_LOOKAHEAD = 160;
 
 /// Normalized biquad (a0 divided out), transposed direct form II.
 struct Biquad {
@@ -41,30 +72,137 @@ struct Biquad {
   float a2 = 0.0f;
 };
 
+/// Transposed direct form II state for one biquad on one signal.
+struct BiquadState {
+  float z1 = 0.0f;
+  float z2 = 0.0f;
+
+  inline float run(const Biquad &c, float x) {
+    const float y = c.b0 * x + this->z1;
+    this->z1 = c.b1 * x - c.a1 * y + this->z2;
+    this->z2 = c.b2 * x - c.a2 * y;
+    return y;
+  }
+};
+
 /// A complete, self-consistent coefficient set. Two of these are double
 /// buffered so the audio task never observes a half-written cascade.
 struct CoeffBank {
   Biquad sections[AIRPLAY_DSP_MAX_FILTERS];
   size_t count = 0;
   float preamp_lin = 1.0f;
+
+  bool loudness_on = false;
+  Biquad loudness;
+
+  bool enhancer_on = false;
+  Biquad enhancer_source_high_pass;
+  Biquad enhancer_source_low_pass;  // run twice: 4th-order cut above the corner
+  Biquad enhancer_output_high_pass;
+  Biquad enhancer_output_low_pass;
+  float enhancer_amount = 0.0f;
+  float enhancer_release = 0.0f;
+
+  bool width_on = false;
+  Biquad width_side_high_pass;
+  /// width - 1: the extra side signal added above the corner.
+  float width_extra = 0.0f;
+
+  bool limiter_on = false;
+  uint32_t limiter_lookahead = 0;
+  float limiter_inv_lookahead = 0.0f;
+  float limiter_threshold = 0.0f;  // sample units
+  float limiter_release = 0.0f;
 };
 
 CoeffBank g_banks[2];
 std::atomic<uint8_t> g_active_bank{0};
 std::atomic<bool> g_enabled{true};
+std::atomic<bool> g_reset_requested{false};
+std::atomic<uint32_t> g_latency_frames{0};
+std::atomic<int32_t> g_volume_q15{32768};
 
-// Filter state, indexed [section][channel]. Deliberately outside the banks:
-// it must survive a coefficient swap or every edit clicks.
-float g_z1[AIRPLAY_DSP_MAX_FILTERS][CHANNELS];
-float g_z2[AIRPLAY_DSP_MAX_FILTERS][CHANNELS];
+// Serialises writers (main loop, setup, and the playback task's reclock). The
+// audio path never takes it.
+std::mutex g_writer_mutex;
 
-// Configuration in human units. Writer-thread only.
+// ---- Audio-task state ----------------------------------------------------
+// Touched only by audio_dsp_process(). Resets requested from other tasks go
+// through g_reset_requested, so nothing here is ever written from two tasks.
+
+CoeffBank g_snapshot;
+BiquadState g_cascade_state[AIRPLAY_DSP_MAX_FILTERS][CHANNELS];
+BiquadState g_loudness_state[CHANNELS];
+
+struct EnhancerState {
+  BiquadState source_high_pass;
+  BiquadState source_low_pass[2];
+  BiquadState output_high_pass;
+  BiquadState output_low_pass;
+  float envelope = 0.0f;
+};
+EnhancerState g_enhancer_state;
+
+BiquadState g_width_state;
+
+/**
+ * Look-ahead limiter state. Gain computation, per frame n:
+ *   required[n] = min(1, threshold / peak[n])
+ *   held[n]     = min(required[n-L+1 .. n])          (sliding minimum, L frames)
+ *   released[n] = held[n] if lower, else an exponential rise toward it
+ *   gain[n]     = mean(released[n-L+1 .. n])         (box filter, L frames)
+ * and the audio is delayed by L-1 frames. Every term of the mean is <= the
+ * required gain of the sample leaving the delay line, so the output can never
+ * exceed the threshold: the attack is a ramp that lands exactly on time.
+ */
+struct LimiterState {
+  uint32_t lookahead = 0;
+  float delay[LIMITER_MAX_LOOKAHEAD][CHANNELS];
+  uint32_t delay_pos = 0;
+  float box[LIMITER_MAX_LOOKAHEAD];
+  uint32_t box_pos = 0;
+  float box_sum = 0.0f;
+  // Monotonic deque for the sliding minimum: values ascend from the front.
+  float deque_value[LIMITER_MAX_LOOKAHEAD];
+  uint32_t deque_frame[LIMITER_MAX_LOOKAHEAD];
+  uint32_t deque_head = 0;
+  uint32_t deque_size = 0;
+  uint32_t frame = 0;
+  float released = 1.0f;
+};
+LimiterState g_limiter;
+
+// Previous block's stage switches, to clear a stage's state as it comes on.
+bool g_was_loudness_on = false;
+bool g_was_enhancer_on = false;
+bool g_was_width_on = false;
+
+std::atomic<uint32_t> g_peak_samples{0};
+/// Lowest limiter gain since the last take, as gain * LIMITER_GAIN_SCALE.
+constexpr float LIMITER_GAIN_SCALE = 1000000.0f;
+std::atomic<uint32_t> g_limiter_min_gain{(uint32_t) LIMITER_GAIN_SCALE};
+
+// ---- Configuration in human units. Writer side, under g_writer_mutex. ----
+
 AirPlayDspFilter g_filters[AIRPLAY_DSP_MAX_FILTERS];
 size_t g_count = 0;
 float g_preamp_db = 0.0f;
 uint32_t g_sample_rate = 44100;
 
-std::atomic<uint32_t> g_peak_samples{0};
+float g_loudness_frequency_hz = 100.0f;
+float g_loudness_max_boost_db = 0.0f;
+float g_loudness_range_db = 30.0f;
+float g_loudness_boost_db = 0.0f;  // currently designed in
+
+float g_enhancer_frequency_hz = 90.0f;
+float g_enhancer_amount = 0.0f;
+
+float g_width = 1.0f;
+float g_width_frequency_hz = 300.0f;
+
+bool g_limiter_enabled = false;
+float g_limiter_threshold_db = -1.0f;
+float g_limiter_release_ms = 100.0f;
 
 const char *filter_type_name(airplay_dsp_filter_type_t type) {
   switch (type) {
@@ -184,19 +322,79 @@ bool design_biquad(const AirPlayDspFilter &f, uint32_t sample_rate, Biquad *out)
          std::isfinite(out->a1) && std::isfinite(out->a2);
 }
 
+
+bool design_section(airplay_dsp_filter_type_t type, float frequency_hz, float q, float gain_db, Biquad *out) {
+  AirPlayDspFilter filter;
+  filter.type = type;
+  filter.frequency_hz = frequency_hz;
+  filter.q = q;
+  filter.gain_db = gain_db;
+  return design_biquad(filter, g_sample_rate, out);
+}
+
+/// Per-sample smoothing coefficient for an exponential with time constant `ms`.
+float time_constant_coefficient(float ms) {
+  const float samples = ms / MS_PER_S * (float) g_sample_rate;
+  return samples > 0.0f ? expf(-1.0f / samples) : 0.0f;
+}
+
+void design_loudness(CoeffBank &bank) {
+  bank.loudness_on = g_loudness_max_boost_db != 0.0f &&
+                     design_section(AIRPLAY_DSP_LOW_SHELF, g_loudness_frequency_hz, DEFAULT_Q, g_loudness_boost_db,
+                                    &bank.loudness);
+}
+
+void design_enhancer(CoeffBank &bank) {
+  bank.enhancer_on = false;
+  if (g_enhancer_amount <= 0.0f) {
+    return;
+  }
+  const float source_low_hz =
+      fmaxf(g_enhancer_frequency_hz * ENHANCER_SOURCE_LOW_FRACTION, ENHANCER_SOURCE_LOW_MIN_HZ);
+  const float output_high_hz = fminf(g_enhancer_frequency_hz * ENHANCER_OUTPUT_HIGH_MULTIPLE,
+                                     (float) g_sample_rate * MAX_FREQUENCY_FRACTION * 0.9f);
+  bank.enhancer_on =
+      design_section(AIRPLAY_DSP_HIGH_PASS, source_low_hz, DEFAULT_Q, 0.0f, &bank.enhancer_source_high_pass) &&
+      design_section(AIRPLAY_DSP_LOW_PASS, g_enhancer_frequency_hz, DEFAULT_Q, 0.0f, &bank.enhancer_source_low_pass) &&
+      design_section(AIRPLAY_DSP_HIGH_PASS, g_enhancer_frequency_hz, DEFAULT_Q, 0.0f,
+                     &bank.enhancer_output_high_pass) &&
+      design_section(AIRPLAY_DSP_LOW_PASS, output_high_hz, DEFAULT_Q, 0.0f, &bank.enhancer_output_low_pass);
+  bank.enhancer_amount = g_enhancer_amount;
+  bank.enhancer_release = time_constant_coefficient(ENHANCER_ENVELOPE_RELEASE_MS);
+}
+
+void design_width(CoeffBank &bank) {
+  bank.width_on = g_width != 1.0f &&
+                  design_section(AIRPLAY_DSP_HIGH_PASS, g_width_frequency_hz, DEFAULT_Q, 0.0f,
+                                 &bank.width_side_high_pass);
+  bank.width_extra = g_width - 1.0f;
+}
+
+void design_limiter(CoeffBank &bank) {
+  bank.limiter_on = g_limiter_enabled;
+  uint32_t lookahead = (uint32_t) lroundf(LIMITER_LOOKAHEAD_MS / MS_PER_S * (float) g_sample_rate);
+  if (lookahead < 2) {
+    lookahead = 2;
+  } else if (lookahead > LIMITER_MAX_LOOKAHEAD - 1) {
+    lookahead = LIMITER_MAX_LOOKAHEAD - 1;
+  }
+  bank.limiter_lookahead = lookahead;
+  bank.limiter_inv_lookahead = 1.0f / (float) lookahead;
+  bank.limiter_threshold = fminf(powf(10.0f, g_limiter_threshold_db / 20.0f) * PCM_FULL_SCALE, PCM_MAX);
+  bank.limiter_release = time_constant_coefficient(g_limiter_release_ms);
+}
+
 /**
- * Rebuild the inactive bank from the human-unit config and publish it.
+ * Rebuild the inactive bank from the human-unit config and publish it. Caller
+ * holds g_writer_mutex.
  *
- * State for sections that are newly in range is zeroed before the flip, while
- * the audio task still cannot reach them; sections that merely changed shape
- * keep their state so a live edit does not click.
+ * Filter state is not touched here: it belongs to the audio task, which clears
+ * whatever a new bank brings into use (see audio_dsp_process()).
  */
 void rebuild_and_publish() {
   const uint8_t active = g_active_bank.load(std::memory_order_relaxed);
   const uint8_t target = active ^ 1u;
   CoeffBank &bank = g_banks[target];
-
-  const size_t previous_count = g_banks[active].count;
 
   size_t built = 0;
   for (size_t i = 0; i < g_count && built < AIRPLAY_DSP_MAX_FILTERS; i++) {
@@ -211,22 +409,208 @@ void rebuild_and_publish() {
   }
   bank.count = built;
   bank.preamp_lin = powf(10.0f, g_preamp_db / 20.0f);
+  design_loudness(bank);
+  design_enhancer(bank);
+  design_width(bank);
+  design_limiter(bank);
 
-  for (size_t i = previous_count; i < built; i++) {
-    for (size_t ch = 0; ch < CHANNELS; ch++) {
-      g_z1[i][ch] = 0.0f;
-      g_z2[i][ch] = 0.0f;
-    }
-  }
-
+  g_latency_frames.store(bank.limiter_on ? bank.limiter_lookahead - 1 : 0, std::memory_order_relaxed);
   // Release: every write above must be visible before the audio task, running
   // on the other core, can observe the new index.
   g_active_bank.store(target, std::memory_order_release);
 }
 
+float loudness_target_db(int32_t volume_q15) {
+  if (g_loudness_max_boost_db == 0.0f) {
+    return 0.0f;
+  }
+  float fraction = 1.0f;
+  if (volume_q15 > 0) {
+    const float volume_db = 20.0f * log10f((float) volume_q15 / PCM_FULL_SCALE);
+    fraction = fminf(fmaxf(-volume_db / g_loudness_range_db, 0.0f), 1.0f);
+  }
+  return g_loudness_max_boost_db * fraction;
+}
+
+// ---- Audio task ------------------------------------------------------------
+
+void limiter_reset(uint32_t lookahead) {
+  LimiterState &s = g_limiter;
+  s.lookahead = lookahead;
+  memset(s.delay, 0, sizeof(s.delay));
+  s.delay_pos = 0;
+  for (uint32_t i = 0; i < LIMITER_MAX_LOOKAHEAD; i++) {
+    s.box[i] = 1.0f;
+  }
+  s.box_pos = 0;
+  s.box_sum = (float) lookahead;
+  s.deque_head = 0;
+  s.deque_size = 0;
+  s.frame = 0;
+  s.released = 1.0f;
+}
+
+void clear_all_state() {
+  for (auto &section : g_cascade_state) {
+    for (auto &channel : section) {
+      channel = BiquadState{};
+    }
+  }
+  for (auto &channel : g_loudness_state) {
+    channel = BiquadState{};
+  }
+  g_enhancer_state = EnhancerState{};
+  g_width_state = BiquadState{};
+  limiter_reset(g_limiter.lookahead);
+}
+
+size_t g_state_count = 0;
+
+/// Clear the state of anything the new snapshot brings into use.
+void sync_state_to(const CoeffBank &bank) {
+  for (size_t i = g_state_count; i < bank.count; i++) {
+    for (auto &channel : g_cascade_state[i]) {
+      channel = BiquadState{};
+    }
+  }
+  g_state_count = bank.count;
+  if (bank.loudness_on && !g_was_loudness_on) {
+    for (auto &channel : g_loudness_state) {
+      channel = BiquadState{};
+    }
+  }
+  if (bank.enhancer_on && !g_was_enhancer_on) {
+    g_enhancer_state = EnhancerState{};
+  }
+  if (bank.width_on && !g_was_width_on) {
+    g_width_state = BiquadState{};
+  }
+  g_was_loudness_on = bank.loudness_on;
+  g_was_enhancer_on = bank.enhancer_on;
+  g_was_width_on = bank.width_on;
+  if (!bank.limiter_on) {
+    g_limiter.lookahead = 0;  // a later enable starts clean
+  } else if (bank.limiter_lookahead != g_limiter.lookahead) {
+    limiter_reset(bank.limiter_lookahead);
+  }
+}
+
+/// Synthesized harmonics of the sub-corner band of `mono`, ready to mix in.
+inline float enhancer_run(const CoeffBank &bank, float mono) {
+  EnhancerState &e = g_enhancer_state;
+  float band = e.source_high_pass.run(bank.enhancer_source_high_pass, mono);
+  band = e.source_low_pass[0].run(bank.enhancer_source_low_pass, band);
+  band = e.source_low_pass[1].run(bank.enhancer_source_low_pass, band);
+
+  // Peak envelope: instant attack keeps |band / envelope| <= 1, which is the
+  // domain where Chebyshev T2/T3 turn a sinusoid into exactly its 2nd/3rd
+  // harmonic.
+  const float magnitude = fabsf(band);
+  const float decayed = e.envelope * bank.enhancer_release;
+  e.envelope = magnitude > decayed ? magnitude : decayed;
+
+  float generated = 0.0f;
+  if (e.envelope > ENHANCER_ENVELOPE_FLOOR) {
+    const float u = band / e.envelope;
+    const float u2 = u * u;
+    const float t2 = 2.0f * u2 - 1.0f;
+    const float t3 = u * (4.0f * u2 - 3.0f);
+    generated = e.envelope * (ENHANCER_H2_WEIGHT * t2 + ENHANCER_H3_WEIGHT * t3);
+  }
+  // The high-pass also strips T2's DC term (it follows the envelope).
+  generated = e.output_high_pass.run(bank.enhancer_output_high_pass, generated);
+  generated = e.output_low_pass.run(bank.enhancer_output_low_pass, generated);
+  return generated * bank.enhancer_amount;
+}
+
+/// See LimiterState for the algorithm. Returns the gain applied.
+inline float limiter_run(const CoeffBank &bank, float *left, float *right) {
+  LimiterState &s = g_limiter;
+  const uint32_t lookahead = s.lookahead;
+
+  const float peak = fmaxf(fabsf(*left), fabsf(*right));
+  const float required = peak > bank.limiter_threshold ? bank.limiter_threshold / peak : 1.0f;
+
+  while (s.deque_size > 0) {
+    const uint32_t back = (s.deque_head + s.deque_size - 1) % LIMITER_MAX_LOOKAHEAD;
+    if (s.deque_value[back] < required) {
+      break;
+    }
+    s.deque_size--;
+  }
+  const uint32_t slot = (s.deque_head + s.deque_size) % LIMITER_MAX_LOOKAHEAD;
+  s.deque_value[slot] = required;
+  s.deque_frame[slot] = s.frame;
+  s.deque_size++;
+  // Frame indices are unsigned and wrap; the difference is still the age.
+  if (s.frame - s.deque_frame[s.deque_head] >= lookahead) {
+    s.deque_head = (s.deque_head + 1) % LIMITER_MAX_LOOKAHEAD;
+    s.deque_size--;
+  }
+  const float held = s.deque_value[s.deque_head];
+
+  s.released = held < s.released ? held : held + (s.released - held) * bank.limiter_release;
+
+  s.box_sum += s.released - s.box[s.box_pos];
+  s.box[s.box_pos] = s.released;
+  if (++s.box_pos == lookahead) {
+    // Re-sum once per window so float error in the running sum cannot drift.
+    s.box_pos = 0;
+    float sum = 0.0f;
+    for (uint32_t i = 0; i < lookahead; i++) {
+      sum += s.box[i];
+    }
+    s.box_sum = sum;
+  }
+  const float gain = s.box_sum * bank.limiter_inv_lookahead;
+
+  float *delayed = s.delay[s.delay_pos];
+  const float out_left = delayed[0] * gain;
+  const float out_right = delayed[1] * gain;
+  delayed[0] = *left;
+  delayed[1] = *right;
+  if (++s.delay_pos == lookahead - 1) {
+    s.delay_pos = 0;
+  }
+  s.frame++;
+  *left = out_left;
+  *right = out_right;
+  return gain;
+}
+
+inline int16_t to_pcm(float x) {
+  // Round rather than truncate: truncation toward zero on a bipolar signal is
+  // a half-LSB DC step at the zero crossing.
+  float rounded = roundf(x);
+  if (rounded > PCM_MAX) {
+    rounded = PCM_MAX;
+  } else if (rounded < PCM_MIN) {
+    rounded = PCM_MIN;
+  }
+  return (int16_t) rounded;
+}
+
+bool bank_is_active(const CoeffBank &bank) {
+  return bank.count > 0 || bank.preamp_lin != 1.0f || bank.loudness_on || bank.enhancer_on || bank.width_on ||
+         bank.limiter_on;
+}
+
+void store_min(std::atomic<uint32_t> &target, uint32_t value) {
+  uint32_t seen = target.load(std::memory_order_relaxed);
+  while (value < seen && !target.compare_exchange_weak(seen, value, std::memory_order_relaxed)) {
+  }
+}
+
+void store_max(std::atomic<uint32_t> &target, uint32_t value) {
+  uint32_t seen = target.load(std::memory_order_relaxed);
+  while (value > seen && !target.compare_exchange_weak(seen, value, std::memory_order_relaxed)) {
+  }
+}
+
 }  // namespace
 
 void audio_dsp_set_sample_rate(uint32_t sample_rate) {
+  std::lock_guard<std::mutex> lock(g_writer_mutex);
   if (sample_rate == 0 || sample_rate == g_sample_rate) {
     return;
   }
@@ -235,6 +619,7 @@ void audio_dsp_set_sample_rate(uint32_t sample_rate) {
 }
 
 void audio_dsp_set_filters(const AirPlayDspFilter *filters, size_t count) {
+  std::lock_guard<std::mutex> lock(g_writer_mutex);
   if (count > AIRPLAY_DSP_MAX_FILTERS) {
     ESP_LOGW(TAG, "%u filters configured, keeping the first %u", (unsigned) count,
              (unsigned) AIRPLAY_DSP_MAX_FILTERS);
@@ -248,6 +633,7 @@ void audio_dsp_set_filters(const AirPlayDspFilter *filters, size_t count) {
 }
 
 void audio_dsp_set_filter(size_t index, const AirPlayDspFilter &filter) {
+  std::lock_guard<std::mutex> lock(g_writer_mutex);
   if (index >= AIRPLAY_DSP_MAX_FILTERS) {
     ESP_LOGW(TAG, "Filter index %u out of range (max %u)", (unsigned) index, (unsigned) AIRPLAY_DSP_MAX_FILTERS - 1);
     return;
@@ -260,6 +646,7 @@ void audio_dsp_set_filter(size_t index, const AirPlayDspFilter &filter) {
 }
 
 bool audio_dsp_get_filter(size_t index, AirPlayDspFilter *out) {
+  std::lock_guard<std::mutex> lock(g_writer_mutex);
   if (index >= g_count || out == nullptr) {
     return false;
   }
@@ -270,6 +657,7 @@ bool audio_dsp_get_filter(size_t index, AirPlayDspFilter *out) {
 size_t audio_dsp_get_filter_count(void) { return g_count; }
 
 void audio_dsp_set_preamp_db(float preamp_db) {
+  std::lock_guard<std::mutex> lock(g_writer_mutex);
   if (preamp_db == g_preamp_db) {
     return;
   }
@@ -278,6 +666,67 @@ void audio_dsp_set_preamp_db(float preamp_db) {
 }
 
 float audio_dsp_get_preamp_db(void) { return g_preamp_db; }
+
+void audio_dsp_set_loudness(float frequency_hz, float max_boost_db, float range_db) {
+  std::lock_guard<std::mutex> lock(g_writer_mutex);
+  g_loudness_frequency_hz = frequency_hz;
+  g_loudness_max_boost_db = max_boost_db;
+  g_loudness_range_db = range_db > 0.0f ? range_db : 1.0f;
+  g_loudness_boost_db = loudness_target_db(g_volume_q15.load(std::memory_order_relaxed));
+  rebuild_and_publish();
+}
+
+void audio_dsp_set_volume_q15(int32_t volume_q15) { g_volume_q15.store(volume_q15, std::memory_order_relaxed); }
+
+void audio_dsp_service(void) {
+  static int32_t serviced_volume_q15 = -1;
+  const int32_t volume_q15 = g_volume_q15.load(std::memory_order_relaxed);
+  if (volume_q15 == serviced_volume_q15) {
+    return;
+  }
+  serviced_volume_q15 = volume_q15;
+  std::lock_guard<std::mutex> lock(g_writer_mutex);
+  const float target_db = loudness_target_db(volume_q15);
+  if (fabsf(target_db - g_loudness_boost_db) < LOUDNESS_STEP_DB) {
+    return;
+  }
+  g_loudness_boost_db = target_db;
+  rebuild_and_publish();
+}
+
+float audio_dsp_get_loudness_boost_db(void) { return g_loudness_boost_db; }
+
+void audio_dsp_set_bass_enhancer(float frequency_hz, float amount) {
+  std::lock_guard<std::mutex> lock(g_writer_mutex);
+  g_enhancer_frequency_hz = frequency_hz;
+  g_enhancer_amount = amount > 0.0f ? amount : 0.0f;
+  rebuild_and_publish();
+}
+
+void audio_dsp_set_stereo_width(float width, float frequency_hz) {
+  std::lock_guard<std::mutex> lock(g_writer_mutex);
+  g_width = width > 0.0f ? width : 0.0f;
+  g_width_frequency_hz = frequency_hz;
+  rebuild_and_publish();
+}
+
+void audio_dsp_set_limiter(bool enabled, float threshold_db, float release_ms) {
+  std::lock_guard<std::mutex> lock(g_writer_mutex);
+  g_limiter_enabled = enabled;
+  g_limiter_threshold_db = threshold_db < 0.0f ? threshold_db : 0.0f;
+  g_limiter_release_ms = release_ms;
+  rebuild_and_publish();
+}
+
+uint32_t audio_dsp_get_latency_frames(void) {
+  return g_enabled.load(std::memory_order_relaxed) ? g_latency_frames.load(std::memory_order_relaxed) : 0;
+}
+
+float audio_dsp_take_limiter_reduction_db(void) {
+  const uint32_t scaled = g_limiter_min_gain.exchange((uint32_t) LIMITER_GAIN_SCALE, std::memory_order_relaxed);
+  const float gain = (float) scaled / LIMITER_GAIN_SCALE;
+  return gain > 0.0f ? 20.0f * log10f(gain) : -120.0f;
+}
 
 void audio_dsp_set_enabled(bool enabled) {
   if (g_enabled.exchange(enabled, std::memory_order_relaxed) != enabled && enabled) {
@@ -291,62 +740,72 @@ bool audio_dsp_is_active(void) {
   if (!g_enabled.load(std::memory_order_relaxed)) {
     return false;
   }
-  const CoeffBank &bank = g_banks[g_active_bank.load(std::memory_order_acquire)];
-  return bank.count > 0 || bank.preamp_lin != 1.0f;
+  return bank_is_active(g_banks[g_active_bank.load(std::memory_order_acquire)]);
 }
 
-void audio_dsp_reset(void) {
-  memset(g_z1, 0, sizeof(g_z1));
-  memset(g_z2, 0, sizeof(g_z2));
-}
+void audio_dsp_reset(void) { g_reset_requested.store(true, std::memory_order_relaxed); }
 
 void audio_dsp_process(int16_t *buf, size_t frames) {
   if (buf == nullptr || frames == 0 || !g_enabled.load(std::memory_order_relaxed)) {
     return;
   }
   // Acquire pairs with the release in rebuild_and_publish(): the bank contents
-  // are guaranteed visible once the index is.
-  const CoeffBank &bank = g_banks[g_active_bank.load(std::memory_order_acquire)];
-  const size_t sections = bank.count;
-  const float preamp = bank.preamp_lin;
-  if (sections == 0 && preamp == 1.0f) {
+  // are guaranteed visible once the index is. The copy pins one bank for the
+  // whole block, so a writer flipping twice meanwhile cannot change it mid-way.
+  g_snapshot = g_banks[g_active_bank.load(std::memory_order_acquire)];
+  const CoeffBank &bank = g_snapshot;
+  if (!bank_is_active(bank)) {
     return;  // bypass is bit-exact
   }
+  if (g_reset_requested.exchange(false, std::memory_order_relaxed)) {
+    clear_all_state();
+  }
+  sync_state_to(bank);
 
+  const size_t sections = bank.count;
+  const float preamp = bank.preamp_lin;
   float peak = 0.0f;
+  float min_gain = 1.0f;
   for (size_t i = 0; i < frames; i++) {
-    for (size_t ch = 0; ch < CHANNELS; ch++) {
-      float x = (float) buf[i * CHANNELS + ch] * preamp;
-      for (size_t s = 0; s < sections; s++) {
-        const Biquad &c = bank.sections[s];
-        // Transposed direct form II: one multiply-add chain per section, and
-        // the state is the pair that carries across samples.
-        const float y = c.b0 * x + g_z1[s][ch];
-        g_z1[s][ch] = c.b1 * x - c.a1 * y + g_z2[s][ch];
-        g_z2[s][ch] = c.b2 * x - c.a2 * y;
-        x = y;
-      }
-      const float magnitude = fabsf(x);
-      if (magnitude > peak) {
-        peak = magnitude;
-      }
-      // Round rather than truncate: truncation toward zero on a bipolar signal
-      // is a half-LSB DC step at the zero crossing.
-      float rounded = roundf(x);
-      if (rounded > PCM_MAX) {
-        rounded = PCM_MAX;
-      } else if (rounded < PCM_MIN) {
-        rounded = PCM_MIN;
-      }
-      buf[i * CHANNELS + ch] = (int16_t) rounded;
+    float left = (float) buf[i * CHANNELS] * preamp;
+    float right = (float) buf[i * CHANNELS + 1] * preamp;
+
+    const float harmonics = bank.enhancer_on ? enhancer_run(bank, (left + right) * 0.5f) : 0.0f;
+
+    for (size_t s = 0; s < sections; s++) {
+      left = g_cascade_state[s][0].run(bank.sections[s], left);
+      right = g_cascade_state[s][1].run(bank.sections[s], right);
     }
+    if (bank.loudness_on) {
+      left = g_loudness_state[0].run(bank.loudness, left);
+      right = g_loudness_state[1].run(bank.loudness, right);
+    }
+    left += harmonics;
+    right += harmonics;
+
+    if (bank.width_on) {
+      const float mid = (left + right) * 0.5f;
+      float side = (left - right) * 0.5f;
+      side += bank.width_extra * g_width_state.run(bank.width_side_high_pass, side);
+      left = mid + side;
+      right = mid - side;
+    }
+
+    if (bank.limiter_on) {
+      const float gain = limiter_run(bank, &left, &right);
+      if (gain < min_gain) {
+        min_gain = gain;
+      }
+    }
+
+    peak = fmaxf(peak, fmaxf(fabsf(left), fabsf(right)));
+    buf[i * CHANNELS] = to_pcm(left);
+    buf[i * CHANNELS + 1] = to_pcm(right);
   }
 
   // Held in raw sample units; audio_dsp_take_peak() scales to full scale.
-  const uint32_t peak_samples = (uint32_t) peak;
-  uint32_t seen = g_peak_samples.load(std::memory_order_relaxed);
-  while (peak_samples > seen && !g_peak_samples.compare_exchange_weak(seen, peak_samples, std::memory_order_relaxed)) {
-  }
+  store_max(g_peak_samples, (uint32_t) peak);
+  store_min(g_limiter_min_gain, (uint32_t) (min_gain * LIMITER_GAIN_SCALE));
 }
 
 float audio_dsp_take_peak(void) {
@@ -354,8 +813,9 @@ float audio_dsp_take_peak(void) {
 }
 
 void audio_dsp_log_cascade(const char *tag, int level) {
+  std::lock_guard<std::mutex> lock(g_writer_mutex);
   const CoeffBank &bank = g_banks[g_active_bank.load(std::memory_order_acquire)];
-  if (g_count == 0 && g_preamp_db == 0.0f) {
+  if (!bank_is_active(bank) && g_count == 0) {
     esp_log_printf_(level, tag, __LINE__, "  dsp: none");
     return;
   }
@@ -368,6 +828,21 @@ void audio_dsp_log_cascade(const char *tag, int level) {
     const AirPlayDspFilter &f = g_filters[i];
     esp_log_printf_(level, tag, __LINE__, "    [%u] %s %.0f Hz Q %.2f %+.1f dB", (unsigned) i,
                     filter_type_name(f.type), f.frequency_hz, f.q, f.gain_db);
+  }
+  if (bank.loudness_on) {
+    esp_log_printf_(level, tag, __LINE__, "    loudness %.0f Hz, up to %+.1f dB over %.0f dB (now %+.1f dB)",
+                    g_loudness_frequency_hz, g_loudness_max_boost_db, g_loudness_range_db, g_loudness_boost_db);
+  }
+  if (bank.enhancer_on) {
+    esp_log_printf_(level, tag, __LINE__, "    bass enhancer below %.0f Hz, amount %.2f", g_enhancer_frequency_hz,
+                    g_enhancer_amount);
+  }
+  if (bank.width_on) {
+    esp_log_printf_(level, tag, __LINE__, "    stereo width %.2f above %.0f Hz", g_width, g_width_frequency_hz);
+  }
+  if (bank.limiter_on) {
+    esp_log_printf_(level, tag, __LINE__, "    limiter %.1f dBFS, release %.0f ms, look-ahead %u frames",
+                    g_limiter_threshold_db, g_limiter_release_ms, (unsigned) bank.limiter_lookahead);
   }
 }
 

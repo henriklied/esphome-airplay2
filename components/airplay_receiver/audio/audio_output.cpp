@@ -659,6 +659,16 @@ void audio_output_set_source_rate(int rate) {
 
 void audio_output_set_volume_q15(int32_t volume_q15) {
   g_volume_q15 = volume_q15;
+  audio_dsp_set_volume_q15(volume_q15);  // the loudness stage follows the volume
+}
+
+// The limiter's look-ahead delays every sample on its way to the DAC, so it is
+// part of the output latency the playout clock has to plan around.
+static uint32_t dsp_latency_us(void) {
+  if (g_output_rate == 0) {
+    return 0;
+  }
+  return (uint32_t) (((uint64_t) audio_dsp_get_latency_frames() * 1000000ULL) / g_output_rate);
 }
 
 uint32_t audio_output_get_hardware_latency_us(void) {
@@ -670,7 +680,8 @@ uint32_t audio_output_get_hardware_latency_us(void) {
   // occupancy oscillates between (DESC_NUM-1) and DESC_NUM descriptors. Using
   // the full ring would overstate the delay by half a descriptor.
   return (uint32_t) (((uint64_t) (2 * I2S_DMA_DESC_NUM - 1) * I2S_DMA_FRAME_NUM * 1000000ULL / 2) /
-                     g_output_rate);
+                     g_output_rate) +
+         dsp_latency_us();
 }
 
 bool audio_output_get_pipeline_us(int64_t *now_us, uint32_t *pipeline_us) {
@@ -727,9 +738,11 @@ bool audio_output_get_pipeline_us(int64_t *now_us, uint32_t *pipeline_us) {
 int64_t audio_output_get_next_playout_time_ns(int64_t now_us) {
   int64_t sampled_us = 0;
   uint32_t pipeline_us = 0;
-  if (!audio_output_get_pipeline_us(&sampled_us, &pipeline_us)) {
+  if (audio_output_get_pipeline_us(&sampled_us, &pipeline_us)) {
+    pipeline_us += dsp_latency_us();
+  } else {
     sampled_us = now_us;
-    pipeline_us = audio_output_get_hardware_latency_us();
+    pipeline_us = audio_output_get_hardware_latency_us();  // includes the DSP
   }
   return (sampled_us + (int64_t) pipeline_us + OUTPUT_PIPELINE_LATENCY_US) *
          1000LL;

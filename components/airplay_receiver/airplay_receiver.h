@@ -93,6 +93,23 @@ class AirPlayReceiver : public Component, public media_player::MediaPlayer {
   float get_dsp_preamp() const { return this->dsp_preamp_db_; }
   bool get_dsp_enabled() const { return this->dsp_enabled_; }
 
+  // Dynamic stages (see audio_dsp.h). Safe from YAML codegen and from main-loop
+  // lambdas; each call republishes the stage at once.
+  void set_dsp_loudness(float frequency_hz, float max_boost_db, float range_db);
+  void set_dsp_loudness_boost(float max_boost_db);
+  void set_dsp_bass_enhancer(float frequency_hz, float amount);
+  void set_dsp_bass_enhancer_amount(float amount);
+  void set_dsp_stereo_width(float width, float frequency_hz);
+  void set_dsp_stereo_width_amount(float width);
+  void set_dsp_limiter(bool enabled, float threshold_db, float release_ms);
+  void set_dsp_limiter_enabled(bool enabled);
+  void set_dsp_limiter_threshold(float threshold_db);
+
+  /// Loudness lift currently applied, in dB.
+  float get_dsp_loudness_now() const { return audio_dsp_get_loudness_boost_db(); }
+  /// Deepest limiter gain reduction since the last call, in dB (<= 0).
+  float take_dsp_limiter_reduction() { return audio_dsp_take_limiter_reduction_db(); }
+
   uint32_t get_buffer_size() const { return this->buffer_size_; }
 
   // ---- Diagnostics, for the HA entities in airplay-diagnostics.yaml ----
@@ -167,6 +184,18 @@ class AirPlayReceiver : public Component, public media_player::MediaPlayer {
   std::vector<AirPlayDspFilter> dsp_filters_;
   float dsp_preamp_db_{0.0f};
   bool dsp_enabled_{true};
+
+  // Dynamic stages, mirrored for the same reason. Defaults leave each one off.
+  float loudness_frequency_hz_{100.0f};
+  float loudness_max_boost_db_{0.0f};
+  float loudness_range_db_{30.0f};
+  float enhancer_frequency_hz_{90.0f};
+  float enhancer_amount_{0.0f};
+  float width_{1.0f};
+  float width_frequency_hz_{300.0f};
+  bool limiter_enabled_{false};
+  float limiter_threshold_db_{-1.0f};
+  float limiter_release_ms_{100.0f};
 
   /// Push one mirrored filter into the DSP stage after a runtime edit.
   void publish_dsp_filter_(int index);

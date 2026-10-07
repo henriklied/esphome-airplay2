@@ -101,6 +101,17 @@ id(airplay).set_dsp_preamp(-3.0f);
 id(airplay).set_dsp_enabled(false);
 ```
 
+Dynamic stages (all optional, off until configured; order after `filters`):
+
+| key | fields | notes |
+|---|---|---|
+| `loudness` | `frequency` 100Hz, `max_boost` (req), `range` 30dB | shelf lift follows volume; flat at full volume. Redesigned from `loop()` via `audio_dsp_service()` |
+| `bass_enhancer` | `frequency` 90Hz, `amount` 1.0 | 2nd+3rd harmonics of the band below `frequency`, Chebyshev on the envelope-normalised band; taps pre-cascade so the high-pass cannot starve it |
+| `stereo_width` | `width` (req), `frequency` 300Hz | M/S, side boosted above the corner only |
+| `limiter` | `enabled` true, `threshold` -1dB, `release` 100ms | look-ahead (1.5 ms), min-hold + box ramp: no overshoot. Delay is added to the playout clock (`audio_dsp_get_latency_frames()`) |
+
+Host tests: `uv run tests/test_dsp_stages.py`.
+
 ## Board pin reference
 - **Amped-ESP32-S3:** BCLK=GPIO14, LRCLK=GPIO15, DOUT=GPIO16, amp-enable=GPIO17 (PCM5100/5122 + TPA311x).
 - **Generic ESP32 + PCM5102A:** BCLK=GPIO26, LRCLK=GPIO25, DOUT=GPIO22, no amp-enable (line out).
