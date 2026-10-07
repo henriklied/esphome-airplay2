@@ -33,6 +33,7 @@
 
 #include "esphome/core/log.h"
 
+#include "esp_heap_caps.h"
 #include "esp_timer.h"
 
 #include "../allocator.h"
@@ -162,7 +163,11 @@ static esp_err_t audio_receiver_ensure_engine_v2(audio_stream_type_t type) {
     esp_err_t err =
         audio_decode_worker_create(&receiver, &receiver.decode_worker);
     if (err != ESP_OK) {
-      ESP_LOGE(TAG, "Decode worker create failed: %s", esp_err_to_name(err));
+      // The decode task's stack is the largest internal-RAM allocation the
+      // component makes; say how close the heap was.
+      ESP_LOGE(TAG, "Decode worker create failed: %s (internal free %u, largest block %u)", esp_err_to_name(err),
+               (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+               (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
       return err;
     }
   }

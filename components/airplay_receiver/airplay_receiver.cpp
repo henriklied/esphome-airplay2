@@ -12,6 +12,8 @@
 
 #include "esphome/core/log.h"
 
+#include "esp_heap_caps.h"
+
 namespace esphome {
 namespace airplay_receiver {
 
@@ -67,6 +69,11 @@ void AirPlayReceiver::setup() {
   // formatting off the core that feeds I2S, and INFO is below CONFIG -- logging
   // the cascade only from dump_config would hide it on every board that matters.
   audio_dsp_log_cascade(TAG, ESPHOME_LOG_LEVEL_INFO);
+  // The decode task needs ~56 KB of contiguous internal RAM on every stream
+  // start; anything that eats into it shows up here first.
+  ESP_LOGI(TAG, "Internal heap after DSP setup: free %u, largest block %u",
+           (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+           (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
   ESP_LOGI(TAG, "Audio output init (bclk=%d lrclk=%d dout=%d amp=%d sr=%d idle_timeout=%us)",
            this->i2s_bclk_pin_, this->i2s_lrclk_pin_, this->i2s_dout_pin_, this->amp_enable_pin_, this->sample_rate_,
            this->amp_idle_timeout_s_);

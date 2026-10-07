@@ -15,6 +15,10 @@
 #include <cstring>
 #include <mutex>
 
+#ifdef ESP_PLATFORM
+#include "esp_heap_caps.h"
+#endif
+
 namespace esphome {
 namespace airplay_receiver {
 
@@ -304,6 +308,21 @@ float g_ambience_amount = 0.0f;
 float g_ambience_decay_ms = 400.0f;
 float g_ambience_damping_hz = 5000.0f;
 float *g_ambience_buffer = nullptr;  // allocated once on first enable, never freed
+
+/**
+ * The reverb's delay memory, from PSRAM only. These boards build without
+ * CONFIG_SPIRAM_USE_MALLOC, so plain malloc() is internal RAM -- and 38 KB of
+ * that starved the decoder's 56 KB stack (ESP_ERR_NO_MEM, no audio) and then
+ * WiFi itself (abort in a scan-result allocation). No internal fallback: no
+ * ambience is the right failure, a dead board is not.
+ */
+float *allocate_ambience_buffer(size_t bytes) {
+#ifdef ESP_PLATFORM
+  return static_cast<float *>(heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+#else
+  return static_cast<float *>(std::malloc(bytes));
+#endif
+}
 
 float g_crosstalk_amount = 0.0f;
 float g_crosstalk_delay_us = 60.0f;
@@ -1028,10 +1047,10 @@ void audio_dsp_set_ambience(float amount, float decay_ms, float damping_hz) {
   g_ambience_decay_ms = decay_ms > 1.0f ? decay_ms : 1.0f;
   g_ambience_damping_hz = damping_hz;
   if (g_ambience_amount > 0.0f && g_ambience_buffer == nullptr) {
-    // Off the audio path, once. Large enough that malloc places it in PSRAM.
-    g_ambience_buffer = static_cast<float *>(std::malloc(sizeof(float) * AMBIENCE_LINES * AMBIENCE_MAX_LINE));
+    // Off the audio path, once.
+    g_ambience_buffer = allocate_ambience_buffer(sizeof(float) * AMBIENCE_LINES * AMBIENCE_MAX_LINE);
     if (g_ambience_buffer == nullptr) {
-      ESP_LOGW(TAG, "Ambience disabled: no memory for the reverb");
+      ESP_LOGW(TAG, "Ambience disabled: no PSRAM for the reverb");
     }
   }
   rebuild_and_publish();
