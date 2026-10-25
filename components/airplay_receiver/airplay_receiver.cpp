@@ -616,6 +616,9 @@ void AirPlayReceiver::handle_transport_event(TransportEvent event, const Transpo
         if (data != nullptr && data->flush.has_until_seq) {
           audio_receiver_gate_through_seq(data->flush.flush_until_seq);
         }
+        if (data != nullptr && data->flush.has_first_rtp) {
+          audio_receiver_gate_from_rtp(data->flush.first_rtp);
+        }
         audio_output_flush();
       }
       break;

@@ -182,6 +182,13 @@ void audio_receiver_seek_flush(void);
  */
 void audio_receiver_gate_through_seq(uint32_t until_seq);
 
+/**
+ * After audio_receiver_seek_flush() on a realtime FLUSH with RTP-Info: keep
+ * frames from @p first_rtp on instead of dropping every frame until the next
+ * anchor, which can arrive 1-2 s later.
+ */
+void audio_receiver_gate_from_rtp(uint32_t first_rtp);
+
 /** Arm a deferred flush for AirPlay 2 FLUSHBUFFERED with flushFromSeq. */
 void audio_receiver_set_deferred_flush(uint32_t flush_until_ts);
 

@@ -413,12 +413,21 @@ offset is the sender's, nothing is missing. First kept is sometimes `S+2`; the
 skipped seq is not new-track audio (the first kept frame has the same ~0.30 s
 offset whether it is `S+1` or `S+2`).
 
-**Realtime has the same gate, unfixed.** A Spotify session start (18:25):
-`FLUSH`, then the first anchor 1.5 s later; `blanket gate dropped 232 frames`
-(~1.85 s), and playback began 1.79 s past the anchor. This contradicts
-"Realtime resume latency" below for a fresh start, where the flush precedes
-the anchor; the resume measured there had the anchor first. Next: log
-`FLUSH`'s headers (RTP-Info seq/rtptime, if iOS sends it) and gate on them.
+**Realtime had the same gate; fixed 2026-10-25, unverified.** iOS realtime
+`FLUSH` carries `RTP-Info: seq=N;rtptime=T`, and `T` is the first frame of the
+new content: the blanket gate's first dropped frame was exactly `T` on a
+Spotify start. The first sync packet (anchor) came 1.25-2 s after the flush,
+and the blanket gate dropped everything in between: 1.12 s lost at a session
+start (18:33:57), **2.05 s** at a resume on a new stream (18:35:01), 24 ms at
+a resume that reused the anchor (18:34:20). Spotify skips send no `FLUSH`;
+the stream just continues. Now a realtime `FLUSH` with `RTP-Info` arms the RTP
+window at `T` and opens the blanket gate (`audio_receiver_gate_from_rtp()`);
+without it the blanket gate remains. Log lines: `FLUSH received: RTP-Info
+seq=.. rtptime=..`, `seek flush: keeping from rtp ..`, `RTP gate: first kept
+rtp ..`. Check: start decision start minus `rtptime` well under 0.5 s; what
+remains is the clock (anchor, PTP lock), not dropped audio. This revises
+"Realtime resume latency" below for the cases where the flush precedes the
+anchor.
 
 **Volume on a new connection** starts from the last sender volume, not a fixed
 -15 dB (`AIRPLAY_DEFAULT_VOLUME_DB`, now only the boot value). Every accepted

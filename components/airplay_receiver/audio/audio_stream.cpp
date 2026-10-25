@@ -95,6 +95,9 @@ bool audio_stream_accept_timestamp(audio_receiver_state_t *state,
       return false;  // below lower bound — forward-seek stale frame
     }
     state->discard_before_rtp_valid = false;
+    ESP_LOGI(TAG, "RTP gate: first kept rtp %lu (gate %lu, %+ld)", (unsigned long) timestamp,
+             (unsigned long) state->discard_before_rtp,
+             (long) (int32_t) (timestamp - state->discard_before_rtp));
   }
   if (state->discard_above_rtp_valid) {
     if ((int32_t) (timestamp - state->discard_above_rtp) > 0) {

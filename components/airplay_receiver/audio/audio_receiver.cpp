@@ -450,6 +450,16 @@ uint32_t audio_receiver_get_advertised_latency_us(void) {
   return audio_timing_get_advertised_latency(&receiver.timing);
 }
 
+static int stream_sample_rate(void) {
+  const int sample_rate = receiver.stream != nullptr ? receiver.stream->format.sample_rate : 0;
+  return sample_rate > 0 ? sample_rate : 44100;
+}
+
+// Window size for the upper RTP gate: 10 s of samples.  Large enough that a
+// normal 2-4 s pre-buffer passes, but small enough to reject stale frames
+// left in the TCP socket buffer after a backward seek.
+static uint32_t rtp_gate_window(void) { return (uint32_t)(10 * stream_sample_rate()); }
+
 void audio_receiver_set_anchor_time(uint64_t clock_id, uint64_t network_time_ns,
                                     uint32_t rtp_time) {
   if (!receiver.stream) {
@@ -461,14 +471,8 @@ void audio_receiver_set_anchor_time(uint64_t clock_id, uint64_t network_time_ns,
   receiver.last_anchor_rtp = rtp_time;
   receiver.last_anchor_received_us = esp_timer_get_time();
 
-  int sample_rate = receiver.stream->format.sample_rate;
-  if (sample_rate <= 0) {
-    sample_rate = 44100;
-  }
-  // Window size for the upper RTP gate: 10 s of samples.  Large enough that a
-  // normal 2-4 s pre-buffer passes, but small enough to reject stale frames
-  // left in the TCP socket buffer after a backward seek.
-  const uint32_t gate_window = (uint32_t)(10 * sample_rate);
+  const int sample_rate = stream_sample_rate();
+  const uint32_t gate_window = rtp_gate_window();
   const int32_t seek_threshold = 5 * sample_rate;
 
   // --- Phase 1: Arm RTP gates BEFORE opening the blanket gate -----------
@@ -1014,6 +1018,24 @@ void audio_receiver_gate_through_seq(uint32_t until_seq) {
   receiver.discard_all_until_anchor = false;
   ESP_LOGI(TAG, "seek flush: dropping through seq %lu instead of until the anchor",
            (unsigned long)receiver.discard_through_seq);
+}
+
+// A realtime sender starts streaming the new content right after FLUSH, but
+// its first sync packet (the anchor) can come 1-2 s later. The blanket gate
+// dropped everything in between: 1.1 s of a Spotify start and 2.05 s of a
+// resume (Geneva, 2026-10-25). FLUSH's RTP-Info rtptime is the first frame of
+// the new content, so keep from there. Arm the window, then open the blanket.
+void audio_receiver_gate_from_rtp(uint32_t first_rtp) {
+  if (receiver.stream == nullptr || receiver.stream->type != AUDIO_STREAM_REALTIME) {
+    return;
+  }
+  receiver.discard_before_rtp = first_rtp;
+  receiver.discard_above_rtp = first_rtp + rtp_gate_window();
+  receiver.discard_before_rtp_valid = true;
+  receiver.discard_above_rtp_valid = true;
+  receiver.discard_all_until_anchor = false;
+  ESP_LOGI(TAG, "seek flush: keeping from rtp %lu instead of waiting for the anchor",
+           (unsigned long)first_rtp);
 }
 
 void audio_receiver_set_deferred_flush(uint32_t flush_until_ts) {

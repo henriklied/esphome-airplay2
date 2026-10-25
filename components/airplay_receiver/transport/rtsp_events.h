@@ -99,6 +99,9 @@ struct TransportFlush {
   // content. Frames after it are the new content and must be kept.
   bool has_until_seq = false;
   uint32_t flush_until_seq = 0;
+  // Realtime FLUSH: RTP-Info rtptime, the first frame of the new content.
+  bool has_first_rtp = false;
+  uint32_t first_rtp = 0;
 };
 
 union TransportEventData {
