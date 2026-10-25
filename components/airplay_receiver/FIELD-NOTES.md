@@ -351,6 +351,15 @@ arrived and only the radio side can help.
 
 `gap` above the floor with both low means the drop is not the receiver task's.
 
+`rssi` (2026-10-25) is the last beacon's RSSI, sampled once a second (0 when
+unknown or on Ethernet). A second with fewer than 90 packets read also asks the
+main loop for `esp_wifi_statis_dump()` (buffer, RX/TX, hardware and diagnostic
+counters), at most once per 10 s, plus one at each stream start as a baseline;
+the dump follows a `wifi driver stats (rx stall|stream start):` line. Counters
+are cumulative, so compare the dumps either side of a stall. Built for the
+0.5-1 s AP -> board stalls Geneva showed on 2026-10-25, where nothing arrives
+and then a burst catches up.
+
 Requires `CONFIG_LWIP_STATS`, which the component does **not** set -- it is a
 diagnostic, not a requirement. Enable it in the board YAML when investigating;
 without it the line compiles out via `#if LWIP_STATS`.

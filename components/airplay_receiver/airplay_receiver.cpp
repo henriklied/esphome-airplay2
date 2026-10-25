@@ -11,6 +11,9 @@
 #ifdef USE_WIFI_RUNTIME_ROAMING_SUPPRESSION
 #include "esphome/components/wifi/wifi_component.h"
 #endif
+#ifdef USE_WIFI
+#include "esp_wifi.h"
+#endif
 
 #include "esphome/core/log.h"
 
@@ -104,6 +107,15 @@ void AirPlayReceiver::loop() {
   // The loudness shelf follows the volume; its redesign belongs here, off the
   // RTSP task that reports the volume and the audio task that plays it.
   audio_dsp_service();
+
+#ifdef USE_WIFI
+  // Requested by the realtime RX path at stream start and on a stall. Runs here,
+  // below every audio task, because the dump is slow and logs many lines.
+  if (const char *reason = audio_receiver_take_wifi_stats_request()) {
+    ESP_LOGI(TAG, "wifi driver stats (%s):", reason);
+    esp_wifi_statis_dump(WIFI_STATIS_BUFFER | WIFI_STATIS_RXTX | WIFI_STATIS_HW | WIFI_STATIS_DIAG);
+  }
+#endif
 
   // publish_state() must run on the main loop; the RTSP task only sets these.
   // Without this the HA entity freezes at whatever it last showed, which is

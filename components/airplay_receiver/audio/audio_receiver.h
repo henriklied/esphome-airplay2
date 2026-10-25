@@ -189,6 +189,16 @@ void audio_receiver_gate_through_seq(uint32_t until_seq);
  */
 void audio_receiver_gate_from_rtp(uint32_t first_rtp);
 
+/**
+ * Ask the main loop for a Wi-Fi driver statistics dump. Callable from any
+ * task; the dump itself is slow and logs many lines, so it must not run on
+ * an audio task. @p reason must be a string literal.
+ */
+void audio_receiver_request_wifi_stats(const char *reason);
+
+/** Take a pending dump request: its reason, or nullptr if none is pending. */
+const char *audio_receiver_take_wifi_stats_request(void);
+
 /** Arm a deferred flush for AirPlay 2 FLUSHBUFFERED with flushFromSeq. */
 void audio_receiver_set_deferred_flush(uint32_t flush_until_ts);
 
