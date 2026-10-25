@@ -639,6 +639,32 @@ Same bench and build as above, ms per frame:
 - Flashing while the bench decodes can trip the task watchdog on core 1 and
   leave the old image running; retry the upload.
 
+### Stereo AAC: esp_audio_codec against FDK (2026-10-25, measured)
+
+`tools/aac_bench/` on the Geneva, production build plus the bench, board idle.
+Each decoder in a fresh task on core 1 at priority 6; three passes per clip.
+ms per frame:
+
+| Clip | FDK avg / max | esp_audio_codec avg / max | SNR vs FDK |
+|---|---|---|---|
+| 44.1k 256k, Apple enc. | 6.68 / 9.36 | 1.89 / 2.90 | 72.5 dB |
+| 48k 256k, Apple enc. | 6.44 / 9.46 | 1.87 / 2.72 | 72.6 dB |
+| 44.1k 256k, ffmpeg enc. | 6.58 / 7.65 | 1.88 / 2.19 | not logged |
+
+- **3.5x faster**: ~4.7 ms of each 23 ms frame, ~20% of core 1, back for the
+  DSP once 5.1 no longer needs FDK.
+- **Same audio**: 72 dB is 16-bit rounding. `esp_audio_codec` output leads
+  FDK's by exactly **1024 samples** (one frame). Before swapping, check whether
+  anything in the playout path compensates for FDK's extra frame; if so it
+  must go, or sync is off by one frame.
+- **Stack 1.4 KB** against FDK's 45 KB. **Heap at open: 51.5 KB internal, no
+  PSRAM** (FDK: 8.7 KB internal, 440 KB PSRAM). Net internal RAM is roughly
+  even once the decode task stack shrinks from 56 KB; it is a CPU win, not a
+  RAM win.
+- **`esp_aac_dec_open` fails ("no enough memory for AAC buffer") while a 56 KB
+  stack is allocated** (internal free 130 KB). The stack must shrink in the
+  same change that brings the decoder back.
+
 ### Apple TV 5.1 plays (2026-10-06 night, measured)
 
 Geneva, `advertise_surround: true`, Apple TV (`.175`) sending 5.1 AAC 48 kHz:
