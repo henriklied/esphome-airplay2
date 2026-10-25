@@ -209,7 +209,10 @@ typedef struct audio_receiver_state {
   // Set by audio_receiver_seek_flush() to reject ALL incoming frames until the
   // next SETRATEANCHORTIME provides a valid anchor.
   bool discard_all_until_anchor;
-  uint32_t blanket_gate_drops;  // frames it rejected, logged when it opens
+  // Frames it rejected and their RTP range, logged when it opens.
+  uint32_t blanket_gate_drops;
+  uint32_t blanket_gate_first_rtp;
+  uint32_t blanket_gate_last_rtp;
   // Replaces the blanket gate after an immediate FLUSHBUFFERED that names its
   // last old frame: buffered frames at or before discard_through_seq (24-bit)
   // are dropped, newer ones kept. Self-disarms on the first newer frame.

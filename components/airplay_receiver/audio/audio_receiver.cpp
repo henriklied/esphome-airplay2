@@ -554,8 +554,11 @@ void audio_receiver_set_anchor_time(uint64_t clock_id, uint64_t network_time_ns,
 
   // NOW safe to clear the blanket gate — per-RTP gates are active.
   if (receiver.discard_all_until_anchor && receiver.blanket_gate_drops > 0) {
-    ESP_LOGI(TAG, "blanket gate dropped %lu frames before the anchor",
-             (unsigned long)receiver.blanket_gate_drops);
+    ESP_LOGI(TAG, "blanket gate dropped %lu frames before the anchor, rtp %lu..%lu (anchor %+ld)",
+             (unsigned long)receiver.blanket_gate_drops,
+             (unsigned long)receiver.blanket_gate_first_rtp,
+             (unsigned long)receiver.blanket_gate_last_rtp,
+             (long)(int32_t)(receiver.blanket_gate_first_rtp - rtp_time));
   }
   receiver.discard_all_until_anchor = false;
   // A seq gate still armed here has seen no newer frame. Hand over to the RTP

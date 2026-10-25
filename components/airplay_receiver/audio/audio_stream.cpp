@@ -77,7 +77,10 @@ bool audio_stream_accept_timestamp(audio_receiver_state_t *state,
   // old-track backlog is drained from the socket without decoder CPU or PCM
   // ring use.
   if (state->discard_all_until_anchor) {
-    state->blanket_gate_drops++;
+    if (state->blanket_gate_drops++ == 0) {
+      state->blanket_gate_first_rtp = timestamp;
+    }
+    state->blanket_gate_last_rtp = timestamp;
     return false;
   }
 

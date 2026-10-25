@@ -1252,11 +1252,35 @@ static void handle_pause(int socket, RtspConn *conn, const RtspRequest *req, con
   rtsp_send_ok(socket, conn, req->cseq);
 }
 
+// Log a request's header lines and body size. Diagnostic for FLUSH: a realtime
+// sender may name the first seq/rtptime of the new content (RTP-Info), which
+// would let the receiver keep frames that arrive before the next anchor.
+static void log_request_headers(const char *method, const uint8_t *raw, size_t raw_len, size_t body_len) {
+  const uint8_t *header_end = rtsp_find_header_end(raw, raw_len);
+  const char *line = (const char *)raw;
+  const char *end = header_end != nullptr ? (const char *)header_end : line + raw_len;
+  while (line < end) {
+    const char *eol = static_cast<const char *>(memchr(line, '\r', (size_t)(end - line)));
+    size_t line_len = eol != nullptr ? (size_t)(eol - line) : (size_t)(end - line);
+    ESP_LOGI(TAG, "%s header: %.*s", method, (int)line_len, line);
+    if (eol == nullptr) {
+      break;
+    }
+    line = eol + 2;
+  }
+  ESP_LOGI(TAG, "%s body: %u bytes", method, (unsigned)body_len);
+}
+
 static void handle_flush(int socket, RtspConn *conn, const RtspRequest *req, const uint8_t *raw, size_t raw_len) {
-  (void)raw;
-  (void)raw_len;
   // FLUSH — seek + re-preroll the engine. Emit 0 (immediate seek-flush).
   ESP_LOGI(TAG, "FLUSH received");
+  log_request_headers("FLUSH", raw, raw_len, req->body_len);
+  if (req->body != nullptr && req->body_len >= 8 && memcmp(req->body, "bplist00", 8) == 0) {
+    int64_t until_seq = -1, until_ts = -1;
+    bplist_find_int(req->body, req->body_len, "flushUntilSeq", &until_seq);
+    bplist_find_int(req->body, req->body_len, "flushUntilTS", &until_ts);
+    ESP_LOGI(TAG, "FLUSH bplist: flushUntilSeq=%lld flushUntilTS=%lld", (long long)until_seq, (long long)until_ts);
+  }
   TransportEventData data{};
   data.flush.flush_until_ts = 0;
   transport_events_emit(TRANSPORT_EVENT_FLUSH, &data);
