@@ -167,7 +167,8 @@ def _initial(band: Candidate, error: FloatArray, freqs: FloatArray, settings: Fi
 
 
 def fit(grid: FloatArray, measured_db: FloatArray, fixed: list[Filter], settings: FitSettings,
-        sample_rate: float, slots: list[Candidate] | None = None) -> FitResult:
+        sample_rate: float, slots: list[Candidate] | None = None,
+        target_db: FloatArray | None = None) -> FitResult:
     """Fit up to `settings.max_bands` peaking and shelving filters on top of `fixed`.
 
     Each step tries one more band of every shape in candidates(), optimizes all
@@ -183,6 +184,8 @@ def fit(grid: FloatArray, measured_db: FloatArray, fixed: list[Filter], settings
         sample_rate: the board's output rate.
         slots: a fixed layout to fill instead (the HA sliders a board exposes);
             each slot is used at most once, within its own ranges.
+        target_db: a reference response to match (another speaker measured
+            the same way) instead of the tilt; only its shape matters.
 
     Returns:
         The bands, a preamp that keeps the cascade at or below 0 dB, and the
@@ -191,7 +194,7 @@ def fit(grid: FloatArray, measured_db: FloatArray, fixed: list[Filter], settings
     low = max(settings.low_hz, rolloff_hz(grid, measured_db) * ROLLOFF_MARGIN)
     mask = (grid >= low) & (grid <= settings.high_hz)
     freqs = grid[mask]
-    target = target_curve(grid, settings.tilt_db_per_octave)
+    target = target_curve(grid, settings.tilt_db_per_octave) if target_db is None else target_db
     base = measured_db + response_db(fixed, grid, sample_rate)
     offset = -float(np.percentile(base[mask] - target[mask], LEVEL_PERCENTILE))
 

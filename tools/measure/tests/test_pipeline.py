@@ -101,3 +101,15 @@ def test_slots_stay_in_their_ranges() -> None:
         lo, hi = slots[index].freq_range or (0.0, 0.0)
         assert band.kind is slots[index].kind and lo <= band.frequency_hz <= hi * 1.000001
     assert result.rms_after_db < result.rms_before_db
+
+
+def test_matches_a_reference_speaker() -> None:
+    grid, measured, _ = _measure(_record(PLAN, ROOM))
+    reference_room = [*ROOM[:1], Filter(FilterKind.HIGH_SHELF, 3000.0, 0.7, -4.0)]
+    _, reference, _ = _measure(_record(PLAN, reference_room, seed=2))
+    result = fit(grid, measured, [], FitSettings(), PLAN.sample_rate, target_db=reference)
+    assert result.rms_after_db < 1.0 < result.rms_before_db
+    # The darker reference pulls the treble down rather than up.
+    treble = (grid > 4000.0) & (grid < 8000.0)
+    assert np.mean(result.predicted_db[treble] - measured[treble]) < np.mean(
+        result.predicted_db[(grid > 300.0) & (grid < 1000.0)] - measured[(grid > 300.0) & (grid < 1000.0)])

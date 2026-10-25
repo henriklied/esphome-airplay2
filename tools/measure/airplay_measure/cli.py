@@ -20,7 +20,7 @@ from scipy.io import wavfile
 
 from .biquad import GAINLESS, Filter, FilterKind, FloatArray
 from .fit import Candidate, FitResult, FitSettings, fit
-from .response import average_db, log_grid, normalize, position_responses, to_db
+from .response import average_db, log_grid, normalize, position_responses, smooth_db, to_db
 from .sweep import SweepPlan, deconvolve, find_impulses, program
 
 logger = logging.getLogger("airplay_measure")
@@ -30,6 +30,9 @@ CHANNELS = ("both", "left", "right")
 APO_TYPES = {FilterKind.PEAKING: "PK", FilterKind.LOW_SHELF: "LSC", FilterKind.HIGH_SHELF: "HSC",
              FilterKind.HIGH_PASS: "HPQ", FilterKind.LOW_PASS: "LPQ", FilterKind.NOTCH: "NO"}
 PLOT_RANGE_DB = (-30.0, 15.0)
+# A reference speaker's response is matched for balance, not for its own room
+# modes or ripple.
+REFERENCE_SMOOTHING_OCTAVES = 1.0 / 3.0
 
 
 def _plan(args: argparse.Namespace) -> SweepPlan:
@@ -126,23 +129,30 @@ def plot(path: Path, grid: FloatArray, positions: list[FloatArray], average: Flo
     plt.close(fig)
 
 
-def analyze(args: argparse.Namespace) -> int:
-    plan = _plan(args)
-    recording = read_recording(args.recording, plan.sample_rate)
-    impulses = deconvolve(recording, plan)
+def measure(path: Path, plan: SweepPlan, grid: FloatArray) -> tuple[FloatArray, list[FloatArray], list[int]]:
+    """Average response, per-position responses and impulse positions of one recording."""
+    impulses = deconvolve(read_recording(path, plan.sample_rate), plan)
     peaks = find_impulses(impulses, plan)
     if len(peaks) < plan.repeats:
-        logger.warning("found %d of %d sweeps; the rest were too quiet or cut off", len(peaks), plan.repeats)
-    grid = log_grid()
+        logger.warning("%s: found %d of %d sweeps; the rest were too quiet or cut off", path.name, len(peaks),
+                       plan.repeats)
     powers = position_responses(impulses, peaks, plan.sample_rate, grid)
-    average = average_db(grid, powers)
-    positions = [normalize(grid, to_db(power)) for power in powers]
+    return average_db(grid, powers), [normalize(grid, to_db(power)) for power in powers], peaks
+
+
+def analyze(args: argparse.Namespace) -> int:
+    plan = _plan(args)
+    grid = log_grid()
+    average, positions, peaks = measure(args.recording, plan, grid)
+    reference = None
+    if args.target_recording:
+        reference = smooth_db(measure(args.target_recording, plan, grid)[0], REFERENCE_SMOOTHING_OCTAVES)
 
     fixed = [Filter(FilterKind.HIGH_PASS, args.high_pass)] if args.high_pass else []
     settings = FitSettings(low_hz=args.fit_low, high_hz=args.fit_high, max_bands=args.max_bands,
                            tilt_db_per_octave=args.tilt)
     slots = load_slots(args.slots, settings) if args.slots else None
-    result = fit(grid, average, fixed, settings, plan.sample_rate, slots)
+    result = fit(grid, average, fixed, settings, plan.sample_rate, slots, reference)
 
     args.out.mkdir(parents=True, exist_ok=True)
     filters = fixed + result.bands
@@ -198,6 +208,8 @@ def main(argv: list[str] | None = None) -> int:
     study.add_argument("--tilt", type=float, default=FitSettings.tilt_db_per_octave,
                        help="target slope in dB per octave")
     study.add_argument("--slots", type=Path, help="JSON band layout to fill instead of free bands")
+    study.add_argument("--target-recording", type=Path,
+                       help="match this speaker's response (recorded the same way) instead of --tilt")
     args = parser.parse_args(argv)
 
     plan = _plan(args)

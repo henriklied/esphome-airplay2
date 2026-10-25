@@ -93,3 +93,10 @@ def position_responses(impulses: FloatArray, peaks: list[int], sample_rate: int,
 def average_db(grid: FloatArray, powers: list[FloatArray]) -> FloatArray:
     """Power average across positions, normalized, in dB."""
     return normalize(grid, to_db(np.mean(np.stack(powers), axis=0)))
+
+
+def smooth_db(db: FloatArray, octaves: float) -> FloatArray:
+    """Moving average of a log-grid curve over `octaves`: tonal balance, not detail."""
+    width = max(round(octaves * POINTS_PER_OCTAVE), 1)
+    padded = np.pad(db, width // 2, mode="edge")
+    return np.asarray(np.convolve(padded, np.ones(width) / width, mode="valid")[:db.size], dtype=np.float64)
