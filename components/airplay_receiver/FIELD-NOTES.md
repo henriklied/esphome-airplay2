@@ -228,7 +228,7 @@ playout: raw=.. span=.. filt=.. drift=..ppm trims=../s (N) buffered=N
          concealed=N holes=N (+N) under=N dfail=N qdrop=N edrop=N ins=N
          dsp=N.N% pk=N.N%
 resend:  sent=N recovered=N stale=N unmarked_ok=N unmarked_stale=N
-rxpath:  stack=N task=N gap=N
+rxpath:  stack=N task=N gap=N away=N qrun=N
 ```
 
 - `holes` -- concealment *events*; `(+N)` is new ones this second. The number
@@ -336,6 +336,20 @@ signature is `task` dipping below 125 and then **overshooting** on the next
 second while `stack` stays high -- the task draining a backlog after an
 overflow. If `stack` falls along with `task`, the packets genuinely never
 arrived and only the radio side can help.
+
+`gap` says packets died in the mbox, not why. Two per-second maxima do:
+
+- `away` -- longest ms between one `recvfrom()` returning and the next call:
+  inline decrypt/decode plus any preemption during it. The 32-slot mbox lasts
+  ~250 ms at 125 pkt/s, so `away` near that in a burst means the task's own work
+  let it overflow.
+- `qrun` -- longest run of reads that found a packet already queued (returned
+  in under 100 us). A lower bound on mbox depth; it also catches the task being
+  held off while ready, which `away` cannot (`audio_play`, priority 9, outranks
+  `audio_recv`, priority 8, on the audio core). `qrun` near 32 with small
+  `away` means preemption.
+
+`gap` above the floor with both low means the drop is not the receiver task's.
 
 Requires `CONFIG_LWIP_STATS`, which the component does **not** set -- it is a
 diagnostic, not a requirement. Enable it in the board YAML when investigating;

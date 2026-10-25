@@ -188,6 +188,13 @@ typedef struct audio_receiver_state {
   uint32_t rxpath_prev_udp_recv;
   uint32_t rxpath_prev_packets_received;
   int64_t rxpath_log_us;
+  // Why the mbox overflowed, if it did: the longest time this task spent away
+  // from recvfrom(), and the longest run of reads that found a packet already
+  // queued. See rxpath_track_recv().
+  int64_t rxpath_last_return_us;
+  int64_t rxpath_max_away_us;
+  uint32_t rxpath_queued_run;
+  uint32_t rxpath_max_queued_run;
 
   // Post-seek RTP gates (logic in audio_receiver.cpp): a window
   // [discard_before_rtp, discard_above_rtp] around the new anchor. Frames

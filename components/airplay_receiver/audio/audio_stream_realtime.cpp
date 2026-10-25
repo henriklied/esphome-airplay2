@@ -180,7 +180,7 @@ static void resend_log_stats(audio_receiver_state_t *state) {
 //
 // lwIP bumps udp.recv at the top of udp_input(), before the pcb lookup and
 // before recv_udp() posts the packet to the socket's receive mbox. That mbox is
-// CONFIG_LWIP_UDP_RECVMBOX_SIZE deep (6 packets, ~48ms at 125 pkt/s) and
+// CONFIG_LWIP_UDP_RECVMBOX_SIZE deep (32 packets, ~250ms at 125 pkt/s) and
 // overflow is discarded by sys_mbox_trypost with no counter of any kind. So:
 //
 //   stack -- every UDP datagram that reached lwIP, i.e. survived the air
@@ -194,7 +194,42 @@ static void resend_log_stats(audio_receiver_state_t *state) {
 // stack counts all UDP, not just audio: PTP on 319/320, mDNS, and the control
 // socket. Those are low-rate next to 125 pkt/s but not zero -- read the idle
 // floor off a capture with no stream running and subtract it.
+//
+// gap says packets died in the mbox, not why. Two more fields answer that:
+//
+//   away -- longest time (ms) between one recvfrom() returning and the next
+//           call: inline decrypt/decode plus any preemption during it. The
+//           32-slot mbox lasts ~250ms at 125 pkt/s, so away near that during a
+//           burst means this task's own work let it overflow.
+//   qrun -- longest run of reads that returned a packet already queued. A
+//           lower bound on mbox depth that also catches the task being held
+//           off while blocked in recvfrom() (audio_play outranks it on this
+//           core). qrun near 32 with small away means preemption.
+//
+// gap above the floor with neither high means the drop is not this task's.
 #if LWIP_STATS
+#define RXPATH_QUEUED_US 100  // recvfrom() on a non-empty mbox returns well inside this
+
+static void rxpath_track_recv(audio_receiver_state_t *state, int64_t call_us,
+                              int64_t return_us, bool got_packet) {
+  if (state->rxpath_last_return_us != 0) {
+    int64_t away_us = call_us - state->rxpath_last_return_us;
+    if (away_us > state->rxpath_max_away_us) {
+      state->rxpath_max_away_us = away_us;
+    }
+  }
+  state->rxpath_last_return_us = return_us;
+
+  if (got_packet && (return_us - call_us) < RXPATH_QUEUED_US) {
+    state->rxpath_queued_run++;
+    if (state->rxpath_queued_run > state->rxpath_max_queued_run) {
+      state->rxpath_max_queued_run = state->rxpath_queued_run;
+    }
+  } else {
+    state->rxpath_queued_run = 0;
+  }
+}
+
 static void rxpath_log_stats(audio_receiver_state_t *state) {
   int64_t now = esp_timer_get_time();
   if (state->rxpath_log_us != 0 && (now - state->rxpath_log_us) < 1000000) {
@@ -210,6 +245,8 @@ static void rxpath_log_stats(audio_receiver_state_t *state) {
     state->rxpath_log_us = now;
     state->rxpath_prev_udp_recv = udp_recv;
     state->rxpath_prev_packets_received = received;
+    state->rxpath_max_away_us = 0;
+    state->rxpath_max_queued_run = 0;
     return;
   }
 
@@ -219,10 +256,23 @@ static void rxpath_log_stats(audio_receiver_state_t *state) {
   state->rxpath_prev_udp_recv = udp_recv;
   state->rxpath_prev_packets_received = received;
 
-  ESP_LOGI(TAG, "rxpath: stack=%" PRIu32 " task=%" PRIu32 " gap=%" PRId32,
-           stack_delta, task_delta, (int32_t) (stack_delta - task_delta));
+  ESP_LOGI(TAG,
+           "rxpath: stack=%" PRIu32 " task=%" PRIu32 " gap=%" PRId32
+           " away=%" PRIu32 " qrun=%" PRIu32,
+           stack_delta, task_delta, (int32_t) (stack_delta - task_delta),
+           (uint32_t) (state->rxpath_max_away_us / 1000),
+           state->rxpath_max_queued_run);
+  state->rxpath_max_away_us = 0;
+  state->rxpath_max_queued_run = 0;
 }
 #else
+static void rxpath_track_recv(audio_receiver_state_t *state, int64_t call_us,
+                              int64_t return_us, bool got_packet) {
+  (void) state;
+  (void) call_us;
+  (void) return_us;
+  (void) got_packet;
+}
 static void rxpath_log_stats(audio_receiver_state_t *state) { (void) state; }
 #endif
 
@@ -419,8 +469,10 @@ static bool realtime_receive_packet(audio_stream_t *stream, uint8_t *packet,
                                     socklen_t *addr_len) {
   audio_receiver_state_t *state = audio_stream_state(stream);
 
+  int64_t call_us = esp_timer_get_time();
   ssize_t len = recvfrom(state->data_socket, packet, MAX_RTP_PACKET_SIZE, 0,
                          (struct sockaddr *) src_addr, addr_len);
+  rxpath_track_recv(state, call_us, esp_timer_get_time(), len > 0);
   if (len < 0) {
     if (errno == EAGAIN || errno == EWOULDBLOCK) {
       resend_retry_if_due(state);
@@ -716,6 +768,8 @@ static esp_err_t realtime_start(audio_stream_t *stream, uint16_t port) {
   // Re-seed the rxpath baselines so the first sample of this session measures
   // this session rather than everything since boot.
   state->rxpath_log_us = 0;
+  state->rxpath_last_return_us = 0;
+  state->rxpath_queued_run = 0;
 
   uint16_t bound_port = port;
   state->data_socket = socket_utils_bind_udp(port, 1, 131072, &bound_port);
