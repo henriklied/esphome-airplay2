@@ -21,6 +21,11 @@ trusted for cuts below ~10 kHz and for small boosts only.
    (Equalizer APO / REW format) and `report.json`.
 6. Turn the DSP switch back on.
 
+`--slots layout.json` fits a fixed band layout instead of free bands -- e.g.
+the HA sliders a board config exposes -- so the result can be dialled in
+without a flash. Each entry: `name`, `type`, `min_hz`, `max_hz`, `min_q`,
+`max_q`, `min_gain_db`, `max_gain_db`.
+
 `--high-pass` is the protective filter that stays in front of the fit; nothing
 is boosted below the speaker's own roll-off. `--tilt` sets the target slope
 (default -0.8 dB/octave, a common in-room target). Tests: `uv run --group dev pytest`.

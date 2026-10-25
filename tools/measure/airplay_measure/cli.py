@@ -19,7 +19,7 @@ import orjson
 from scipy.io import wavfile
 
 from .biquad import GAINLESS, Filter, FilterKind, FloatArray
-from .fit import FitResult, FitSettings, fit
+from .fit import Candidate, FitResult, FitSettings, fit
 from .response import average_db, log_grid, normalize, position_responses, to_db
 from .sweep import SweepPlan, deconvolve, find_impulses, program
 
@@ -57,6 +57,27 @@ def read_recording(path: Path, sample_rate: int) -> FloatArray:
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg could not read {path}: {result.stderr.decode(errors='replace')}")
     return np.frombuffer(result.stdout, dtype="<f4").astype(np.float64)
+
+
+def load_slots(path: Path, settings: FitSettings) -> list[Candidate]:
+    """A fixed band layout, e.g. the HA sliders a board config exposes.
+
+    The file is a JSON list of {"name", "type", "min_hz", "max_hz", "min_q",
+    "max_q", "min_gain_db", "max_gain_db"}; gains are further capped by
+    `settings`.
+
+    Raises:
+        ValueError: on an unknown filter type or a missing key.
+    """
+    slots = []
+    for entry in orjson.loads(path.read_bytes()):
+        try:
+            gain = (max(entry["min_gain_db"], -settings.max_cut_db), min(entry["max_gain_db"], settings.max_boost_db))
+            slots.append(Candidate(FilterKind(entry["type"]), (entry["min_q"], entry["max_q"]), gain,
+                                   (entry["min_hz"], entry["max_hz"]), entry["name"]))
+        except (KeyError, ValueError) as error:
+            raise ValueError(f"{path}: bad slot {entry}: {error}") from error
+    return slots
 
 
 def _filter_dict(flt: Filter) -> dict[str, str | float]:
@@ -120,7 +141,8 @@ def analyze(args: argparse.Namespace) -> int:
     fixed = [Filter(FilterKind.HIGH_PASS, args.high_pass)] if args.high_pass else []
     settings = FitSettings(low_hz=args.fit_low, high_hz=args.fit_high, max_bands=args.max_bands,
                            tilt_db_per_octave=args.tilt)
-    result = fit(grid, average, fixed, settings, plan.sample_rate)
+    slots = load_slots(args.slots, settings) if args.slots else None
+    result = fit(grid, average, fixed, settings, plan.sample_rate, slots)
 
     args.out.mkdir(parents=True, exist_ok=True)
     filters = fixed + result.bands
@@ -134,6 +156,15 @@ def analyze(args: argparse.Namespace) -> int:
               "rms_after_db": result.rms_after_db, "preamp_db": result.preamp_db,
               "filters": [_filter_dict(f) for f in filters], "grid_hz": grid, "measured_db": average,
               "positions_db": positions, "target_db": result.target_db, "predicted_db": result.predicted_db}
+    if slots is not None:
+        fitted = dict(zip(result.slot_indices, result.bands))
+        slot_values = {slot.name: ({"frequency_hz": round(fitted[i].frequency_hz),
+                                    "q": round(fitted[i].q, 2), "gain_db": round(fitted[i].gain_db, 1)}
+                                   if i in fitted else {"gain_db": 0.0})
+                       for i, slot in enumerate(slots)}
+        report["slots"] = slot_values
+        for name, values in slot_values.items():
+            logger.info("  slot %-10s %s", name, values)
     (args.out / "report.json").write_bytes(orjson.dumps(report, option=orjson.OPT_SERIALIZE_NUMPY))
     logger.info("%s", summary)
     for flt in filters:
@@ -166,6 +197,7 @@ def main(argv: list[str] | None = None) -> int:
     study.add_argument("--max-bands", type=int, default=FitSettings.max_bands)
     study.add_argument("--tilt", type=float, default=FitSettings.tilt_db_per_octave,
                        help="target slope in dB per octave")
+    study.add_argument("--slots", type=Path, help="JSON band layout to fill instead of free bands")
     args = parser.parse_args(argv)
 
     plan = _plan(args)

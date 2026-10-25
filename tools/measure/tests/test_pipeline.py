@@ -10,7 +10,7 @@ from scipy.signal import lfilter
 
 from airplay_measure.biquad import Filter, FilterKind, FloatArray, coefficients, response_db
 from airplay_measure.cli import main, read_recording
-from airplay_measure.fit import FitSettings, fit
+from airplay_measure.fit import Candidate, FitSettings, fit
 from airplay_measure.response import average_db, log_grid, normalize, position_responses
 from airplay_measure.sweep import SweepPlan, deconvolve, find_impulses, program
 
@@ -89,3 +89,15 @@ def test_cli_round_trip(tmp_path: Path) -> None:
     assert main([*CLI_TIMING, "analyze", str(recording), "--out", str(out)]) == 0
     assert {p.name for p in out.iterdir()} == {"eq.yaml", "ParametricEQ.txt", "response.png", "report.json"}
     assert "type: high_pass" in (out / "eq.yaml").read_text()
+
+
+def test_slots_stay_in_their_ranges() -> None:
+    grid, measured, _ = _measure(_record(PLAN, ROOM))
+    slots = [Candidate(FilterKind.LOW_SHELF, (0.7, 0.7), (-12.0, 4.0), (40.0, 500.0), "bass"),
+             Candidate(FilterKind.PEAKING, (0.3, 8.0), (-12.0, 4.0), (200.0, 12000.0), "band")]
+    result = fit(grid, measured, [], FitSettings(tilt_db_per_octave=0.0), PLAN.sample_rate, slots)
+    assert sorted(result.slot_indices) == sorted(set(result.slot_indices))
+    for index, band in zip(result.slot_indices, result.bands):
+        lo, hi = slots[index].freq_range or (0.0, 0.0)
+        assert band.kind is slots[index].kind and lo <= band.frequency_hz <= hi * 1.000001
+    assert result.rms_after_db < result.rms_before_db
