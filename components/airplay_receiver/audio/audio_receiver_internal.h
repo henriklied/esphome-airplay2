@@ -195,7 +195,6 @@ typedef struct audio_receiver_state {
   int64_t rxpath_max_away_us;
   uint32_t rxpath_queued_run;
   uint32_t rxpath_max_queued_run;
-  int64_t wifi_stats_requested_us;  // last stall-triggered driver dump request
 
   // Post-seek RTP gates (logic in audio_receiver.cpp): a window
   // [discard_before_rtp, discard_above_rtp] around the new anchor. Frames

@@ -28,7 +28,6 @@
 #include "audio_receiver.h"
 #include "audio_receiver_internal.h"
 
-#include <atomic>
 #include <cstring>
 #include <inttypes.h>
 
@@ -1038,12 +1037,6 @@ void audio_receiver_gate_from_rtp(uint32_t first_rtp) {
   ESP_LOGI(TAG, "seek flush: keeping from rtp %lu instead of waiting for the anchor",
            (unsigned long)first_rtp);
 }
-
-static std::atomic<const char *> s_wifi_stats_request{nullptr};
-
-void audio_receiver_request_wifi_stats(const char *reason) { s_wifi_stats_request.store(reason); }
-
-const char *audio_receiver_take_wifi_stats_request(void) { return s_wifi_stats_request.exchange(nullptr); }
 
 void audio_receiver_set_deferred_flush(uint32_t flush_until_ts) {
   if (!receiver.stream) {

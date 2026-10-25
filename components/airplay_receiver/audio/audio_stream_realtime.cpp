@@ -213,11 +213,6 @@ static void resend_log_stats(audio_receiver_state_t *state) {
 // gap above the floor with neither high means the drop is not this task's.
 #if LWIP_STATS
 #define RXPATH_QUEUED_US 100  // recvfrom() on a non-empty mbox returns well inside this
-// Fewer packets than this read in a second marks a stall (nominal ~125/s for
-// 352-frame ALAC); it asks the main loop for a Wi-Fi driver dump, at most once
-// per WIFI_STATS_MIN_INTERVAL_US, so counters before and after can be compared.
-#define RXPATH_STALL_PACKETS 90
-#define WIFI_STATS_MIN_INTERVAL_US 10000000
 
 static void rxpath_track_recv(audio_receiver_state_t *state, int64_t call_us,
                               int64_t return_us, bool got_packet) {
@@ -256,8 +251,6 @@ static void rxpath_log_stats(audio_receiver_state_t *state) {
     state->rxpath_prev_packets_received = received;
     state->rxpath_max_away_us = 0;
     state->rxpath_max_queued_run = 0;
-    state->wifi_stats_requested_us = now;
-    audio_receiver_request_wifi_stats("stream start");
     return;
   }
 
@@ -280,11 +273,6 @@ static void rxpath_log_stats(audio_receiver_state_t *state) {
            stack_delta, task_delta, (int32_t) (stack_delta - task_delta),
            (uint32_t) (state->rxpath_max_away_us / 1000),
            state->rxpath_max_queued_run, rssi);
-  if (task_delta < RXPATH_STALL_PACKETS &&
-      now - state->wifi_stats_requested_us >= WIFI_STATS_MIN_INTERVAL_US) {
-    state->wifi_stats_requested_us = now;
-    audio_receiver_request_wifi_stats("rx stall");
-  }
   state->rxpath_max_away_us = 0;
   state->rxpath_max_queued_run = 0;
 }
