@@ -4,12 +4,14 @@
 
 #include <cstring>  // memcpy, memset, strcmp, strstr
 
-// Ported from upstream airplay-esp32 main/audio/audio_decoder.c. ALAC comes
-// from the esp_audio_codec managed component, AAC from Fraunhofer FDK
-// (aac_fdk.h) because esp_audio_codec's AAC decoder is mono/stereo only and
-// AirPlay sends 5.1 / 7.1 as AAC-LC. Raw L16/PCM gets a byte-order fixup. All decoding* state and scratch are routed through the
+// Ported from upstream airplay-esp32 main/audio/audio_decoder.c. ALAC and AAC
+// come from the esp_audio_codec managed component; raw L16/PCM gets a
+// byte-order fixup. All decoding state and scratch are routed through the
 // centralized airplay_* allocator (../allocator.h) and all diagnostics through
 // esphome/core/log.h so the memory policy lives in one place.
+//
+// AAC was decoded with Fraunhofer FDK from 2026-10-06 to 2026-10-25, for 5.1;
+// see tag parked/surround-5.1 and FIELD-NOTES.md.
 
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -17,9 +19,9 @@
 #include "esphome/core/log.h"
 
 #include "../allocator.h"
-#include "aac_fdk.h"
 #include "aac_format.h"
 #include "alac_magic_cookie.h"
+#include "decoder/impl/esp_aac_dec.h"
 #include "decoder/impl/esp_alac_dec.h"
 #include "esp_audio_dec.h"
 
@@ -30,11 +32,14 @@ static const char *const TAG = "airplay_receiver.decoder";
 
 #define MAX_FALLBACK_CHANNELS 2
 
-// Everything downstream of the decoder (timeline, resampler, DSP, I2S) is
-// stereo, so FDK mixes any AAC layout down to this.
-static constexpr int AAC_OUTPUT_CHANNELS = 2;
+// AAC-LC frame length, and the output delay FDK had. esp_audio_codec emits a
+// frame's audio one frame earlier than FDK (measured, tools/aac_bench at
+// 9933c7b); holding each frame back by one keeps playout exactly where the FDK
+// builds put it, which is the timing multi-room was tested with.
+static constexpr size_t AAC_FRAME_SAMPLES = 1024;
+static constexpr int AAC_MAX_CHANNELS = 2;
 // One INFO line per this many AAC frames (~23 s at 44.1 kHz): decode cost and
-// the decode task's remaining stack, which FDK needs ~49 KB of.
+// the decode task's remaining stack.
 static constexpr uint32_t AAC_STATS_INTERVAL_FRAMES = 1000;
 
 enum audio_decoder_kind_t {
@@ -48,7 +53,7 @@ struct audio_decoder {
   audio_decoder_kind_t kind;
   audio_format_t format;
   void *alac_decoder;
-  aac_fdk_t *aac_decoder;
+  void *aac_decoder;
   uint8_t alac_magic_cookie[ALAC_MAGIC_COOKIE_SIZE];
   uint8_t *aac_frame_buffer;
   size_t aac_frame_buffer_size;
@@ -57,7 +62,11 @@ struct audio_decoder {
   uint32_t aac_stats_frames;
   int64_t aac_stats_total_us;
   int64_t aac_stats_max_us;
-  int aac_source_channels;
+  int aac_channels;
+  // One-frame delay line: `aac_held` is returned on the next decode.
+  int16_t *aac_held;
+  int16_t *aac_pending;
+  size_t aac_held_samples;
 };
 
 // Grow-only realloc backed by the airplay_* allocator. We know the previous
@@ -110,8 +119,8 @@ static void aac_log_stats(audio_decoder_t *decoder, int64_t elapsed_us) {
   if (decoder->aac_stats_frames < AAC_STATS_INTERVAL_FRAMES) {
     return;
   }
-  ESP_LOGI(TAG, "aac: %d ch -> %d, decode avg=%lld us max=%lld us over %u frames, stack free=%u B, internal free=%u B",
-           decoder->aac_source_channels, AAC_OUTPUT_CHANNELS,
+  ESP_LOGI(TAG, "aac: %d ch, decode avg=%lld us max=%lld us over %u frames, stack free=%u B, internal free=%u B",
+           decoder->aac_channels,
            (long long) (decoder->aac_stats_total_us / decoder->aac_stats_frames),
            (long long) decoder->aac_stats_max_us, (unsigned) decoder->aac_stats_frames,
            (unsigned) uxTaskGetStackHighWaterMark(nullptr), (unsigned) airplay_internal_free());
@@ -152,9 +161,16 @@ audio_decoder_t *audio_decoder_create(const audio_decoder_config_t *config) {
     }
   } else if (codec_is_aac(config->format.codec)) {
     decoder->kind = AUDIO_DECODER_AAC;
-    decoder->aac_decoder = aac_fdk_open(AAC_OUTPUT_CHANNELS);
-    if (decoder->aac_decoder == nullptr) {
-      ESP_LOGE(TAG, "Failed to open FDK AAC decoder (psram free=%u B)", (unsigned) airplay_psram_free());
+    // ADTS framing: each packet gets a header built from its SSRC, so the
+    // decoder follows rate changes without being reopened.
+    esp_aac_dec_cfg_t aac_cfg = ESP_AAC_DEC_CONFIG_DEFAULT();
+    const size_t frame_bytes = AAC_FRAME_SAMPLES * AAC_MAX_CHANNELS * sizeof(int16_t);
+    decoder->aac_held = static_cast<int16_t *>(airplay_calloc(1, frame_bytes, false));
+    decoder->aac_pending = static_cast<int16_t *>(airplay_calloc(1, frame_bytes, false));
+    // esp_audio_codec takes ~51 KB of internal RAM here.
+    const esp_audio_err_t err = esp_aac_dec_open(&aac_cfg, sizeof(aac_cfg), &decoder->aac_decoder);
+    if (err != ESP_AUDIO_ERR_OK || !decoder->aac_held || !decoder->aac_pending) {
+      ESP_LOGE(TAG, "Failed to open AAC decoder: %d (internal free=%u B)", err, (unsigned) airplay_internal_free());
       decoder->kind = AUDIO_DECODER_NONE;
     }
   } else if (strcmp(config->format.codec, "L16") == 0 ||
@@ -177,8 +193,12 @@ void audio_decoder_destroy(audio_decoder_t *decoder) {
     decoder->alac_decoder = nullptr;
   }
 
-  aac_fdk_close(decoder->aac_decoder);
-  decoder->aac_decoder = nullptr;
+  if (decoder->aac_decoder) {
+    esp_aac_dec_close(decoder->aac_decoder);
+    decoder->aac_decoder = nullptr;
+  }
+  airplay_free(decoder->aac_held);
+  airplay_free(decoder->aac_pending);
 
   if (decoder->aac_frame_buffer) {
     airplay_free(decoder->aac_frame_buffer);
@@ -276,7 +296,7 @@ int audio_decoder_decode(audio_decoder_t *decoder, const uint8_t *input,
     if (!aac_format_from_ssrc(ssrc, &format)) {
       format = aac_setup_format(decoder);
     }
-    const uint8_t channel_config = aac_adts_channel_config(input, input_len, format.channel_config);
+    const uint8_t channel_config = format.channel_config;
     if (ssrc != decoder->aac_ssrc) {
       decoder->aac_ssrc = ssrc;
       ESP_LOGI(TAG, "aac: ssrc=0x%08x -> %u Hz, channel config %u, first bytes %02x %02x %02x %02x",
@@ -292,8 +312,8 @@ int audio_decoder_decode(audio_decoder_t *decoder, const uint8_t *input,
                decoder->format.sample_rate);
     }
 
-    // AirPlay sends bare raw_data_blocks; FDK is opened for ADTS, so prepend
-    // a header naming this packet's rate and layout.
+    // AirPlay sends bare raw_data_blocks; the decoder is opened for ADTS, so
+    // prepend a header naming this packet's rate and layout.
     const size_t needed = input_len + AAC_ADTS_HEADER_LEN;
     uint8_t *frame_buffer =
         airplay_realloc_grow(decoder->aac_frame_buffer, decoder->aac_frame_buffer_size, needed);
@@ -307,22 +327,43 @@ int audio_decoder_decode(audio_decoder_t *decoder, const uint8_t *input,
     }
     memcpy(frame_buffer + AAC_ADTS_HEADER_LEN, input, input_len);
 
+    esp_audio_dec_in_raw_t raw = {};
+    raw.buffer = frame_buffer;
+    raw.len = (uint32_t) needed;
+    esp_audio_dec_out_frame_t frame = {};
+    frame.buffer = reinterpret_cast<uint8_t *>(decoder->aac_pending);
+    frame.len = (uint32_t) (AAC_FRAME_SAMPLES * AAC_MAX_CHANNELS * sizeof(int16_t));
+    esp_audio_dec_info_t dec_info = {};
+
     const int64_t started_us = esp_timer_get_time();
-    aac_fdk_frame_info_t dec_info{};
-    const int decoded_samples =
-        aac_fdk_decode(decoder->aac_decoder, frame_buffer, needed, output, output_capacity_samples, &dec_info);
-    if (decoded_samples < 0) {
-      ESP_LOGW(TAG, "AAC decode error 0x%x (ssrc=0x%08x, %u bytes)", (unsigned) dec_info.error, (unsigned) ssrc,
-               (unsigned) input_len);
+    const esp_audio_err_t err = esp_aac_dec_decode(decoder->aac_decoder, &raw, &frame, &dec_info);
+    if (err != ESP_AUDIO_ERR_OK) {
+      ESP_LOGW(TAG, "AAC decode error %d (ssrc=0x%08x, %u bytes)", err, (unsigned) ssrc, (unsigned) input_len);
       return -1;
     }
-    decoder->aac_source_channels = dec_info.source_channels;
+    const int dec_channels = dec_info.channel > 0 ? dec_info.channel : channels;
+    if (dec_channels > AAC_MAX_CHANNELS) {
+      return -1;
+    }
+    decoder->aac_channels = dec_channels;
     aac_log_stats(decoder, esp_timer_get_time() - started_us);
 
-    if (info) {
-      info->channels = AAC_OUTPUT_CHANNELS;
+    const size_t decoded_samples = frame.decoded_size / (dec_channels * sizeof(int16_t));
+    // The first frame plays as silence of its own length, as FDK's did.
+    const size_t held_samples = decoder->aac_held_samples ? decoder->aac_held_samples : decoded_samples;
+    if (held_samples > output_capacity_samples) {
+      return -1;
     }
-    return decoded_samples;
+    memcpy(output, decoder->aac_held, held_samples * dec_channels * sizeof(int16_t));
+    int16_t *const released = decoder->aac_held;
+    decoder->aac_held = decoder->aac_pending;
+    decoder->aac_pending = released;
+    decoder->aac_held_samples = decoded_samples;
+
+    if (info) {
+      info->channels = dec_channels;
+    }
+    return (int) held_samples;
   }
 
   return -1;

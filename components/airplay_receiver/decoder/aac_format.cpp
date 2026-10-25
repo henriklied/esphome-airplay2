@@ -5,8 +5,6 @@ namespace airplay_receiver {
 
 static constexpr uint8_t ADTS_PROFILE_AAC_LC = 1;  // audio object type 2, minus one
 static constexpr size_t ADTS_MAX_FRAME_LEN = 0x1FFF;
-static constexpr uint8_t AAC_ID_PCE = 5;  // syntactic element id, ISO/IEC 14496-3 table 4.85
-static constexpr uint8_t AAC_CHANNEL_CONFIG_IN_PCE = 0;
 static constexpr uint32_t ADTS_SAMPLE_RATES[] = {96000, 88200, 64000, 48000, 44100, 32000, 24000,
                                                  22050, 16000, 12000, 11025, 8000,  7350};
 
@@ -17,12 +15,6 @@ bool aac_format_from_ssrc(uint32_t ssrc, aac_stream_format_t *out) {
       return true;
     case AAC_SSRC_48000_STEREO:
       *out = {48000, AAC_CHANNEL_CONFIG_STEREO};
-      return true;
-    case AAC_SSRC_48000_5POINT1:
-      *out = {48000, AAC_CHANNEL_CONFIG_5POINT1};
-      return true;
-    case AAC_SSRC_48000_7POINT1:
-      *out = {48000, AAC_CHANNEL_CONFIG_7POINT1};
       return true;
     default:
       return false;
@@ -37,37 +29,8 @@ bool aac_format_from_audio_format(uint64_t audio_format, aac_stream_format_t *ou
     case AIRPLAY_FORMAT_AAC_LC_48000_STEREO:
       *out = {48000, AAC_CHANNEL_CONFIG_STEREO};
       return true;
-    case AIRPLAY_FORMAT_AAC_LC_48000_5POINT1:
-      *out = {48000, AAC_CHANNEL_CONFIG_5POINT1};
-      return true;
-    case AIRPLAY_FORMAT_AAC_LC_48000_7POINT1:
-      *out = {48000, AAC_CHANNEL_CONFIG_7POINT1};
-      return true;
     default:
       return false;
-  }
-}
-
-uint8_t aac_adts_channel_config(const uint8_t *payload, size_t payload_len, uint8_t ssrc_channel_config) {
-  if (payload_len > 0 && (payload[0] >> 5) == AAC_ID_PCE) {
-    return AAC_CHANNEL_CONFIG_IN_PCE;
-  }
-  return ssrc_channel_config;
-}
-
-int aac_channel_count(uint8_t channel_config) {
-  switch (channel_config) {
-    case 1:
-    case 2:
-    case 3:
-    case 4:
-    case 5:
-    case 6:
-      return channel_config;
-    case AAC_CHANNEL_CONFIG_7POINT1:
-      return 8;
-    default:
-      return 0;
   }
 }
 

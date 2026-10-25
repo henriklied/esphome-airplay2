@@ -378,6 +378,14 @@ RTP minus `Anchor set` RTP.
 
 ## AAC decoder: FDK, and what AirPlay surround looks like (2026-10-06)
 
+> **2026-10-25: FDK and 5.1 removed; AAC is `esp_audio_codec` again, stereo
+> only.** Everything in this section through "Apple TV 5.1 plays" describes the
+> code at tag `parked/surround-5.1` (and `tools/aac_bench` at 9933c7b), not the
+> tree. Reasons: 5.1 was off on every board (`advertise_surround: false`), and
+> stereo AAC decodes 3.5x faster without FDK -- the measurement is below. The
+> decoder holds each frame back by one (`audio_decoder.cpp`), so playout timing
+> is unchanged from the FDK builds. Re-port 5.1 from the tag.
+
 AAC now decodes with Fraunhofer FDK (`decoder/aac_fdk.*`); `esp_audio_codec`'s
 AAC decoder is mono/stereo only and AirPlay sends 5.1 / 7.1 as AAC-LC 48 kHz.
 ALAC stays on `esp_audio_codec`.
