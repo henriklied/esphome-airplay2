@@ -162,11 +162,15 @@ typedef struct audio_receiver_state {
   // NACK retransmission support
   struct sockaddr_in client_control_addr;  // Client's control address for NACKs
   bool retransmit_enabled;                 // True when client address is set
+  // Set once the first AP2 anchor (0xD7) of a session has been checked: its
+  // source address, not SETUP's controlPort, is where resends are answered.
+  bool control_source_checked;
   int64_t last_resend_error_time_us;       // Backoff timer on sendto failure
   bool rtp_sequence_valid;
   uint16_t resend_window_first;
   uint64_t resend_missing_mask;
   int64_t resend_last_request_time_us;
+  int64_t resend_window_opened_us;  // when the oldest outstanding hole was first seen
   // Retransmission effectiveness, summarised once a second. Per-event logging
   // from the receive path is what this is avoiding: it runs on the audio core.
   uint32_t resend_sent_count;       // NACK requests actually sent

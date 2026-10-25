@@ -67,6 +67,11 @@
 #define RESEND_RETRY_INTERVAL_US 250000  // Match common RAOP resend cadence
 #define RESEND_ERROR_BACKOFF_US 300000   // Backoff after sendto failure
 #define MAX_RESEND_GAP RESEND_WINDOW_BITS
+/* Stop re-asking for a hole after this long: well inside the ~2 s realtime
+   playout buffer, so a later answer could not play anyway. Without it, a
+   sender that ignores resends (iOS) got the oldest hole re-requested at
+   4/s until the next loss displaced it. */
+#define RESEND_GIVE_UP_US 1000000
 
 // Audio tasks are pinned to the core the platform profile reserves for audio
 // (core 1 on the dual-core targets). On a single-core build use core 0.
@@ -262,6 +267,7 @@ static void resend_track_missing(audio_receiver_state_t *state,
   if (state->resend_missing_mask == 0) {
     state->resend_window_first = first_seq;
     state->resend_missing_mask = resend_mask_for_count(count);
+    state->resend_window_opened_us = esp_timer_get_time();
     return;
   }
 
@@ -270,6 +276,7 @@ static void resend_track_missing(audio_receiver_state_t *state,
     // A newer gap is outside the small recovery window; abandon stale holes.
     state->resend_window_first = first_seq;
     state->resend_missing_mask = resend_mask_for_count(count);
+    state->resend_window_opened_us = esp_timer_get_time();
     return;
   }
 
@@ -357,6 +364,10 @@ static void resend_retry_if_due(audio_receiver_state_t *state) {
   }
 
   int64_t now = esp_timer_get_time();
+  if (now - state->resend_window_opened_us >= RESEND_GIVE_UP_US) {
+    state->resend_missing_mask = 0;
+    return;
+  }
   if (state->resend_last_request_time_us == 0 ||
       (now - state->resend_last_request_time_us) >= RESEND_RETRY_INTERVAL_US) {
     resend_request_range(state, first_seq, count);
@@ -546,6 +557,32 @@ static uint32_t nctoh32(const uint8_t *data) {
          ((uint32_t) data[2] << 8) | (uint32_t) data[3];
 }
 
+/* shairport-sync sends AP2 resend requests to the source address of the first
+   anchor packet, not to SETUP's controlPort; a sender that answers resends
+   listens on the socket it sends anchors from. Log the comparison once per
+   session and adopt the source. Each field is one aligned store, so the RX
+   task's sendto() never sees a torn port. */
+static void adopt_control_source(audio_receiver_state_t *state,
+                                 const struct sockaddr_in *src_addr) {
+  if (state->control_source_checked || !state->retransmit_enabled) {
+    return;
+  }
+  state->control_source_checked = true;
+  const uint16_t setup_port = ntohs(state->client_control_addr.sin_port);
+  const uint16_t source_port = ntohs(src_addr->sin_port);
+  const bool same = setup_port == source_port &&
+                    state->client_control_addr.sin_addr.s_addr == src_addr->sin_addr.s_addr;
+  char source_ip[INET_ADDRSTRLEN] = {0};
+  inet_ntoa_r(src_addr->sin_addr, source_ip, sizeof(source_ip));
+  ESP_LOGI(TAG, "resend target: SETUP controlPort %u, anchor source %s:%u -> %s",
+           (unsigned) setup_port, source_ip, (unsigned) source_port,
+           same ? "same" : "using anchor source");
+  if (!same) {
+    state->client_control_addr.sin_addr.s_addr = src_addr->sin_addr.s_addr;
+    state->client_control_addr.sin_port = src_addr->sin_port;
+  }
+}
+
 static void control_receiver_task(void *pvParameters) {
   audio_stream_t *stream = (audio_stream_t *) pvParameters;
   audio_receiver_state_t *state = audio_stream_state(stream);
@@ -615,6 +652,7 @@ static void control_receiver_task(void *pvParameters) {
 
           audio_receiver_set_anchor_time(clock_id, network_time_ns, frame_1);
         }
+        adopt_control_source(state, &src_addr);
         break;
 
       case 0x56: {  // Retransmit response — forward inner RTP to data socket

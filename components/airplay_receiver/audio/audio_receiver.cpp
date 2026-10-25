@@ -70,6 +70,7 @@ static void audio_receiver_reset_resend_state(void) {
   receiver.resend_window_first = 0;
   receiver.resend_missing_mask = 0;
   receiver.resend_last_request_time_us = 0;
+  receiver.resend_window_opened_us = 0;
   receiver.last_resend_error_time_us = 0;
 }
 
@@ -823,6 +824,7 @@ void audio_receiver_set_client_control(uint32_t client_ip,
   receiver.client_control_addr.sin_family = AF_INET;
   receiver.client_control_addr.sin_addr.s_addr = client_ip;
   receiver.client_control_addr.sin_port = htons(client_control_port);
+  receiver.control_source_checked = false;
   receiver.retransmit_enabled = true;
   audio_receiver_reset_resend_state();
   ESP_LOGI(TAG, "NACK retransmission enabled, client control port %u",
