@@ -8,6 +8,9 @@
 #include "timing/ptp_clock.h"
 
 #include "esphome/components/network/util.h"
+#ifdef USE_WIFI_RUNTIME_ROAMING_SUPPRESSION
+#include "esphome/components/wifi/wifi_component.h"
+#endif
 
 #include "esphome/core/log.h"
 
@@ -514,6 +517,24 @@ void AirPlayReceiver::control(const media_player::MediaPlayerCall &call) {
   this->publish_state();
 }
 
+// ESPHome's post-connect roaming scans (5, 10 and 15 min after a connect) take
+// the radio off-channel, which a realtime stream turns into concealment.
+// Idempotent: PLAYING repeats within a session, and request/release must pair.
+void AirPlayReceiver::set_roaming_suppressed_(bool suppressed) {
+#ifdef USE_WIFI_RUNTIME_ROAMING_SUPPRESSION
+  if (wifi::global_wifi_component == nullptr || this->roaming_suppressed_.exchange(suppressed) == suppressed) {
+    return;
+  }
+  if (suppressed) {
+    wifi::global_wifi_component->request_roaming_suppression();
+  } else {
+    wifi::global_wifi_component->release_roaming_suppression();
+  }
+#else
+  (void) suppressed;
+#endif
+}
+
 void AirPlayReceiver::on_transport_event(TransportEvent event, const TransportEventData *data, void *user_data) {
   AirPlayReceiver *self = static_cast<AirPlayReceiver *>(user_data);
   if (self != nullptr) {
@@ -583,6 +604,7 @@ void AirPlayReceiver::handle_transport_event(TransportEvent event, const Transpo
       ESP_LOGI(TAG, "audio: PLAYING");
       audio_receiver_set_playing(true);
       audio_output_start();
+      this->set_roaming_suppressed_(true);
       this->desired_state_ = media_player::MEDIA_PLAYER_STATE_PLAYING;
       this->state_dirty_ = true;
       break;
@@ -590,6 +612,7 @@ void AirPlayReceiver::handle_transport_event(TransportEvent event, const Transpo
       ESP_LOGI(TAG, "audio: PAUSED");
       audio_receiver_set_playing(false);
       audio_output_flush();
+      this->set_roaming_suppressed_(false);
       this->desired_state_ = media_player::MEDIA_PLAYER_STATE_PAUSED;
       this->state_dirty_ = true;
       break;
@@ -600,6 +623,7 @@ void AirPlayReceiver::handle_transport_event(TransportEvent event, const Transpo
       ESP_LOGI(TAG, "audio: DISCONNECTED");
       audio_receiver_stop();
       audio_output_stop();
+      this->set_roaming_suppressed_(false);
       this->desired_state_ = media_player::MEDIA_PLAYER_STATE_IDLE;
       this->state_dirty_ = true;
       break;

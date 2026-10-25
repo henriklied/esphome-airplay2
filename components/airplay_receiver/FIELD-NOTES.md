@@ -514,6 +514,18 @@ This does not touch a mid-playback seek, where the ring really does hold the
 old track -- that flush still clicks. Silencing it would need a short volume
 ramp around the disable/enable, which has not been written.
 
+## ESPHome roaming scans (2026-10-25)
+
+ESPHome 2026.x enables `post_connect_roaming` by default: 5, 10 and 15 min
+after each connect it scans for a better AP, taking the radio off-channel. A
+realtime stream turns that into concealment (iOS never resends). The receiver
+now calls `request_roaming_suppression()` on PLAYING and releases it on PAUSED
+and DISCONNECTED (`set_roaming_suppressed_()`), via
+`wifi.enable_runtime_roaming_suppression()`; a no-op on Ethernet and on ESPHome
+without the API. A stationary speaker should also set
+`wifi: post_connect_roaming: false`. Leave `enable_btm`/`enable_rrm` off: AP
+steering mid-stream is a dropout, and it fights a pinned `bssid`.
+
 ## Dead ends -- do not re-investigate
 
 - **`handle_setpeers()` discarding the peer list** (`(void)raw;`) and the

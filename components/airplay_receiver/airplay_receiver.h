@@ -3,6 +3,7 @@
 #include "esphome/core/component.h"
 #include "esphome/components/media_player/media_player.h"
 
+#include <atomic>
 #include <string>
 #include <vector>
 
@@ -166,6 +167,8 @@ class AirPlayReceiver : public Component, public media_player::MediaPlayer {
   /// React to a transport/control event (play/pause/volume/metadata/stream)
   /// and drive the audio receiver/output + media_player state.
   void handle_transport_event(TransportEvent event, const TransportEventData *data);
+  /// Hold ESPHome's post-connect roaming scans off while a stream plays.
+  void set_roaming_suppressed_(bool suppressed);
 
   /// MediaPlayer command dispatch (HA service / automations).
   void control(const media_player::MediaPlayerCall &call) override;
@@ -234,6 +237,8 @@ class AirPlayReceiver : public Component, public media_player::MediaPlayer {
   bool audio_ready_{false};
   bool state_dirty_{false};
   media_player::MediaPlayerState desired_state_{media_player::MEDIA_PLAYER_STATE_NONE};
+  // Whether this receiver holds a roaming-suppression request; set from RTSP tasks.
+  std::atomic<bool> roaming_suppressed_{false};
 
   // AirPlay 2 pairing + audio crypto.
   CryptoModule crypto_;

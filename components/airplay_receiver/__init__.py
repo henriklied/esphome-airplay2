@@ -10,6 +10,7 @@ from esphome.components import media_player as media_player_mod
 from esphome.components.esp32 import add_idf_component, include_builtin_idf_component
 from esphome.components.esp32.const import VARIANT_ESP32, VARIANT_ESP32S3
 from esphome.const import CONF_ID
+from esphome.core import CORE
 
 # The AirPlay receiver wants the I2S bus. ESPHome's I2S driver is excluded by
 # default (DEFAULT_EXCLUDED_IDF_COMPONENTS), so we must re-enable it exactly as
@@ -315,6 +316,7 @@ async def _build_airplay_receiver(config):
     _register_recursive_sources()
     _add_memory_policy_flags()
     _add_lwip_requirements()
+    _request_wifi_roaming_suppression()
     # Re-enable ESP-IDF's I2S driver (excluded by default to save compile time).
     include_builtin_idf_component("esp_driver_i2s")
     # The HAP pairing / ChaCha20-Poly1305 audio crypto needs libsodium (Ed25519,
@@ -420,6 +422,18 @@ def _add_dsp(var, dsp_config) -> None:
 # config that knows nothing about either.
 _LWIP_MAX_SOCKETS = 24
 _LWIP_UDP_RECVMBOX_SIZE = 32
+
+
+def _request_wifi_roaming_suppression() -> None:
+    """Let the receiver hold ESPHome's post-connect roaming scans off while a
+    stream plays. A no-op on Ethernet and on ESPHome without the API."""
+    if "wifi" not in CORE.config:
+        return
+    from esphome.components import wifi
+
+    enable = getattr(wifi, "enable_runtime_roaming_suppression", None)
+    if enable is not None:
+        enable()
 
 
 def _add_lwip_requirements() -> None:
