@@ -95,6 +95,10 @@ struct TransportFlush {
   // RTP timestamp to flush up to (deferred flush, FLUSHBUFFERED with
   // flushUntilTS); 0 = immediate seek-flush (FLUSH).
   uint32_t flush_until_ts = 0;
+  // Immediate FLUSHBUFFERED: the last buffered frame (24-bit seq) of the old
+  // content. Frames after it are the new content and must be kept.
+  bool has_until_seq = false;
+  uint32_t flush_until_seq = 0;
 };
 
 union TransportEventData {

@@ -613,6 +613,9 @@ void AirPlayReceiver::handle_transport_event(TransportEvent event, const Transpo
         // the cursor resets before the new stream's frames arrive.
         ESP_LOGI(TAG, "audio: seek flush");
         audio_receiver_seek_flush();
+        if (data != nullptr && data->flush.has_until_seq) {
+          audio_receiver_gate_through_seq(data->flush.flush_until_seq);
+        }
         audio_output_flush();
       }
       break;

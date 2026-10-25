@@ -390,6 +390,26 @@ flush) or its still-valid anchor (Path B, without one) discarded that audio:
 live connection now resets as a new stream. Measure it as `start decision`
 RTP minus `Anchor set` RTP.
 
+**The same loss inside one connection (2026-10-25, unverified).** iPhone Apple
+Music skips stay on one connection: `FLUSHBUFFERED immediate`, then
+`SETRATEANCHORTIME` ~270 ms later with `lead` ~0 ms. `audio_receiver_seek_flush()`
+arms `discard_all_until_anchor`, which dropped the opening the phone pushed in
+between: Geneva started 1.17 s and 1.07 s past the anchor on two skips
+(`start decision` start minus `Anchor set` rtp), with `blocks=0` at the anchor.
+Now, when the flush carries `flushUntilSeq`, buffered frames are dropped
+through that 24-bit seq and newer ones kept (`audio_receiver_gate_through_seq()`);
+without it the blanket gate remains. A seq gate still armed at the anchor hands
+over to the RTP gates, so it is never worse than before. Log lines:
+`FLUSHBUFFERED immediate: untilSeq=..`, `flush seq gate: dropped N through seq
+S, first kept seq ..`, and `blanket gate dropped N frames before the anchor`
+on the fallback. Check at the next skip: first kept seq should be `S+1`, and
+start minus anchor well under 0.1 s.
+
+**Volume on a new connection** starts from the last sender volume, not a fixed
+-15 dB (`AIRPLAY_DEFAULT_VOLUME_DB`, now only the boot value). Every accepted
+connection published it, a sender's probe included, so a probe during playback
+could jump the level until the next `Sender volume`.
+
 ## AAC decoder: FDK, and what AirPlay surround looks like (2026-10-06)
 
 > **2026-10-25: FDK and 5.1 removed; AAC is `esp_audio_codec` again, stereo

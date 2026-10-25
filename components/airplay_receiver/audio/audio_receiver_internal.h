@@ -209,6 +209,13 @@ typedef struct audio_receiver_state {
   // Set by audio_receiver_seek_flush() to reject ALL incoming frames until the
   // next SETRATEANCHORTIME provides a valid anchor.
   bool discard_all_until_anchor;
+  uint32_t blanket_gate_drops;  // frames it rejected, logged when it opens
+  // Replaces the blanket gate after an immediate FLUSHBUFFERED that names its
+  // last old frame: buffered frames at or before discard_through_seq (24-bit)
+  // are dropped, newer ones kept. Self-disarms on the first newer frame.
+  uint32_t discard_through_seq;
+  bool discard_through_seq_valid;
+  uint32_t seq_gate_drops;
 
   // Snapshot of the expected RTP position taken the moment the sender signals
   // PAUSE. Cleared on flush/reset and consumed after one use.
@@ -223,6 +230,9 @@ typedef struct audio_receiver_state {
 
 // Lightweight RTP gate used by the buffered TCP task before decrypt/decode.
 // Returns false for frames that belong to the pre-seek/old-track backlog.
+// Buffered (type 103) frames carry a 24-bit sequence number.
+#define BUFFERED_SEQ_MASK 0xFFFFFFu
+
 bool audio_stream_accept_timestamp(audio_receiver_state_t *state,
                                    uint32_t timestamp);
 

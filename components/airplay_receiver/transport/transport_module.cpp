@@ -1269,6 +1269,7 @@ static void handle_flushbuffered(int socket, RtspConn *conn, const RtspRequest *
   (void)raw_len;
   const uint8_t *body = req->body;
   size_t body_len = req->body_len;
+  TransportEventData data{};
   uint32_t flush_until_ts = 0;
   if (body != nullptr && body_len >= 8 && memcmp(body, "bplist00", 8) == 0) {
     int64_t from_seq = 0, from_ts = 0, until_seq = 0, until_ts = 0;
@@ -1284,12 +1285,14 @@ static void handle_flushbuffered(int socket, RtspConn *conn, const RtspRequest *
       ESP_LOGI(TAG, "FLUSHBUFFERED deferred: fromSeq=%lld untilTS=%llu", (long long) from_seq,
                (unsigned long long) flush_until_ts);
     } else {
-      ESP_LOGI(TAG, "FLUSHBUFFERED immediate");
+      data.flush.has_until_seq = got_until_seq;
+      data.flush.flush_until_seq = (uint32_t) until_seq;
+      ESP_LOGI(TAG, "FLUSHBUFFERED immediate: untilSeq=%lld (%s) untilTS=%lld (%s)", (long long) until_seq,
+               got_until_seq ? "set" : "absent", (long long) until_ts, got_until_ts ? "set" : "absent");
     }
   } else {
     ESP_LOGI(TAG, "FLUSHBUFFERED immediate/flush");
   }
-  TransportEventData data{};
   data.flush.flush_until_ts = flush_until_ts;
   transport_events_emit(TRANSPORT_EVENT_FLUSH, &data);
   rtsp_send_ok(socket, conn, req->cseq);

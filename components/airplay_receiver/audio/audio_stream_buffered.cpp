@@ -127,6 +127,29 @@ static bool buffered_pipeline_has_room(audio_receiver_state_t *state) {
          !audio_engine_v2_is_nearly_full(&state->engine_v2);
 }
 
+// Serial-number order in the 24-bit space: newer when the forward distance is
+// non-zero and under half the space.
+static bool seq24_after(uint32_t seq, uint32_t ref) {
+  const uint32_t forward = (seq - ref) & BUFFERED_SEQ_MASK;
+  return forward != 0 && forward <= (BUFFERED_SEQ_MASK >> 1);
+}
+
+// The post-FLUSHBUFFERED gate from audio_receiver_gate_through_seq().
+static bool buffered_accept_seq(audio_receiver_state_t *state, uint32_t seq_no, uint32_t timestamp) {
+  if (!state->discard_through_seq_valid) {
+    return true;
+  }
+  if (!seq24_after(seq_no, state->discard_through_seq)) {
+    state->seq_gate_drops++;
+    return false;
+  }
+  state->discard_through_seq_valid = false;
+  ESP_LOGI(TAG, "flush seq gate: dropped %u through seq %u, first kept seq %u rtp %u",
+           (unsigned) state->seq_gate_drops, (unsigned) state->discard_through_seq, (unsigned) seq_no,
+           (unsigned) timestamp);
+  return true;
+}
+
 // Gate, decrypt and hand one frame (length prefix already stripped) to the
 // decode worker.
 static void buffered_process_frame(audio_stream_t *stream, audio_receiver_state_t *state,
@@ -148,7 +171,8 @@ static void buffered_process_frame(audio_stream_t *stream, audio_receiver_state_
   // Drop stale pre-seek/old-track packets before AES and AAC work.  The
   // bytes still have to be drained from the ring, but they no longer
   // consume decoder time or enter the PCM ring buffer.
-  if (!audio_stream_accept_timestamp(state, timestamp)) {
+  if (!buffered_accept_seq(state, seq_no, timestamp) ||
+      !audio_stream_accept_timestamp(state, timestamp)) {
     state->stats.packets_dropped++;
     (void) __atomic_add_fetch(&state->engine_v2.diag_gate_drops, 1U, __ATOMIC_RELAXED);
     return;

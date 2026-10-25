@@ -32,12 +32,14 @@ RtspConn *rtsp_conn_create(CryptoModule *crypto) {
   }
 
   conn->crypto = crypto;
-  conn->volume_db = AIRPLAY_DEFAULT_VOLUME_DB;
+  // Start from the last sender volume (AIRPLAY_DEFAULT_VOLUME_DB until the
+  // first one after boot) and publish it immediately. The audio engine's gain
+  // is unity until something sets it, and clients send SET_PARAMETER volume
+  // only *after* the stream is already running -- so without this the first
+  // moments of a connection play at full scale. A fixed default instead
+  // jumped the level on every connection, a sender's probe included.
+  conn->volume_db = transport_volume_db();
   conn->volume_q15 = db_to_q15(conn->volume_db);
-  // Publish the default immediately. The audio engine's gain is unity until
-  // something sets it, and clients send SET_PARAMETER volume only *after* the
-  // stream is already running -- so without this the first moments of every
-  // connection play at full scale before dropping to the requested level.
   transport_set_volume_state(conn->volume_db, conn->volume_q15);
   transport_events_emit(TRANSPORT_EVENT_VOLUME, nullptr);
 

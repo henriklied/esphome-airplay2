@@ -174,6 +174,14 @@ void audio_receiver_flush(void);
 /** Flush the audio buffer for a mid-stream seek (FLUSH / FLUSHBUFFERED). */
 void audio_receiver_seek_flush(void);
 
+/**
+ * After audio_receiver_seek_flush() on an immediate FLUSHBUFFERED: drop
+ * buffered frames up to and including @p until_seq (24-bit) instead of every
+ * frame until the next anchor, so the new track's opening, which the sender
+ * pushes before that anchor, is kept.
+ */
+void audio_receiver_gate_through_seq(uint32_t until_seq);
+
 /** Arm a deferred flush for AirPlay 2 FLUSHBUFFERED with flushFromSeq. */
 void audio_receiver_set_deferred_flush(uint32_t flush_until_ts);
 

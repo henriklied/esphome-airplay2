@@ -1,5 +1,6 @@
 // airplay_receiver RTSP event system (port of main/rtsp/rtsp_events.c).
 #include "rtsp_events.h"
+#include "rtsp_conn.h"
 
 #include "esphome/core/log.h"
 
@@ -16,7 +17,7 @@ static void *s_user_data = nullptr;
 
 // Last-known stream/volume state (mirrors the active connection). The audio
 // engine / media_player reads these on request.
-static float s_volume_db = -15.0f;
+static float s_volume_db = AIRPLAY_DEFAULT_VOLUME_DB;
 static int32_t s_volume_q15 = 16384;
 static int64_t s_stream_type = 96;
 

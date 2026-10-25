@@ -553,7 +553,19 @@ void audio_receiver_set_anchor_time(uint64_t clock_id, uint64_t network_time_ns,
   }
 
   // NOW safe to clear the blanket gate — per-RTP gates are active.
+  if (receiver.discard_all_until_anchor && receiver.blanket_gate_drops > 0) {
+    ESP_LOGI(TAG, "blanket gate dropped %lu frames before the anchor",
+             (unsigned long)receiver.blanket_gate_drops);
+  }
   receiver.discard_all_until_anchor = false;
+  // A seq gate still armed here has seen no newer frame. Hand over to the RTP
+  // gates, as the blanket gate does, so a sender that restarts its sequence
+  // numbers is never worse off than before.
+  if (receiver.discard_through_seq_valid) {
+    receiver.discard_through_seq_valid = false;
+    ESP_LOGI(TAG, "flush seq gate still armed at the anchor (dropped %lu through seq %lu)",
+             (unsigned long)receiver.seq_gate_drops, (unsigned long)receiver.discard_through_seq);
+  }
 
   // Pin the PTP clock to the master announced by the anchor packet's clock_id.
   // Without this, ptp_clock can lock to any PTP master on the LAN (HomePods,
@@ -933,6 +945,7 @@ void audio_receiver_flush(void) {
   receiver.discard_above_rtp_valid = false;
   receiver.arm_gate_on_next_anchor = false;
   receiver.discard_all_until_anchor = false;
+  receiver.discard_through_seq_valid = false;
   receiver.paused_rtp_valid = false;
   receiver.blocks_read_in_sequence = 1;
 }
@@ -972,6 +985,7 @@ void audio_receiver_seek_flush(void) {
   // Reject ALL incoming frames until the next anchor.  Prevents stale TCP data
   // from filling the buffer between FLUSHBUFFERED and SETRATEANCHORTIME, which
   // would cause a second flush and double the startup delay.
+  receiver.blanket_gate_drops = 0;
   receiver.discard_all_until_anchor = true;
 
   if (reuse_anchor) {
@@ -980,6 +994,23 @@ void audio_receiver_seek_flush(void) {
     audio_receiver_set_anchor_time(anchor_clock_id, anchor_network_ns,
                                    anchor_rtp);
   }
+}
+
+// A buffered sender pushes the next track's opening between FLUSHBUFFERED and
+// SETRATEANCHORTIME, whose lead is ~0 ms. The blanket gate dropped exactly
+// that audio, ~1 s per Apple Music skip (Geneva, 2026-10-25). The flush names
+// the last old frame, so drop through it and keep the rest; the anchor still
+// arms the RTP gates for what follows.
+void audio_receiver_gate_through_seq(uint32_t until_seq) {
+  if (receiver.stream == nullptr || receiver.stream->type != AUDIO_STREAM_BUFFERED) {
+    return;
+  }
+  receiver.discard_through_seq = until_seq & BUFFERED_SEQ_MASK;
+  receiver.seq_gate_drops = 0;
+  receiver.discard_through_seq_valid = true;
+  receiver.discard_all_until_anchor = false;
+  ESP_LOGI(TAG, "seek flush: dropping through seq %lu instead of until the anchor",
+           (unsigned long)receiver.discard_through_seq);
 }
 
 void audio_receiver_set_deferred_flush(uint32_t flush_until_ts) {
