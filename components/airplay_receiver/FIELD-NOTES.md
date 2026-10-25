@@ -390,7 +390,7 @@ flush) or its still-valid anchor (Path B, without one) discarded that audio:
 live connection now resets as a new stream. Measure it as `start decision`
 RTP minus `Anchor set` RTP.
 
-**The same loss inside one connection (2026-10-25, unverified).** iPhone Apple
+**The same loss inside one connection (2026-10-25, fixed, verified in the log).** iPhone Apple
 Music skips stay on one connection: `FLUSHBUFFERED immediate`, then
 `SETRATEANCHORTIME` ~270 ms later with `lead` ~0 ms. `audio_receiver_seek_flush()`
 arms `discard_all_until_anchor`, which dropped the opening the phone pushed in
@@ -404,6 +404,21 @@ over to the RTP gates, so it is never worse than before. Log lines:
 S, first kept seq ..`, and `blanket gate dropped N frames before the anchor`
 on the fallback. Check at the next skip: first kept seq should be `S+1`, and
 start minus anchor well under 0.1 s.
+
+Verified 18:28 the same day, 7 iPhone Apple Music skips on Geneva: the phone
+always sends `untilSeq`; every skip kept the new track's first frame and
+started 10-16 ms after it (was 1.07-1.17 s lost). The first new frame sits
+~0.30 s past the anchor RTP every time, as Mac Music's did on 2026-10-06: that
+offset is the sender's, nothing is missing. First kept is sometimes `S+2`; the
+skipped seq is not new-track audio (the first kept frame has the same ~0.30 s
+offset whether it is `S+1` or `S+2`).
+
+**Realtime has the same gate, unfixed.** A Spotify session start (18:25):
+`FLUSH`, then the first anchor 1.5 s later; `blanket gate dropped 232 frames`
+(~1.85 s), and playback began 1.79 s past the anchor. This contradicts
+"Realtime resume latency" below for a fresh start, where the flush precedes
+the anchor; the resume measured there had the anchor first. Next: log
+`FLUSH`'s headers (RTP-Info seq/rtptime, if iOS sends it) and gate on them.
 
 **Volume on a new connection** starts from the last sender volume, not a fixed
 -15 dB (`AIRPLAY_DEFAULT_VOLUME_DB`, now only the boot value). Every accepted
