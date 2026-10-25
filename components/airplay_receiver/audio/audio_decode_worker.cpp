@@ -24,6 +24,7 @@
 #include "freertos/task.h"
 
 #include "esp_err.h"
+#include "esp_timer.h"
 
 #include "esphome/core/log.h"
 
@@ -40,7 +41,10 @@ static const char *const TAG = "audio_decode";
 
 #define AUDIO_DECODE_QUEUE_DEPTH 16U
 #define AUDIO_DECODE_MAX_PAYLOAD 8192U
-#define AUDIO_DECODE_TASK_STACK 6144U
+/* FDK AAC peaks at ~49 KB of stack decoding 5.1 / 7.1 (measured on the host by
+ * tests/test_aac_fdk.py; CAacDecoder_DecodeFrame alone is ~36 KB at -Os).  The
+ * decoder logs the live high-water mark ("stack free=") every 1000 frames. */
+#define AUDIO_DECODE_TASK_STACK 57344U
 
 /* Sits above the buffered TCP reader (5) so decoded PCM keeps draining ahead of
  * ingress, and below the RTP/control receivers (7/8) and the I2S playback task
@@ -56,6 +60,13 @@ static const char *const TAG = "audio_decode";
 #else
 #define AUDIO_DECODE_TASK_CORE 1
 #endif
+
+/* Longest the task decodes back-to-back before giving up the core for a tick.
+ * A buffered sender front-loads seconds of audio after a (re)connect; at ~15 ms
+ * per 5.1 frame that backlog kept this task busy for over 5 s, IDLE1 never ran
+ * and the task watchdog reset the board (Apple TV, 2026-10-06).  In steady
+ * playback the queue runs dry between frames and this never triggers. */
+#define AUDIO_DECODE_MAX_BUSY_US 200000
 
 // Worker handle (opaque outside this file).  Matches the upstream layout: the
 // state pointer, the job pointer queue, the task handle and the two volatile
@@ -99,8 +110,12 @@ void job_free(audio_decode_job_t *job) { airplay_free(job); }
 
 void decode_task(void *arg) {
   audio_decode_worker_t *worker = static_cast<audio_decode_worker_t *>(arg);
+  int64_t busy_since_us = 0;
 
   for (;;) {
+    if (uxQueueMessagesWaiting(worker->queue) == 0) {
+      busy_since_us = 0;  // about to block, which lets IDLE run
+    }
     audio_decode_job_t *job = NULL;
     if (xQueueReceive(worker->queue, &job, portMAX_DELAY) != pdTRUE) {
       continue;
@@ -140,6 +155,14 @@ void decode_task(void *arg) {
     }
 
     job_free(job);
+
+    const int64_t now_us = esp_timer_get_time();
+    if (busy_since_us == 0) {
+      busy_since_us = now_us;
+    } else if (now_us - busy_since_us > AUDIO_DECODE_MAX_BUSY_US) {
+      vTaskDelay(1);
+      busy_since_us = 0;
+    }
   }
 
   worker->task = NULL;
@@ -226,6 +249,9 @@ void audio_decode_worker_destroy(audio_decode_worker_t *worker) {
 
   if (worker->task) {
     worker->running = false;
+    // The task may be parked in push_pcm_wait() for up to its 6 s bound while
+    // the timeline is full; release it so it reaches the sentinel in time.
+    audio_engine_v2_abort_push_waits(&worker->state->engine_v2);
     audio_decode_job_t *stop = NULL;
     (void) xQueueSend(worker->queue, &stop, 0);
     for (int i = 0; i < 100 && worker->task; ++i) {

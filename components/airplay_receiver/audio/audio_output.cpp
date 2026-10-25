@@ -114,6 +114,14 @@ static int32_t g_volume_q15 = 32768;  // unity
 // outright instead of sliding up to it from the previous session's gain.
 static int32_t g_volume_ramp_q15 = -1;
 
+// DSP cost accounting (audio_output_take_dsp_load). Written by the playback
+// task; read and reset by the 1 Hz telemetry, which runs on the same task.
+static constexpr uint64_t PERMILLE = 1000ULL;
+static constexpr uint64_t US_PER_S = 1000000ULL;
+static uint64_t g_dsp_busy_us = 0;
+static uint64_t g_dsp_frames = 0;
+static uint32_t g_dsp_peak_permille = 0;
+
 // Wall-clock of the last frame of real audio handed to I2S, and how long after
 // it the DMA ring can still be holding some. Used to decide whether a flush has
 // anything to purge (see the flush branch in playback_task).
@@ -126,6 +134,9 @@ static int64_t g_last_audio_submit_us = 0;
 static uint32_t g_amp_idle_timeout_ms = 60000;  // 0 = disabled
 static int64_t g_amp_idle_since_us = 0;         // ignored when g_amp_idle_muted
 static bool g_amp_idle_muted = false;           // amp auto-muted by the watchdog
+static bool g_amp_on = false;                   // last level written by amp_set()
+// Powers the amp down a while after a stop, instead of at the stop itself.
+static esp_timer_handle_t g_amp_off_timer = nullptr;
 
 // Live output cursor. output_submitted_frames advances after a successful
 // i2s_channel_write(); output_sent_frames is advanced by the TX DMA completion
@@ -192,12 +203,57 @@ static uint32_t queued_frames() {
 // ---------------------------------------------------------------------------
 // Amplifier enable
 // ---------------------------------------------------------------------------
+// Every change of the enable line is an audible pop. A sender's connect used to
+// toggle it several times -- on at PLAYING, off at the probe connection's
+// DISCONNECTED, on again at the real connection's PLAYING -- before any audio
+// existed: the "four ticks" on connect. Now the amp comes on with the first
+// audible frame and goes off only after amp_idle_timeout_ms of silence or of
+// being stopped, so a connect switches it at most once, under the music.
 static void amp_set(bool on) {
-  if (g_config.amp_enable_gpio < 0) {
+  if (g_config.amp_enable_gpio < 0 || on == g_amp_on) {
     return;
   }
+  g_amp_on = on;
   int level = g_config.amp_enable_inverted ? (on ? 0 : 1) : (on ? 1 : 0);
   gpio_set_level((gpio_num_t) g_config.amp_enable_gpio, level);
+  ESP_LOGI(TAG, "Amp %s", on ? "on" : "off");
+}
+
+static void amp_off_timer_cb(void *) {
+  if (g_playback_task == nullptr) {
+    amp_set(false);
+  }
+}
+
+// Rates the I2S clock follows instead of resampling. AirPlay sends 44.1 kHz
+// (ALAC, AAC) and 48 kHz (AAC 5.1 / 7.1 and some stereo); the PCM5100 takes
+// both. Resampling 48 -> 44.1 kHz on the audio core, next to a 5.1 decode,
+// starved IDLE1 and tripped the task watchdog (2026-10-06).
+static constexpr uint32_t NATIVE_OUTPUT_RATES[] = {44100, 48000};
+
+static bool is_native_output_rate(uint32_t rate) {
+  for (uint32_t native : NATIVE_OUTPUT_RATES) {
+    if (rate == native) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Caller owns the channel: the playback task, or anyone while it is stopped.
+// Stopping the clocks clicks if the amp is on; a new stream's rate change
+// lands before its first audible frame, while the amp is still off.
+static void reclock_output(uint32_t rate) {
+  ESP_LOGI(TAG, "Output rate %" PRIu32 " -> %" PRIu32 " Hz", g_output_rate, rate);
+  i2s_channel_disable(g_tx_handle);
+  i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(rate);
+  i2s_channel_reconfig_std_clock(g_tx_handle, &clk_cfg);
+  g_output_rate = rate;
+  // Biquad coefficients are designed against the output rate. The redesign
+  // runs once per rate change, on the thread that runs the filters.
+  audio_dsp_set_sample_rate(rate);
+  cursor_reset();
+  i2s_channel_enable(g_tx_handle);
 }
 
 // ---------------------------------------------------------------------------
@@ -310,7 +366,11 @@ static void playback_task(void *arg) {
   while (g_playback_running) {
     if (g_resample_reinit) {
       g_resample_reinit = false;
-      audio_resample_init((uint32_t) g_source_rate, g_output_rate, 2);
+      const uint32_t source_rate = (uint32_t) g_source_rate;
+      if (source_rate != g_output_rate && is_native_output_rate(source_rate)) {
+        reclock_output(source_rate);
+      }
+      audio_resample_init(source_rate, g_output_rate, 2);
       // Size the output buffer to the worst case for the current ratio so the
       // resampler never caps mid-stream. audio_resample_max_output() is 0 when
       // resampling is inactive (rates equal).
@@ -391,7 +451,16 @@ static void playback_task(void *arg) {
       // Last stage before the DAC, so the filters see exactly what is played --
       // and running after the volume attenuation leaves headroom for a shelf
       // with positive gain instead of clipping it at high volume.
+      const int64_t dsp_start_us = esp_timer_get_time();
       audio_dsp_process(play_buf, play_frames);
+      const uint64_t dsp_busy_us = (uint64_t) (esp_timer_get_time() - dsp_start_us);
+      g_dsp_busy_us += dsp_busy_us;
+      g_dsp_frames += play_frames;
+      const uint32_t block_permille =
+          (uint32_t) (dsp_busy_us * g_output_rate * PERMILLE / ((uint64_t) play_frames * US_PER_S));
+      if (block_permille > g_dsp_peak_permille) {
+        g_dsp_peak_permille = block_permille;
+      }
       if (i2s_channel_write(g_tx_handle, play_buf, play_frames * 2 * sizeof(int16_t), &written,
                             portMAX_DELAY) == ESP_OK) {
         g_submitted_frames += (uint32_t) (written / stride);
@@ -444,11 +513,23 @@ esp_err_t audio_output_init(void) {
     return ESP_ERR_INVALID_ARG;
   }
 
-  // Configure the amp-enable GPIO (de-asserted; start() asserts it).
+  // Configure the amp-enable GPIO (de-asserted; the playback task asserts it on
+  // the first audible frame).
   if (g_config.amp_enable_gpio >= 0) {
     gpio_reset_pin((gpio_num_t) g_config.amp_enable_gpio);
     gpio_set_direction((gpio_num_t) g_config.amp_enable_gpio, GPIO_MODE_OUTPUT);
+    g_amp_on = true;  // force the first write
     amp_set(false);
+    const esp_timer_create_args_t timer_args = {
+        .callback = amp_off_timer_cb,
+        .arg = nullptr,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "amp_off",
+        .skip_unhandled_events = true,
+    };
+    if (esp_timer_create(&timer_args, &g_amp_off_timer) != ESP_OK) {
+      g_amp_off_timer = nullptr;  // stop() then powers the amp down at once
+    }
   }
 
   // Resolve the I2S peripheral port: an explicit AudioOutputConfig::i2s_port
@@ -526,10 +607,13 @@ void audio_output_start(void) {
   // whatever the last session left behind.
   g_volume_ramp_q15 = -1;
   g_amp_idle_since_us = 0;
-  g_amp_idle_muted = false;
+  if (g_amp_off_timer != nullptr) {
+    esp_timer_stop(g_amp_off_timer);
+  }
+  // Not amp_set(true): the playback task asserts it on the first audible frame.
+  g_amp_idle_muted = !g_amp_on;
   g_last_audio_submit_us = 0;
   audio_dsp_reset();
-  amp_set(true);
   xTaskCreatePinnedToCore(playback_task, "audio_play", 4096, nullptr, AIRPLAY_AUDIO_PLAYBACK_TASK_PRIORITY,
                           &g_playback_task, AIRPLAY_PLAYBACK_CORE);
 }
@@ -546,7 +630,12 @@ void audio_output_stop(void) {
   g_amp_idle_since_us = 0;
   g_amp_idle_muted = false;
   g_last_audio_submit_us = 0;
-  amp_set(false);
+  if (g_amp_off_timer == nullptr || g_amp_idle_timeout_ms == 0) {
+    amp_set(false);
+  } else {
+    esp_timer_stop(g_amp_off_timer);
+    esp_timer_start_once(g_amp_off_timer, (uint64_t) g_amp_idle_timeout_ms * 1000ULL);
+  }
   if (g_playback_task != nullptr) {
     ESP_LOGW(TAG, "Playback task did not exit within timeout");
   } else {
@@ -570,18 +659,8 @@ void audio_output_set_sample_rate(uint32_t rate) {
   }
   // Only safe when no writer task is actively using I2S (the caller must stop
   // the playback task first).
-  ESP_LOGI(TAG, "Setting sample rate to %" PRIu32 " Hz", rate);
-  i2s_channel_disable(g_tx_handle);
-  i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(rate);
-  i2s_channel_reconfig_std_clock(g_tx_handle, &clk_cfg);
-  g_output_rate = rate;
+  reclock_output(rate);
   g_resample_reinit = true;  // output rate changed: rebuild the resampler
-  // Biquad coefficients are designed against the output rate, so they are stale
-  // now. Safe here: the caller has stopped the playback task (see above), so
-  // the trig in the redesign is not running on the realtime path.
-  audio_dsp_set_sample_rate(rate);
-  cursor_reset();
-  i2s_channel_enable(g_tx_handle);
 }
 
 void audio_output_flush(void) {
@@ -597,6 +676,16 @@ void audio_output_set_source_rate(int rate) {
 
 void audio_output_set_volume_q15(int32_t volume_q15) {
   g_volume_q15 = volume_q15;
+  audio_dsp_set_volume_q15(volume_q15);  // the loudness stage follows the volume
+}
+
+// The limiter's look-ahead delays every sample on its way to the DAC, so it is
+// part of the output latency the playout clock has to plan around.
+static uint32_t dsp_latency_us(void) {
+  if (g_output_rate == 0) {
+    return 0;
+  }
+  return (uint32_t) (((uint64_t) audio_dsp_get_latency_frames() * 1000000ULL) / g_output_rate);
 }
 
 uint32_t audio_output_get_hardware_latency_us(void) {
@@ -608,7 +697,8 @@ uint32_t audio_output_get_hardware_latency_us(void) {
   // occupancy oscillates between (DESC_NUM-1) and DESC_NUM descriptors. Using
   // the full ring would overstate the delay by half a descriptor.
   return (uint32_t) (((uint64_t) (2 * I2S_DMA_DESC_NUM - 1) * I2S_DMA_FRAME_NUM * 1000000ULL / 2) /
-                     g_output_rate);
+                     g_output_rate) +
+         dsp_latency_us();
 }
 
 bool audio_output_get_pipeline_us(int64_t *now_us, uint32_t *pipeline_us) {
@@ -665,12 +755,23 @@ bool audio_output_get_pipeline_us(int64_t *now_us, uint32_t *pipeline_us) {
 int64_t audio_output_get_next_playout_time_ns(int64_t now_us) {
   int64_t sampled_us = 0;
   uint32_t pipeline_us = 0;
-  if (!audio_output_get_pipeline_us(&sampled_us, &pipeline_us)) {
+  if (audio_output_get_pipeline_us(&sampled_us, &pipeline_us)) {
+    pipeline_us += dsp_latency_us();
+  } else {
     sampled_us = now_us;
-    pipeline_us = audio_output_get_hardware_latency_us();
+    pipeline_us = audio_output_get_hardware_latency_us();  // includes the DSP
   }
   return (sampled_us + (int64_t) pipeline_us + OUTPUT_PIPELINE_LATENCY_US) *
          1000LL;
+}
+
+void audio_output_take_dsp_load(uint32_t *avg_permille, uint32_t *peak_permille) {
+  const uint64_t audio_us = g_output_rate > 0 ? g_dsp_frames * US_PER_S / g_output_rate : 0;
+  *avg_permille = audio_us > 0 ? (uint32_t) (g_dsp_busy_us * PERMILLE / audio_us) : 0;
+  *peak_permille = g_dsp_peak_permille;
+  g_dsp_busy_us = 0;
+  g_dsp_frames = 0;
+  g_dsp_peak_permille = 0;
 }
 
 uint32_t audio_output_get_underruns(void) {

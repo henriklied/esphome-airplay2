@@ -226,6 +226,7 @@ without removing the counters.
 ```
 playout: raw=.. span=.. filt=.. drift=..ppm trims=../s (N) buffered=N
          concealed=N holes=N (+N) under=N dfail=N qdrop=N edrop=N ins=N
+         dsp=N.N% pk=N.N%
 resend:  sent=N recovered=N stale=N unmarked_ok=N unmarked_stale=N
 rxpath:  stack=N task=N gap=N
 ```
@@ -239,6 +240,10 @@ rxpath:  stack=N task=N gap=N
   a different problem entirely.
 - `ins` -- steady ~125/s resampler insertion. Flat regardless of artefacts; not
   a fault signal.
+- `dsp` / `pk` -- output DSP cost as a share of one core's real time: the
+  average over the second and the worst block. It runs at priority 9 on the
+  core the decoder (priority 6) shares, so every point here is taken from AAC
+  decode. Watch `pk` when adding stages.
 - `resend:` is **suppressed entirely when every counter is zero**, so no
   `resend:` lines at all is the healthy state -- no sequence gap was detected.
 
@@ -360,7 +365,60 @@ The stage clamps on output, so a boost without a matching negative `preamp`
 distorts peaks rather than wrapping. `warn_if_dsp_clips_()` names the preamp it
 wants at boot. There is no limiter.
 
+## The opening of each track was dropped (fixed 2026-10-06, unverified)
+
+A track change is a new stream on a new TCP connection to the same port, and
+buffered senders push the opening audio before the anchor that says to play it
+now (`lead` ~0 ms). `audio_receiver_start_buffered()` returned early on an
+unchanged port, so the previous stream's `discard_all_until_anchor` (after a
+flush) or its still-valid anchor (Path B, without one) discarded that audio:
+~1 s lost per track, measured on an audiobook. An unchanged-port SETUP with no
+live connection now resets as a new stream. Measure it as `start decision`
+RTP minus `Anchor set` RTP.
+
+## AAC decoder: FDK, and what AirPlay surround looks like (2026-10-06)
+
+AAC now decodes with Fraunhofer FDK (`decoder/aac_fdk.*`); `esp_audio_codec`'s
+AAC decoder is mono/stereo only and AirPlay sends 5.1 / 7.1 as AAC-LC 48 kHz.
+ALAC stays on `esp_audio_codec`.
+
+- **Format comes from the RTP SSRC**, per packet (`decoder/aac_format.*`):
+  `0x16000000` 44.1k stereo, `0x17000000` 48k stereo, `0x27000000` 5.1,
+  `0x28000000` 7.1. A 7-byte ADTS header built from it tells FDK the layout.
+  Values and method from shairport-sync 5.0. The previous header was hardcoded
+  to 44.1 kHz stereo.
+- **Senders learn it from `/info` `supportedFormats.bufferStream`**: bit 39 =
+  5.1, bit 40 = 7.1 (HomePods set both). `advertise_surround` sets 22 + 39;
+  default off leaves `/info` byte-identical. **That mask breaks Spotify**:
+  senders trust `supportedFormats` once present, and without bit 18 (ALAC
+  44.1k/16/2, what Spotify's realtime stream uses) they tear down before
+  SETUP stream. Add every decodable format before enabling it.
+- **Host-verified, not hardware-verified**: `tests/test_aac_fdk.py` decodes
+  ffmpeg- and AudioToolbox-encoded 5.1 with a tone per channel; every channel
+  lands on the right side, centre and surrounds at -3 dB, LFE dropped.
+- **7.1 is ambiguous.** channelConfiguration 7 means front-wide pairs to FDK
+  and side pairs to ffmpeg; AudioToolbox instead emits configuration 0 with an
+  in-band PCE in the first frame only (`aac_adts_channel_config()` handles the
+  PCE case). Not advertised until a real sender's packets are seen -- the
+  decoder logs the SSRC and first payload bytes on every format change.
+- **Stack: ~49 KB peak** (host), 36 KB of it `CAacDecoder_DecodeFrame` at -Os.
+  The decode task went from 6 KB to 56 KB. The realtime RX task (12 KB) must
+  never decode AAC with FDK; Apple realtime streams are ALAC.
+- **Cost on the S3 is unmeasured.** FDK keeps its state in PSRAM. The decoder
+  logs `aac: ... decode avg= max= ... stack free= internal free=` every 1000
+  frames; check it on the first stereo and first 5.1 session.
+
 ## Clicks on connect (mechanism inferred, not measured)
+
+> **2026-10-06: the remaining ticks were the amp enable line, now fixed.** The
+> purge fix below did not stop them. A connect switched the amp on at PLAYING
+> (before any audio), off at the probe connection's DISCONNECTED, and on again
+> at the real connection's PLAYING -- the elimination below missed that senders
+> open more than one connection. The amp now comes on with the first audible
+> frame and goes off only after `amp_idle_timeout` (also after a stop), with
+> `Amp on` / `Amp off` logged. An iPhone connect logged one switch, at the
+> first frame, and no ticks were heard.
+
 
 Selecting the board from iOS produced a run of clicks -- "click click click,
 up and down, like the amp turning up and down" -- that Sendspin never made on
@@ -443,3 +501,259 @@ ramp around the disable/enable, which has not been written.
   responding`) -- stop playback first. Flashing reboots the board, which drops
   the AirPlay session; the sender must re-select the speaker before the next
   capture.
+
+## Realtime resume latency (2026-10-06, Spotify on iOS, measured)
+
+A realtime (type 96, ALAC) resume runs `start_stream` -> sync packet (anchor)
+-> `FLUSH`, all within ~70 ms. `audio_receiver_seek_flush()` used to drop that
+anchor and wait for the next sync packet (~1 s); its gate then sat ~1 s past
+the first anchor and discarded that audio, heard as a skip. It now replays the
+anchor if it arrived since the stream started and within 500 ms
+(`RESUME_ANCHOR_REUSE_WINDOW_US`); log line `seek flush: reusing resume
+anchor`. A mid-stream seek never reuses one (one use per stream start).
+
+**The remaining ~2 s from resume to sound is the sender, not the board.**
+After the flush the phone sends at exactly 1x, and its first packet is stamped
+~1.8 s past the anchor (`latencyMax = 88200`). `start decision` lands within
+~15 ms of that packet's due time. Shrinking the 180 ms preroll or the 1 s
+fallback timeout (`audio_engine_v2.cpp`) was considered and **would gain
+nothing**: no audio exists earlier. `latencyMin = 11025` is not the sender's
+working latency.
+
+If resumes regress (silent start, wrong position, `Anchor change detected`
+right after a resume), revert the commit "airplay: reuse the resume anchor
+across a realtime FLUSH".
+
+## FDK performance (2026-10-06, Geneva, measured)
+
+Stereo AAC 44.1k decode per 1024-sample (23.2 ms) frame, from the decoder's
+`decode avg=` log line:
+
+| Build | avg | max | internal free |
+|---|---|---|---|
+| `-Os`, all FDK memory in PSRAM | 11.6-12.1 ms | 14.4-15.9 ms | 56-62 KB |
+| `-O2` + L1 buffers internal | 7.3-7.4 ms | 10.9-12.6 ms | 35-39 KB |
+
+- `-O2` is `esp32: framework: advanced: compiler_optimization: PERF`, set in
+  `boston-x90-l-airplay.yaml` only (`sdkconfig_options` is overridden by
+  ESPHome). Flash 37.7% -> 44.7%.
+- FDK tags allocations by memory section; the pschatzmann port ignored the tag
+  and put everything in PSRAM. `-Wl,--wrap=FDKcalloc_L/FDKaalloc_L`
+  (`__init__.py`, wrappers at the end of `decoder/aac_fdk.cpp`) puts L1 (2 x
+  8 KB for stereo) in internal RAM while 40 KB stays free
+  (`INTERNAL_RESERVE_BYTES`). L2 (53 KB) and EXTERN (256 KB) stay in PSRAM.
+  Sizes measured on the host by logging `FDKcalloc_L`.
+- Internal RAM fell ~23 KB, not 16: `-O2` presumably grows IRAM code, which
+  shares SRAM. Not separated. **If WiFi drops or allocations fail**, raise
+  `INTERNAL_RESERVE_BYTES` (disables the move, keeps `-O2`) or drop PERF.
+- Contribution of each change was not measured separately.
+- 5.1 at ~3x stereo work would still be ~22 ms per 23 ms frame: not viable
+  without further gains.
+
+### 5.1 decode cost on the board (2026-10-06, measured)
+
+Temporary benchmark firmware (not committed): pink-noise ADTS clips decoded on
+the audio core with the board idle, `-O2` + L1 internal, downmix to stereo.
+
+| Clip | avg | max | frame budget | load |
+|---|---|---|---|---|
+| stereo 44.1k 256 kbps | 5.76 ms | 7.56 ms | 23.2 ms | 24% |
+| 5.1 48k 640 kbps | 16.0 ms | 17.8 ms | 21.3 ms | 75% |
+
+5.1 costs 2.8x stereo. Streaming stereo measured 7.4 ms against the idle
+5.76 ms (+28%: playback, DSP and network on the same core), so 5.1 while
+streaming projects to ~20.5 ms per 21.3 ms frame, ~96% of the core. Not viable
+without roughly another 25-30% off the decode.
+
+### Where FDK's decode time goes (2026-10-06, measured)
+
+`tools/fdk_bench/` on the Geneva: the `boston-x90-l-airplay.yaml` build (`-O2`,
+L1 internal), the decode task's core, priority and stack, board idle, downmix to
+stereo. Phases are timed by `-Wl,--wrap` on FDK's cross-file calls; ~400 frames
+per clip, two rounds agreed within 1%. ms per frame:
+
+| Clip | total | read | tools | filterbank | downmix | other |
+|---|---|---|---|---|---|---|
+| stereo 44.1k 256k, Apple enc. | 6.6 | 2.4 (36%) | 0.2 | 2.4 (37%) | 0.0 | 1.5 (23%) |
+| 5.1 48k 640k, Apple enc. | 17.5 | 5.6 (32%) | 0.4 | 7.3 (42%) | 1.5 (9%) | 2.7 (15%) |
+| 5.1 48k 640k, ffmpeg enc. | 16.5 | 4.6 (28%) | 0.4 | 7.3 (44%) | 1.5 (9%) | 2.7 (16%) |
+
+read = `CChannelElement_Read` (bitstream + Huffman), tools =
+`CChannelElement_Decode`, filterbank = `CBlock_FrequencyToTime` (IMDCT +
+overlap-add), downmix = `pcmDmx_ApplyFrame`, other = the remainder.
+
+- **Filterbank: 1.2 ms per channel**, the largest share of 5.1. FDK runs it in a
+  per-channel loop after every element is parsed (`aacdecoder.cpp`, the loop
+  calling `CBlock_FrequencyToTime`), so channels can be split across cores. The
+  shared state is the `pWorkBufferCore1->mdctOutTemp` scratch; a second core
+  needs its own. Best case, half the channels on core 0: -3.6 ms.
+- **FDK's downmix shows 1.5 ms on the board** (a host run put it at 0.16 ms),
+  but it is not removable cost: see the next section.
+- **Read is 28-32% and sequential**: element boundaries are only known after
+  parsing the previous one. Apple's encoder costs 1 ms more here than ffmpeg's
+  at the same bitrate, and its max (23.6 ms) exceeds the 21.3 ms frame.
+- Projection, not measured: 17.5 - 3.6 - 1.3 = ~12.6 ms idle (-28%), ~16 ms
+  streaming at the +28% measured for stereo, ~76% of core 1, with ~3.6 ms per
+  frame (~17%) added to core 0 next to WiFi.
+- Stereo is 6.6 ms here against 5.76 ms in the earlier benchmark; that run's
+  encoder was not recorded, and the two are not directly comparable.
+- The bench needs the decode task's 56 KB stack (16 KB crashed in `dit_fft`)
+  and must yield every frame, or IDLE1 starves and the task watchdog resets.
+
+### Filterbank on two cores (2026-10-06, measured)
+
+`decoder/aac_fdk_parallel.cpp`: on multichannel streams, every other
+channel's `CBlock_FrequencyToTime` runs on a worker pinned to core 0, and a
+wrap of `CAacDecoder_DecodeFrame` waits for it before returning. Link-time
+wraps only; the pinned FDK is unmodified. The file's header comment lists the
+FDK facts that keep the output identical; a ref bump must re-check them.
+
+Same bench and build as above, ms per frame:
+
+| Clip | 1 core | 2 cores | max, 2 cores |
+|---|---|---|---|
+| 5.1 640k, Apple enc. | 17.5-17.8 | 14.8-15.1 (-15%) | 18.9-20.3 |
+| 5.1 640k, ffmpeg enc. | 16.5-16.8 | 13.8-14.1 (-16%) | 15.3-16.5 |
+| stereo 256k | 6.6 | 6.6 (not split) | 9.4-9.9 |
+
+- **Output is bit-identical** to the serial decode: FNV hash over every sample,
+  every round, both encoders.
+- -2.7 ms of a possible -3.6 ms: the worker's three channels take longer on
+  core 0 than on core 1. Handing it the first channel (even calls) rather than
+  the second was worth ~0.8 ms; with odd calls the saving was 1.9 ms.
+- Deferral only happens in the concealment steady state; a frame with errors
+  or fading runs serially.
+- Worker: 10 KB stack (peak ~6.3 KB), 8 KB scratch placed like FDK's L1
+  buffer, created on the first multichannel frame, freed with the decoder.
+- **Replacing FDK's downmix buys nothing.** Decoding 5.1 to six channels with
+  no downmix at all measured 15.2 ms against 15.1 ms with it: the 1.5 ms is
+  FDK's interleave and PCM conversion, which happen inside the downmix call
+  and move elsewhere without it.
+- 5.1 while streaming, projected from the stereo overhead (+1.6 ms, or +28%):
+  ~16.5-19.5 ms of the 21.3 ms frame. Unmeasured; the next test is a real 5.1
+  stream with `advertise_surround`, once the anchor/RTP mismatch below is
+  fixed.
+- Not split: parsing (28-32%) is sequential.
+- Free internal RAM read either ~97 KB or ~72 KB at boot, before any decode, on
+  different boots of the same build; worker start/stop did not move it.
+- Flashing while the bench decodes can trip the task watchdog on core 1 and
+  leave the old image running; retry the upload.
+
+### Apple TV 5.1 plays (2026-10-06 night, measured)
+
+Geneva, `advertise_surround: true`, Apple TV (`.175`) sending 5.1 AAC 48 kHz:
+~7 min continuous, through three reconnects, a pause and two skips. Sync within
+~0.2 ms, decode 15.2-16.3 ms avg per 21.3 ms frame (max 19-28 ms), no
+underruns, one 5 ms concealment (WiFi). Three fixes were needed on top of the
+two-core filterbank:
+
+- **New buffered port per SETUP** (section below): the Apple TV's
+  SETUP -> TEARDOWN -> SETUP now lands on a fresh connection whose first packet
+  matches the anchor.
+- **I2S follows the stream's rate** (`reclock_output()` in `audio_output.cpp`):
+  the 48 -> 44.1 kHz resampler ran on core 1 next to the decode and tripped the
+  task watchdog (`subsample_no_interpolate` -> software `floor()` on doubles).
+  44.1 and 48 kHz now play natively; the reclock happens before the first
+  audible frame, while the amp is off.
+- **The decode task yields after 200 ms back-to-back** (`audio_decode_worker`):
+  after a reconnect the Apple TV front-loads seconds of audio, and decoding that
+  backlog at ~15 ms per frame starved IDLE1 past the watchdog.
+
+Open: the two-core worker failed to start once ("Worker unavailable", internal
+RAM ~30-35 KB free while streaming), which leaves 5.1 on one core with no
+headroom. Spotify against the 5.1 `/info` is untested, so the committed Geneva
+config keeps `advertise_surround: false`.
+
+### Buffered port reuse and Mac PTP corrections (2026-10-06 evening)
+
+- **New buffered port per SETUP after a stream TEARDOWN** (`handle_teardown`),
+  as shairport-sync does. Verified with Mac Music: every SETUP got a new port,
+  the old connection closed, and each connection's first packet RTP sat
+  ~0.3 s from its anchor. iPhone Apple Music track changes stay inside one
+  connection (FLUSHBUFFERED + new anchor), so they never hit this path. The
+  Apple TV, which motivated it, is still untested.
+- **A Mac's PTP correctionField is a timescale offset.** Logged raw: Follow_Up
+  `preciseOriginTimestamp` = the Mac's awake uptime (`CLOCK_UPTIME_RAW`),
+  correctionField = -59806 s; its SETRATEANCHORTIME uses the same uptime under
+  its own clock ID. Applying the correction put anchors 16.6 h ahead and Mac
+  streams never started, on any subnet. Corrections over 1 s are now ignored;
+  Mac Music then played, anchors within a few ms (`lead=-18 ms`, `-4 ms`).
+  nqptp applies the correction and files it under the Announce grandmaster,
+  so shairport-sync would not have handled this case either.
+- **Open: a second RTSP client supersedes a playing one.** Home Assistant
+  (Music Assistant, 192.168.0.232) connected after a reflash and the Mac's
+  session was dropped silently; Music kept showing "playing".
+- **Mac volume works.** It failed only in the Music app left over from the
+  dropped session; after restarting Music, volume arrived as SET_PARAMETER
+  steps like the iPhone's (`Sender volume %.2f dB`, logged at INFO).
+
+### 5.1 attempt with an Apple TV (2026-10-06, measured)
+
+- **120 MHz octal PSRAM** (experimental, temperature-tracked tuning): 5.1
+  decode 16.0 -> 15.2 ms, stereo 5.76 -> 5.52 ms (-5%), internal RAM -10 KB.
+  Not kept. FDK is compute-bound here, not memory-bound; 5.1 needs decoder
+  work (dual-core decode, or an Xtensa-optimised AAC decoder).
+- **`supportedFormats` breaks senders even when it lists their format.** With
+  bits 18 + 22 + 23 + 39 advertised, the Apple TV (`.175`, AppleTV11,1) tore
+  down before stream SETUP, as Spotify did with 22 + 39. Without the key it
+  plays AAC 44.1k stereo (`audioFormat = 0x400000`, `audioFormatIndex = 22`) --
+  bit 22, which the failing mask included. So the dict itself, not a missing
+  bit, is what senders reject. Untested guess: they also need
+  `supportedAudioFormatsExtended` (HomePods send it, indices up to 75), which
+  the `audioFormatIndex` key in SETUP suggests. Compare a HomePod's full
+  `/info` against ours before trying again.
+
+### Apple TV 5.1 over AirPlay (2026-10-06, measured)
+
+- **`supportedFormats.audioStream` unblocked the Apple TV.** HomePods publish
+  `audioStream` (0x1440000), `bufferStream`, `screenStream`,
+  `lowLatencyAudioStream` and `supportedAudioFormatsExtended`. Adding
+  `audioStream` alone (bits 18 + 22 + 24) to our `bufferStream` got the Apple
+  TV (`.175`) past setup, and it then **chose 5.1** (`audioFormat =
+  0x8000000000`, index 39, packets with SSRC `0x27000000`, FDK sees channel
+  configuration 6). `supportedAudioFormatsExtended` was not needed. Spotify
+  against this list is untested.
+- **`LOUDNESSNORMALIZATION`** (Apple TV, video content, 78-byte bplist) is now
+  answered 200 instead of 501. Whether the 501 mattered is unproven: the
+  stereo session that stopped after ~2 s also had it rejected.
+- **5.1 does not play: the anchor and the packets are on different RTP
+  timelines.** Packets are clean (seq +1, RTP +1024, 64-byte opening frames),
+  but SETRATEANCHORTIME's rtp is unrelated to them: anchor 16809885 vs packets
+  ~1824877526, a different gap in each of four sessions. The scheduler waits
+  for the anchor position, the timeline fills with unplayable frames,
+  back-pressure stops the TCP reader, and the Apple TV closes the connection.
+  Stereo from the same Apple TV has matching anchors. See the 2026-10-06
+  shairport-sync notes in AIRPLAY-FINDINGS for how it reconciles the two.
+- 5.1 advertising is off again (`advertise_surround: false`); `/info` is then
+  identical to the build that plays Spotify and Apple TV stereo. **Superseded:**
+  the anchor/RTP mismatch was buffered port reuse, and 5.1 now plays; see
+  "Apple TV 5.1 plays".
+
+## Buffered stream: ~1 s dropouts from a shut TCP window (fixed 2026-10-07, measured)
+
+Mac (Apple Music) to both boards, buffered type 103. Every 10-40 s, per board
+and independently: `buffered` full at ~190, then `ins=0` for ~4 s while it
+drains, `stalled: PREROLL`, ~1 s silence, then a burst. Captured live on the
+Mac with `netstat` sampled at 4 Hz: its send queue to the board froze at
+54,272 bytes for 5.0 s with nothing sent, and the board went silent 5 s in.
+A 5 s freeze with data queued is the macOS TCP persist timer: the Mac saw a
+zero window and missed the reopen.
+
+Cause: the reader read the socket only while the pipeline had room, and the
+PCM timeline holds 192 x 1024 samples (~4.5 s, ~140 KB of AAC) while SETUP
+advertised `audioBufferSize` 512 KB. The sender pushes toward 512 KB, so the
+window sat at zero. Whether the reopen was lost on air or deferred by lwIP's
+update threshold (`tcp_recved()` sends an explicit update only past
+`TCP_WND_UPDATE_THRESHOLD`) was not captured; the fix does not depend on it.
+
+Fix (`audio/buffered_ring.h`): the socket drains into a PSRAM ring of
+`BUFFERED_AUDIO_BUFFER_BYTES` (the same constant SETUP advertises), and
+frames leave the ring only while the pipeline has room. Stale audio in the
+ring after a skip drains through the RTP gates before decrypt.
+
+Measured over 15.5 min, same session, Geneva on the fix and the X90 board
+not: Geneva 0 mid-play stalls, longest send-queue freeze 0.5 s; X90 5 stalls,
+freezes up to 5 s. Post-skip startup was the same on both (~1.5 s), so the
+ring does not slow track changes. The close line now reports
+`ring peak N/512 KB, N full passes`; a non-zero full count means the sender
+pushed past the advertised size.

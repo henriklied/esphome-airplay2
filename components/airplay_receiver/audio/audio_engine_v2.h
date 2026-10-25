@@ -93,6 +93,10 @@ typedef struct {
 
   /* Short publication gate shared by epoch changes and PCM insertion. */
   portMUX_TYPE publish_lock;
+
+  /* Bumped by audio_engine_v2_abort_push_waits(); a push wait that sees it
+   * change gives up at once. */
+  volatile uint32_t push_abort_generation;
 } audio_engine_v2_t;
 
 esp_err_t audio_engine_v2_init(audio_engine_v2_t *engine,
@@ -135,6 +139,12 @@ bool audio_engine_v2_push_pcm_wait(audio_engine_v2_t *engine, uint32_t epoch,
                                    uint32_t first_rtp, const int16_t *pcm,
                                    size_t samples, uint8_t channels,
                                    uint32_t timeout_ms);
+
+/* Make any push wait in progress return false now, without touching the epoch
+ * (the playback task keeps rendering what is already queued).  The decode
+ * worker's teardown calls this: its 100 ms grace is far shorter than
+ * timeout_ms, and a decoder still parked here would outlive it. */
+void audio_engine_v2_abort_push_waits(audio_engine_v2_t *engine);
 
 size_t audio_engine_v2_render(audio_engine_v2_t *engine,
                               int64_t output_network_ns, int16_t *out,

@@ -45,6 +45,7 @@ that adds one fails validation (`Platform not found`), which prevents two RTSP s
 | `amp_enable_pin` | `-1` | amp unmute GPIO line. `-1` = unconfigured. |
 | `amp_enable_inverted` | `false` | invert the amp-enable polarity |
 | `amp_idle_timeout` | `60` | seconds of silence before the amp-enable line de-asserts (mutes). `0` = never. |
+| `advertise_surround` | `false` | advertise 5.1 AAC (`supportedFormats.bufferStream` bit 39) in GET /info; decoded by FDK and mixed down to stereo |
 | `sample_rate` | `44100` | output sample rate |
 | `audio_channel_mode` | `"stereo"` | `stereo \| mono \| left \| right` (AuMONO modes) |
 | `dsp` | — | output biquad cascade, see below |
@@ -100,6 +101,21 @@ id(airplay).set_dsp_preamp(-3.0f);
 id(airplay).set_dsp_enabled(false);
 ```
 
+Dynamic stages (all optional, off until configured; order after `filters`):
+
+| key | fields | notes |
+|---|---|---|
+| `loudness` | `frequency` 100Hz, `max_boost` (req), `range` 30dB | shelf lift follows volume; flat at full volume. Redesigned from `loop()` via `audio_dsp_service()` |
+| `bass_enhancer` | `frequency` 90Hz, `amount` 1.0 | 2nd+3rd harmonics of the band below `frequency`, Chebyshev on the envelope-normalised band; taps pre-cascade so the high-pass cannot starve it |
+| `stereo_width` | `width` (req), `frequency` 300Hz, `centre_lock` 0 | widens the ambient axis above the corner; lock steers it orthogonal to the dominant source (PCA, scaled by eigenvalue spread); 0 is plain M/S |
+| `ambience` | `amount` (req), `decay` 400ms, `damping` 5000Hz | 4-line Hadamard FDN fed by the ambient component; buffer malloc'd once (PSRAM) |
+| `crosstalk_cancel` | `amount` (req), `delay` 60us, `low_frequency` 250Hz, `high_frequency` 5000Hz | RACE: out_l = in_l - amount * band(out_r delayed); fractional delay by linear interpolation, min 1 sample |
+| `bass_protection` | `frequency` (req) | 4th-order HP after loudness/enhancer/width/crosstalk, before the limiters |
+| `bass_limiter` | `enabled` true, `frequency` 120Hz, `threshold` -6dB, `release` 200ms | LR4 split, same look-ahead limiter on the lows, highs delayed to match; latency adds to the full-band limiter's |
+| `limiter` | `enabled` true, `threshold` -1dB, `release` 100ms | look-ahead (1.5 ms), min-hold + box ramp: no overshoot. Delay is added to the playout clock (`audio_dsp_get_latency_frames()`) |
+
+Host tests: `uv run tests/test_dsp_stages.py`.
+
 ## Board pin reference
 - **Amped-ESP32-S3:** BCLK=GPIO14, LRCLK=GPIO15, DOUT=GPIO16, amp-enable=GPIO17 (PCM5100/5122 + TPA311x).
 - **Generic ESP32 + PCM5102A:** BCLK=GPIO26, LRCLK=GPIO25, DOUT=GPIO22, no amp-enable (line out).
@@ -145,7 +161,7 @@ cd .check && esphome compile amped-s3.yaml
   stream SETUP / RECORD.
 - `crypto/` — HomeKit pairing (SRP-6a + Ed25519 + ChaCha20-Poly1305) + audio decrypt.
 - `timing/` — PTP one-sample clock servo + NTP client (`ptp_clock`, `ntp_clock`, `audio_timing`).
-- `decoder/` — ALAC/AAC decode via `espressif/esp_audio_codec` (managed component; impl headers resolve from the managed include dirs, do not create local shadow copies).
+- `decoder/` — ALAC via `espressif/esp_audio_codec` (managed component; impl headers resolve from the managed include dirs, do not create local shadow copies). AAC via Fraunhofer FDK (`aac_fdk.*`, git component pinned in `__init__.py`), configured per packet from the RTP SSRC (`aac_format.*`) and mixed down to stereo. FDK needs ~49 KB of stack: the decode task has 56 KB. Host tests: `uv run tests/test_aac_fdk.py`.
 - `audio/` — timeline/engine v2, decode worker, I2S output, and the **control surface** in `audio_control.{h,cpp}`.
 - `audio/audio_dsp.{h,cpp}` — the output biquad cascade (RBJ coefficients). Last stage in
   `playback_task`, after volume and channel mode. Coefficients are double-buffered and published

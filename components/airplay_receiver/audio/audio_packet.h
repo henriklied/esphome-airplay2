@@ -30,6 +30,9 @@ namespace airplay_receiver {
 typedef struct {
   uint32_t epoch;
   uint32_t rtp_timestamp;
+  /* Buffered AirPlay 2 names each packet's codec, rate and channel layout in
+   * the RTP SSRC (decoder/aac_format.h), and it can change mid-stream. */
+  uint32_t ssrc;
   const uint8_t *payload;
   size_t payload_len;
   /* Sampled at ingress, where the block counters are coherent: by the time the

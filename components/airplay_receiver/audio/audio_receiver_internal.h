@@ -127,6 +127,15 @@ typedef struct audio_receiver_state {
   // receiver until a lock arrives and the real anchor replaces it.
   bool engine_v2_anchor_local_fallback;
 
+  // Last anchor as received, and when. A realtime resume sends its anchor
+  // ~60 ms *before* the FLUSH that resets timing; replaying it after the flush
+  // saves waiting ~1 s for the next sync packet.
+  uint64_t last_anchor_clock_id;
+  uint64_t last_anchor_network_ns;
+  uint32_t last_anchor_rtp;
+  int64_t last_anchor_received_us;
+  int64_t realtime_stream_started_us;
+
   audio_stats_t stats;
 
   int data_socket;
@@ -141,6 +150,8 @@ typedef struct audio_receiver_state {
   uint16_t buffered_port;
   TaskHandle_t buffered_task_handle;
   uint8_t *buffered_recv_buffer;
+  uint8_t *buffered_ring_storage;
+  size_t buffered_ring_capacity;
 
   uint8_t *decrypt_buffer;
   size_t decrypt_buffer_size;

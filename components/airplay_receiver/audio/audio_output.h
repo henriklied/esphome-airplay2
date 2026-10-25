@@ -77,7 +77,10 @@ struct AudioOutputConfig {
   /// with no PCM frames produced while the stream is active (pause or
   /// sustained underflow), the amp-enable GPIO is de-asserted to mute/power
   /// down the amplifier. It is re-asserted automatically on the next frame.
-  /// 0 disables the watchdog (amp stays on for the whole session).
+  /// The same delay applies after audio_output_stop(), and the amp is first
+  /// asserted by the first audible frame rather than by start(), so a connect
+  /// handshake does not switch it. 0 disables the watchdog (amp stays on until
+  /// stop, then goes off at once).
   uint32_t amp_idle_timeout_ms = 60000;
 };
 
@@ -178,6 +181,13 @@ int64_t audio_output_get_next_playout_time_ns(int64_t now_us);
  * Number of output-underrun episodes since boot.
  */
 uint32_t audio_output_get_underruns(void);
+
+/**
+ * Output DSP cost since the last call, as permille of one core's real time:
+ * time spent in audio_dsp_process() over the duration of the audio it made.
+ * `avg` covers the whole interval, `peak` the worst single block. Resets both.
+ */
+void audio_output_take_dsp_load(uint32_t *avg_permille, uint32_t *peak_permille);
 
 /**
  * Cycle the output channel mode: STEREO -> LEFT -> RIGHT -> MONO -> STEREO.

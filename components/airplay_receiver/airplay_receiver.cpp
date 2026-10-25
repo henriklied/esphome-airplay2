@@ -5,11 +5,14 @@
 #include <cstring>
 #include <string>
 
+#include "decoder/aac_format.h"
 #include "timing/ptp_clock.h"
 
 #include "esphome/components/network/util.h"
 
 #include "esphome/core/log.h"
+
+#include "esp_heap_caps.h"
 
 namespace esphome {
 namespace airplay_receiver {
@@ -48,6 +51,17 @@ void AirPlayReceiver::setup() {
   // the coefficients are designed against the rate actually being clocked.
   audio_dsp_set_preamp_db(this->dsp_preamp_db_);
   audio_dsp_set_enabled(this->dsp_enabled_);
+  audio_dsp_set_loudness(this->loudness_frequency_hz_, this->loudness_max_boost_db_, this->loudness_range_db_);
+  audio_dsp_set_bass_enhancer(this->enhancer_frequency_hz_, this->enhancer_amount_);
+  audio_dsp_set_stereo_width(this->width_, this->width_frequency_hz_);
+  audio_dsp_set_centre_lock(this->centre_lock_);
+  audio_dsp_set_ambience(this->ambience_amount_, this->ambience_decay_ms_, this->ambience_damping_hz_);
+  audio_dsp_set_crosstalk(this->crosstalk_amount_, this->crosstalk_delay_us_, this->crosstalk_low_hz_,
+                          this->crosstalk_high_hz_);
+  audio_dsp_set_bass_protection(this->bass_protection_hz_);
+  audio_dsp_set_bass_limiter(this->bass_limiter_enabled_, this->bass_limiter_frequency_hz_,
+                             this->bass_limiter_threshold_db_, this->bass_limiter_release_ms_);
+  audio_dsp_set_limiter(this->limiter_enabled_, this->limiter_threshold_db_, this->limiter_release_ms_);
   if (!this->dsp_filters_.empty()) {
     audio_dsp_set_filters(this->dsp_filters_.data(), this->dsp_filters_.size());
     this->warn_if_dsp_clips_();
@@ -56,6 +70,11 @@ void AirPlayReceiver::setup() {
   // formatting off the core that feeds I2S, and INFO is below CONFIG -- logging
   // the cascade only from dump_config would hide it on every board that matters.
   audio_dsp_log_cascade(TAG, ESPHOME_LOG_LEVEL_INFO);
+  // The decode task needs ~56 KB of contiguous internal RAM on every stream
+  // start; anything that eats into it shows up here first.
+  ESP_LOGI(TAG, "Internal heap after DSP setup: free %u, largest block %u",
+           (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+           (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
   ESP_LOGI(TAG, "Audio output init (bclk=%d lrclk=%d dout=%d amp=%d sr=%d idle_timeout=%us)",
            this->i2s_bclk_pin_, this->i2s_lrclk_pin_, this->i2s_dout_pin_, this->amp_enable_pin_, this->sample_rate_,
            this->amp_idle_timeout_s_);
@@ -67,6 +86,13 @@ void AirPlayReceiver::setup() {
   // Start the _airplay._tcp advertisement + RTSP server and hook the audio
   // engine up to the transport events. At AFTER_CONNECTION the network stack
   // and ESPHome's mDNS are already initialized.
+  if (this->advertise_surround_) {
+    // Stereo stays at 44.1 kHz AAC as before; 7.1 is held back until a real
+    // sender shows how it encodes it (Apple's encoder uses an in-band PCE).
+    this->transport_.set_buffer_stream_formats(AIRPLAY_FORMAT_AAC_LC_44100_STEREO |
+                                               AIRPLAY_FORMAT_AAC_LC_48000_5POINT1);
+    this->transport_.set_audio_stream_formats(AIRPLAY_AUDIO_STREAM_FORMATS);
+  }
   this->transport_.setup(&this->crypto_, device_name);
   this->transport_.register_event_callback(&AirPlayReceiver::on_transport_event, this);
 
@@ -80,6 +106,9 @@ void AirPlayReceiver::setup() {
 void AirPlayReceiver::loop() {
   this->start_ptp_when_network_up_();
   this->transport_.loop();
+  // The loudness shelf follows the volume; its redesign belongs here, off the
+  // RTSP task that reports the volume and the audio task that plays it.
+  audio_dsp_service();
 
   // publish_state() must run on the main loop; the RTSP task only sets these.
   // Without this the HA entity freezes at whatever it last showed, which is
@@ -172,6 +201,106 @@ void AirPlayReceiver::set_dsp_enabled(bool enabled) {
   audio_dsp_set_enabled(enabled);
 }
 
+void AirPlayReceiver::set_dsp_loudness(float frequency_hz, float max_boost_db, float range_db) {
+  this->loudness_frequency_hz_ = frequency_hz;
+  this->loudness_max_boost_db_ = max_boost_db;
+  this->loudness_range_db_ = range_db;
+  audio_dsp_set_loudness(frequency_hz, max_boost_db, range_db);
+}
+
+void AirPlayReceiver::set_dsp_loudness_boost(float max_boost_db) {
+  this->set_dsp_loudness(this->loudness_frequency_hz_, max_boost_db, this->loudness_range_db_);
+}
+
+void AirPlayReceiver::set_dsp_bass_enhancer(float frequency_hz, float amount) {
+  this->enhancer_frequency_hz_ = frequency_hz;
+  this->enhancer_amount_ = amount;
+  audio_dsp_set_bass_enhancer(frequency_hz, amount);
+}
+
+void AirPlayReceiver::set_dsp_bass_enhancer_amount(float amount) {
+  this->set_dsp_bass_enhancer(this->enhancer_frequency_hz_, amount);
+}
+
+void AirPlayReceiver::set_dsp_stereo_width(float width, float frequency_hz) {
+  this->width_ = width;
+  this->width_frequency_hz_ = frequency_hz;
+  audio_dsp_set_stereo_width(width, frequency_hz);
+}
+
+void AirPlayReceiver::set_dsp_stereo_width_amount(float width) {
+  this->set_dsp_stereo_width(width, this->width_frequency_hz_);
+}
+
+void AirPlayReceiver::set_dsp_centre_lock(float lock) {
+  this->centre_lock_ = lock;
+  audio_dsp_set_centre_lock(lock);
+}
+
+void AirPlayReceiver::set_dsp_ambience(float amount, float decay_ms, float damping_hz) {
+  this->ambience_amount_ = amount;
+  this->ambience_decay_ms_ = decay_ms;
+  this->ambience_damping_hz_ = damping_hz;
+  audio_dsp_set_ambience(amount, decay_ms, damping_hz);
+}
+
+void AirPlayReceiver::set_dsp_ambience_amount(float amount) {
+  this->set_dsp_ambience(amount, this->ambience_decay_ms_, this->ambience_damping_hz_);
+}
+
+void AirPlayReceiver::set_dsp_ambience_decay(float decay_ms) {
+  this->set_dsp_ambience(this->ambience_amount_, decay_ms, this->ambience_damping_hz_);
+}
+
+void AirPlayReceiver::set_dsp_crosstalk(float amount, float delay_us, float low_hz, float high_hz) {
+  this->crosstalk_amount_ = amount;
+  this->crosstalk_delay_us_ = delay_us;
+  this->crosstalk_low_hz_ = low_hz;
+  this->crosstalk_high_hz_ = high_hz;
+  audio_dsp_set_crosstalk(amount, delay_us, low_hz, high_hz);
+}
+
+void AirPlayReceiver::set_dsp_crosstalk_amount(float amount) {
+  this->set_dsp_crosstalk(amount, this->crosstalk_delay_us_, this->crosstalk_low_hz_, this->crosstalk_high_hz_);
+}
+
+void AirPlayReceiver::set_dsp_crosstalk_delay(float delay_us) {
+  this->set_dsp_crosstalk(this->crosstalk_amount_, delay_us, this->crosstalk_low_hz_, this->crosstalk_high_hz_);
+}
+
+void AirPlayReceiver::set_dsp_bass_protection(float frequency_hz) {
+  this->bass_protection_hz_ = frequency_hz;
+  audio_dsp_set_bass_protection(frequency_hz);
+}
+
+void AirPlayReceiver::set_dsp_bass_limiter(bool enabled, float frequency_hz, float threshold_db, float release_ms) {
+  this->bass_limiter_enabled_ = enabled;
+  this->bass_limiter_frequency_hz_ = frequency_hz;
+  this->bass_limiter_threshold_db_ = threshold_db;
+  this->bass_limiter_release_ms_ = release_ms;
+  audio_dsp_set_bass_limiter(enabled, frequency_hz, threshold_db, release_ms);
+}
+
+void AirPlayReceiver::set_dsp_bass_limiter_threshold(float threshold_db) {
+  this->set_dsp_bass_limiter(this->bass_limiter_enabled_, this->bass_limiter_frequency_hz_, threshold_db,
+                             this->bass_limiter_release_ms_);
+}
+
+void AirPlayReceiver::set_dsp_limiter(bool enabled, float threshold_db, float release_ms) {
+  this->limiter_enabled_ = enabled;
+  this->limiter_threshold_db_ = threshold_db;
+  this->limiter_release_ms_ = release_ms;
+  audio_dsp_set_limiter(enabled, threshold_db, release_ms);
+}
+
+void AirPlayReceiver::set_dsp_limiter_enabled(bool enabled) {
+  this->set_dsp_limiter(enabled, this->limiter_threshold_db_, this->limiter_release_ms_);
+}
+
+void AirPlayReceiver::set_dsp_limiter_threshold(float threshold_db) {
+  this->set_dsp_limiter(this->limiter_enabled_, threshold_db, this->limiter_release_ms_);
+}
+
 void AirPlayReceiver::publish_dsp_filter_(int index) {
   audio_dsp_set_filter((size_t) index, this->dsp_filters_[(size_t) index]);
 }
@@ -235,6 +364,9 @@ void AirPlayReceiver::warn_if_dsp_clips_() {
     }
   }
   const float headroom_db = boost_db + this->dsp_preamp_db_;
+  if (this->limiter_enabled_) {
+    return;  // the limiter holds peaks under its ceiling; nothing clips
+  }
   if (headroom_db > 0.0f) {
     ESP_LOGW(TAG, "DSP boosts up to %+.1f dB with preamp %+.1f dB: peaks above -%.1f dBFS will clip. "
                   "Set dsp.preamp to %+.1f dB to stay clear.",

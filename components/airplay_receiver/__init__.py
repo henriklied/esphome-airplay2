@@ -38,6 +38,14 @@ _CONFIG_AMP_ENABLE = "amp_enable_pin"
 _CONFIG_SAMPLE_RATE = "sample_rate"
 _CONFIG_AMP_INVERTED = "amp_enable_inverted"
 _CONFIG_AMP_IDLE_TIMEOUT = "amp_idle_timeout"
+_CONFIG_ADVERTISE_SURROUND = "advertise_surround"
+_FDK_AAC_REPO = "https://github.com/pschatzmann/codec-fdk-aac.git"
+# C++ mangled names at _FDK_AAC_REF; a bump that changes a signature fails to link.
+_FDK_PARALLEL_SYMBOLS = (
+    "_Z22CBlock_FrequencyToTimeP28CAacDecoderStaticChannelInfoP22CAacDecoderChannelInfoPlsiS3_iji",
+    "_Z23CAacDecoder_DecodeFrameP20AAC_DECODER_INSTANCEjPlii",
+)
+_FDK_AAC_REF = "9998bb9e5fe839ddccb0aeba8ff8c5afc1c94ed1"
 _CONFIG_DSP = "dsp"
 _CONFIG_DSP_ENABLED = "enabled"
 _CONFIG_DSP_PREAMP = "preamp"
@@ -46,6 +54,26 @@ _CONFIG_FILTER_TYPE = "type"
 _CONFIG_FILTER_FREQUENCY = "frequency"
 _CONFIG_FILTER_Q = "q"
 _CONFIG_FILTER_GAIN = "gain"
+_CONFIG_DSP_LOUDNESS = "loudness"
+_CONFIG_DSP_BASS_ENHANCER = "bass_enhancer"
+_CONFIG_DSP_STEREO_WIDTH = "stereo_width"
+_CONFIG_DSP_LIMITER = "limiter"
+_CONFIG_DSP_CROSSTALK = "crosstalk_cancel"
+_CONFIG_DSP_BASS_LIMITER = "bass_limiter"
+_CONFIG_DSP_AMBIENCE = "ambience"
+_CONFIG_DSP_BASS_PROTECTION = "bass_protection"
+_CONFIG_CENTRE_LOCK = "centre_lock"
+_CONFIG_DECAY = "decay"
+_CONFIG_DAMPING = "damping"
+_CONFIG_DELAY = "delay"
+_CONFIG_LOW_FREQUENCY = "low_frequency"
+_CONFIG_HIGH_FREQUENCY = "high_frequency"
+_CONFIG_MAX_BOOST = "max_boost"
+_CONFIG_RANGE = "range"
+_CONFIG_AMOUNT = "amount"
+_CONFIG_WIDTH = "width"
+_CONFIG_THRESHOLD = "threshold"
+_CONFIG_RELEASE = "release"
 
 # Output channel mode -> audio_channel_mode_t (audio/audio_output.h): 0=STEREO
 # 1=LEFT 2=RIGHT 3=MONO. Applied after audio_output_init() so the AuMONO
@@ -108,10 +136,113 @@ _DSP_FILTER_SCHEMA = cv.All(
     _validate_dsp_filter,
 )
 
+# Volume-following bass lift: the shelf reaches max_boost once the volume is
+# `range` below full scale, and is flat at full volume.
+_DSP_LOUDNESS_SCHEMA = cv.Schema(
+    {
+        cv.Optional(_CONFIG_FILTER_FREQUENCY, default="100Hz"): cv.frequency,
+        cv.Required(_CONFIG_MAX_BOOST): cv.All(cv.decibel, cv.float_range(min=0.0, max=15.0)),
+        cv.Optional(_CONFIG_RANGE, default="30dB"): cv.All(cv.decibel, cv.float_range(min=1.0, max=60.0)),
+    }
+)
+
+# Synthesizes 2nd/3rd harmonics of the bass below `frequency` -- the speaker's
+# lower limit -- so the ear hears the fundamental the cabinet cannot play.
+_DSP_BASS_ENHANCER_SCHEMA = cv.Schema(
+    {
+        cv.Optional(_CONFIG_FILTER_FREQUENCY, default="90Hz"): cv.All(
+            cv.frequency, cv.float_range(min=30.0, max=300.0)
+        ),
+        cv.Optional(_CONFIG_AMOUNT, default=1.0): cv.float_range(min=0.0, max=3.0),
+    }
+)
+
+# Mid/side width above `frequency`; bass keeps its original width.
+_DSP_STEREO_WIDTH_SCHEMA = cv.Schema(
+    {
+        cv.Required(_CONFIG_WIDTH): cv.float_range(min=0.0, max=3.0),
+        cv.Optional(_CONFIG_FILTER_FREQUENCY, default="300Hz"): cv.frequency,
+        # 0 widens the plain side signal; 1 widens only what is orthogonal to
+        # the dominant source, so vocals keep their place and level.
+        cv.Optional(_CONFIG_CENTRE_LOCK, default=0.0): cv.float_range(min=0.0, max=1.0),
+    }
+)
+
+# Room-fill reverb fed by the ambient part of the mix above the width corner.
+_DSP_AMBIENCE_SCHEMA = cv.Schema(
+    {
+        cv.Required(_CONFIG_AMOUNT): cv.float_range(min=0.0, max=1.0),
+        cv.Optional(_CONFIG_DECAY, default="400ms"): cv.All(
+            cv.positive_time_period_milliseconds,
+            cv.Range(min=cv.TimePeriod(milliseconds=100), max=cv.TimePeriod(milliseconds=3000)),
+        ),
+        cv.Optional(_CONFIG_DAMPING, default="5000Hz"): cv.All(cv.frequency, cv.float_range(min=500.0, max=15000.0)),
+    }
+)
+
+# Recursive crosstalk cancellation (RACE). `delay` is the extra path from a
+# driver to the far ear; `amount` below 1 keeps the recursion decaying.
+_DSP_CROSSTALK_SCHEMA = cv.Schema(
+    {
+        cv.Required(_CONFIG_AMOUNT): cv.float_range(min=0.0, max=0.95),
+        cv.Optional(_CONFIG_DELAY, default="60us"): cv.All(
+            cv.positive_time_period_microseconds,
+            cv.Range(min=cv.TimePeriod(microseconds=10), max=cv.TimePeriod(microseconds=300)),
+        ),
+        cv.Optional(_CONFIG_LOW_FREQUENCY, default="250Hz"): cv.frequency,
+        cv.Optional(_CONFIG_HIGH_FREQUENCY, default="5000Hz"): cv.frequency,
+    }
+)
+
+# Limits the band below `frequency` on its own, so bass peaks stop ducking the
+# whole mix. Adds another 1.5 ms of delay, also accounted for.
+_DSP_BASS_LIMITER_SCHEMA = cv.Schema(
+    {
+        cv.Optional(_CONFIG_DSP_ENABLED, default=True): cv.boolean,
+        cv.Optional(_CONFIG_FILTER_FREQUENCY, default="120Hz"): cv.All(
+            cv.frequency, cv.float_range(min=40.0, max=400.0)
+        ),
+        cv.Optional(_CONFIG_THRESHOLD, default="-6dB"): cv.All(cv.decibel, cv.float_range(min=-30.0, max=0.0)),
+        cv.Optional(_CONFIG_RELEASE, default="200ms"): cv.All(
+            cv.positive_time_period_milliseconds,
+            cv.Range(min=cv.TimePeriod(milliseconds=20), max=cv.TimePeriod(milliseconds=2000)),
+        ),
+    }
+)
+
+# Steep high-pass after every bass-adding stage, so loudness and shelves cannot
+# push the deepest notes back into a small driver.
+_DSP_BASS_PROTECTION_SCHEMA = cv.Schema(
+    {
+        cv.Required(_CONFIG_FILTER_FREQUENCY): cv.All(cv.frequency, cv.float_range(min=20.0, max=200.0)),
+    }
+)
+
+# Look-ahead peak limiter, last in the chain. Adds 1.5 ms of output delay,
+# which the playout clock accounts for.
+_DSP_LIMITER_SCHEMA = cv.Schema(
+    {
+        cv.Optional(_CONFIG_DSP_ENABLED, default=True): cv.boolean,
+        cv.Optional(_CONFIG_THRESHOLD, default="-1dB"): cv.All(cv.decibel, cv.float_range(min=-24.0, max=0.0)),
+        cv.Optional(_CONFIG_RELEASE, default="100ms"): cv.All(
+            cv.positive_time_period_milliseconds,
+            cv.Range(min=cv.TimePeriod(milliseconds=10), max=cv.TimePeriod(milliseconds=2000)),
+        ),
+    }
+)
+
 # Output DSP. Direct AirPlay never passes through Music Assistant, so the
 # speaker correction MA would have applied has to run on the board instead.
 _DSP_SCHEMA = cv.Schema(
     {
+        cv.Optional(_CONFIG_DSP_LOUDNESS): _DSP_LOUDNESS_SCHEMA,
+        cv.Optional(_CONFIG_DSP_BASS_ENHANCER): _DSP_BASS_ENHANCER_SCHEMA,
+        cv.Optional(_CONFIG_DSP_STEREO_WIDTH): _DSP_STEREO_WIDTH_SCHEMA,
+        cv.Optional(_CONFIG_DSP_AMBIENCE): _DSP_AMBIENCE_SCHEMA,
+        cv.Optional(_CONFIG_DSP_CROSSTALK): _DSP_CROSSTALK_SCHEMA,
+        cv.Optional(_CONFIG_DSP_BASS_PROTECTION): _DSP_BASS_PROTECTION_SCHEMA,
+        cv.Optional(_CONFIG_DSP_BASS_LIMITER): _DSP_BASS_LIMITER_SCHEMA,
+        cv.Optional(_CONFIG_DSP_LIMITER): _DSP_LIMITER_SCHEMA,
         cv.Optional(_CONFIG_DSP_ENABLED, default=True): cv.boolean,
         # Negative preamp buys back the headroom a positive shelf spends. The
         # component warns at boot if the configured boost exceeds it.
@@ -168,6 +299,8 @@ CONFIG_SCHEMA = cv.All(
             # de-asserted to mute the amplifier. 0 disables the power-down
             # watchdog (amp stays on for the whole session). Default 60.
             cv.Optional(_CONFIG_AMP_IDLE_TIMEOUT, default=60): cv.int_,
+            # Offer 5.1 AAC to senders (decoded with FDK, mixed down to stereo).
+            cv.Optional(_CONFIG_ADVERTISE_SURROUND, default=False): cv.boolean,
             cv.Optional(_CONFIG_AUDIO_CHANNEL_MODE, default="stereo"): cv.enum(AUDIO_CHANNEL_MODE_ENUM, lower=True),
             cv.Optional(_CONFIG_DSP): _DSP_SCHEMA,
         }
@@ -199,8 +332,15 @@ async def _build_airplay_receiver(config):
     # mbedtls (SRP bignum + raw-signature AES-CTR) is a built-in IDF component.
     # Caret ranges over published Espressif Component Registry versions.
     add_idf_component(name="espressif/libsodium", ref="^1.0.21")
-    # ALAC/AAC decoding (audio engine) comes from the ESP-ADF codec library.
+    # ALAC decoding comes from the ESP-ADF codec library. Its AAC decoder is
+    # mono/stereo only, so AAC (including AirPlay's 5.1 / 7.1) uses Fraunhofer
+    # FDK. Pinned by commit; tests/test_aac_fdk.py builds the same one.
     add_idf_component(name="espressif/esp_audio_codec", ref="^2.5.0")
+    add_idf_component(name="codec-fdk-aac", repo=_FDK_AAC_REPO, ref=_FDK_AAC_REF)
+    # FDK's section-tagged work buffers get placed by decoder/aac_fdk.cpp, and
+    # its multichannel filterbank split across cores by aac_fdk_parallel.cpp.
+    for symbol in ("FDKcalloc_L", "FDKaalloc_L", *_FDK_PARALLEL_SYMBOLS):
+        cg.add_build_flag(f"-Wl,--wrap={symbol}")
 
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
@@ -213,6 +353,7 @@ async def _build_airplay_receiver(config):
                                 config[_CONFIG_AMP_ENABLE], config[_CONFIG_SAMPLE_RATE],
                                 config[_CONFIG_AMP_INVERTED]))
     cg.add(var.set_amp_idle_timeout(config[_CONFIG_AMP_IDLE_TIMEOUT]))
+    cg.add(var.set_advertise_surround(config[_CONFIG_ADVERTISE_SURROUND]))
     cg.add(var.set_i2s_mclk(config[_CONFIG_I2S_MCLK]))
     # cv.enum returns the string key ("stereo"/"mono"...), so map to the
     # audio_channel_mode_t integer before the C++ setter.
@@ -239,6 +380,53 @@ def _add_dsp(var, dsp_config) -> None:
                 filter_config[_CONFIG_FILTER_FREQUENCY],
                 filter_config[_CONFIG_FILTER_Q],
                 filter_config[_CONFIG_FILTER_GAIN],
+            )
+        )
+    if loudness := dsp_config.get(_CONFIG_DSP_LOUDNESS):
+        cg.add(
+            var.set_dsp_loudness(
+                loudness[_CONFIG_FILTER_FREQUENCY], loudness[_CONFIG_MAX_BOOST], loudness[_CONFIG_RANGE]
+            )
+        )
+    if enhancer := dsp_config.get(_CONFIG_DSP_BASS_ENHANCER):
+        cg.add(var.set_dsp_bass_enhancer(enhancer[_CONFIG_FILTER_FREQUENCY], enhancer[_CONFIG_AMOUNT]))
+    if width := dsp_config.get(_CONFIG_DSP_STEREO_WIDTH):
+        cg.add(var.set_dsp_stereo_width(width[_CONFIG_WIDTH], width[_CONFIG_FILTER_FREQUENCY]))
+        cg.add(var.set_dsp_centre_lock(width[_CONFIG_CENTRE_LOCK]))
+    if ambience := dsp_config.get(_CONFIG_DSP_AMBIENCE):
+        cg.add(
+            var.set_dsp_ambience(
+                ambience[_CONFIG_AMOUNT],
+                float(ambience[_CONFIG_DECAY].total_milliseconds),
+                ambience[_CONFIG_DAMPING],
+            )
+        )
+    if crosstalk := dsp_config.get(_CONFIG_DSP_CROSSTALK):
+        cg.add(
+            var.set_dsp_crosstalk(
+                crosstalk[_CONFIG_AMOUNT],
+                float(crosstalk[_CONFIG_DELAY].total_microseconds),
+                crosstalk[_CONFIG_LOW_FREQUENCY],
+                crosstalk[_CONFIG_HIGH_FREQUENCY],
+            )
+        )
+    if protection := dsp_config.get(_CONFIG_DSP_BASS_PROTECTION):
+        cg.add(var.set_dsp_bass_protection(protection[_CONFIG_FILTER_FREQUENCY]))
+    if bass_limiter := dsp_config.get(_CONFIG_DSP_BASS_LIMITER):
+        cg.add(
+            var.set_dsp_bass_limiter(
+                bass_limiter[_CONFIG_DSP_ENABLED],
+                bass_limiter[_CONFIG_FILTER_FREQUENCY],
+                bass_limiter[_CONFIG_THRESHOLD],
+                float(bass_limiter[_CONFIG_RELEASE].total_milliseconds),
+            )
+        )
+    if limiter := dsp_config.get(_CONFIG_DSP_LIMITER):
+        cg.add(
+            var.set_dsp_limiter(
+                limiter[_CONFIG_DSP_ENABLED],
+                limiter[_CONFIG_THRESHOLD],
+                float(limiter[_CONFIG_RELEASE].total_milliseconds),
             )
         )
 

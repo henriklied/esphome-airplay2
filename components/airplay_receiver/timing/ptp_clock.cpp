@@ -281,6 +281,36 @@ static uint64_t parse_ptp_timestamp_ns(const uint8_t *data) {
   return seconds * 1000000000ULL + nanos;
 }
 
+// Add the header's correctionField (IEEE 1588 §11.4.4.2.1: signed, 2^-16 ns).
+//
+// A real correction is residence time and path delay: microseconds. A Mac
+// sending its own Sync/Follow_Up puts its own uptime in preciseOriginTimestamp
+// and the offset to another clock's timescale (~16 h, measured 2026-10-06) in
+// correctionField, but stamps its SETRATEANCHORTIME with its own uptime under
+// its own clock ID. Applying that correction put every anchor hours away from
+// the board's clock and the stream never started, so corrections this large
+// are timescale translations, not corrections, and are left out.
+static constexpr int64_t MAX_CORRECTION_NS = 1000000000LL;
+
+static uint64_t apply_correction(const uint8_t *data, uint64_t origin_ns) {
+  int64_t correction_ns = 0;
+  for (int i = 8; i < 16; i++) {
+    correction_ns = (int64_t) (((uint64_t) correction_ns << 8) | data[i]);
+  }
+  correction_ns /= 65536;
+  if (correction_ns > MAX_CORRECTION_NS || correction_ns < -MAX_CORRECTION_NS) {
+    static uint64_t logged_clock_id = 0;
+    const uint64_t clock_id = parse_ptp_clock_id(data);
+    if (clock_id != logged_clock_id) {
+      logged_clock_id = clock_id;
+      ESP_LOGI(TAG, "Ignoring a %.0f s correctionField from %016llx (timescale offset, not a correction)",
+               (double) correction_ns / 1e9, (unsigned long long) clock_id);
+    }
+    return origin_ns;
+  }
+  return (uint64_t) ((int64_t) origin_ns + correction_ns);
+}
+
 // Get local time in nanoseconds (from esp_timer)
 static inline int64_t get_local_time_ns(void) {
   return (int64_t)esp_timer_get_time() * 1000LL;
@@ -403,16 +433,7 @@ static void process_sync(const uint8_t *data, size_t len, uint16_t seq) {
   if (!two_step && len >= PTP_HEADER_SIZE + PTP_TIMESTAMP_SIZE) {
     // One-step sync - timestamp is in the SYNC message
     uint64_t ptp_time_ns = parse_ptp_timestamp_ns(data + PTP_TIMESTAMP_OFFSET);
-    // Apply correctionField for one-step sync as well
-    if (len >= 16) {
-      int64_t correction_field =
-          ((int64_t)data[8] << 56) | ((int64_t)data[9] << 48) |
-          ((int64_t)data[10] << 40) | ((int64_t)data[11] << 32) |
-          ((int64_t)data[12] << 24) | ((int64_t)data[13] << 16) |
-          ((int64_t)data[14] << 8) | (int64_t)data[15];
-      correction_field /= 65536;  // convert from 2^-16 ns to ns
-      ptp_time_ns = (uint64_t)((int64_t)ptp_time_ns + correction_field);
-    }
+    ptp_time_ns = apply_correction(data, ptp_time_ns);
     int64_t offset = (int64_t)ptp_time_ns - ptp.last_sync_local_ns;
     update_offset(offset);
     ptp.awaiting_followup = false;
@@ -435,20 +456,7 @@ static void process_followup(const uint8_t *data, size_t len, uint16_t seq) {
 
   if (len >= PTP_HEADER_SIZE + PTP_TIMESTAMP_SIZE) {
     uint64_t ptp_time_ns = parse_ptp_timestamp_ns(data + PTP_TIMESTAMP_OFFSET);
-
-    // Apply correctionField (IEEE 1588 §11.4.4.2.1):
-    // The correctionField accumulates residence time and path delay
-    // corrections from PTP-aware network elements.  It is a signed
-    // 64-bit value in units of 2^-16 nanoseconds.
-    if (len >= 16) {
-      int64_t correction_field =
-          ((int64_t)data[8] << 56) | ((int64_t)data[9] << 48) |
-          ((int64_t)data[10] << 40) | ((int64_t)data[11] << 32) |
-          ((int64_t)data[12] << 24) | ((int64_t)data[13] << 16) |
-          ((int64_t)data[14] << 8) | (int64_t)data[15];
-      correction_field /= 65536;  // convert from 2^-16 ns to ns
-      ptp_time_ns = (uint64_t)((int64_t)ptp_time_ns + correction_field);
-    }
+    ptp_time_ns = apply_correction(data, ptp_time_ns);
 
     // offset = PTP_time - local_time_at_sync_receipt
     int64_t offset = (int64_t)ptp_time_ns - ptp.last_sync_local_ns;

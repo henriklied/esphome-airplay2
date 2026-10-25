@@ -21,6 +21,7 @@
 #include <inttypes.h>
 #include <string>
 
+#include "../decoder/aac_format.h"
 #include "esphome/core/log.h"
 #include "esp_err.h"
 #include "esp_mac.h"
@@ -28,6 +29,7 @@
 #include "freertos/task.h"
 
 #include "../allocator.h"
+#include "../audio/buffered_ring.h"
 #include "../timing/ntp_clock.h"
 #include "../timing/ptp_clock.h"
 #include "bplist.h"
@@ -55,7 +57,6 @@ static const char *const TAG = "airplay_transport";
 #define RTSP_EVENT_STACK_SIZE 4096
 // How long event_port_task() sleeps between non-blocking accept() attempts.
 #define EVENT_ACCEPT_POLL_MS 100
-#define RTSP_AP2_AUDIO_BUFFER_SIZE (512 * 1024)        // buffered (type 103) TCP pre-fill
 #define RTSP_AP2_REALTIME_AUDIO_BUFFER_SIZE (1 * 1024 * 1024)  // realtime (type 96) UDP
 
 // ---------------------------------------------------------------------------
@@ -91,6 +92,8 @@ static volatile bool event_task_should_stop = false;
 // the airplay_* path; never a std::string).
 #define AIRPLAY_DEVICE_NAME_MAX 80
 static char s_device_name[AIRPLAY_DEVICE_NAME_MAX] = "AirPlay2";
+static uint64_t s_buffer_stream_formats = 0;
+static uint64_t s_audio_stream_formats = 0;
 
 // ===========================================================================
 // TLV8 + small helpers
@@ -538,7 +541,8 @@ static void handle_get(int socket, RtspConn *conn, const RtspRequest *req, const
     // fine.
     uint8_t body[1024];
     size_t body_len = bplist_build_info_response(body, sizeof(body), device_id, s_device_name, pk, 32,
-                                                 features, 2);
+                                                 features, 2, s_buffer_stream_formats,
+                                                 s_audio_stream_formats);
     if (body_len == 0) {
       ESP_LOGE(TAG, "Failed to build binary /info response");
       rtsp_send_response(socket, conn, 500, "Internal Error", req->cseq, nullptr, nullptr, 0);
@@ -859,6 +863,7 @@ static void handle_setup(int socket, RtspConn *conn, const RtspRequest *req, con
   int64_t codec_type = 0;  // bplist "ct": 2=ALAC, 4=AAC, 8=AAC-ELD
   int spf = 0;             // bplist "spf": samples per frame
   int latency_min = 0;     // bplist "latencyMin": realtime playout latency samples
+  uint64_t audio_format = 0;  // bplist "audioFormat": one supportedFormats bit
 
   // AirPlay 2 stream path.
   if (body != nullptr && body_len > 0 && is_bplist && request_has_streams) {
@@ -878,11 +883,21 @@ static void handle_setup(int socket, RtspConn *conn, const RtspRequest *req, con
       size_t kv_count = 0;
       if (bplist_get_stream_kv_info(body, body_len, i, kv, 16, &kv_count)) {
         for (size_t k = 0; k < kv_count; k++) {
+          // Every key, so a sender's format choice can be read off the log.
+          if (kv[k].value_type == BPLIST_VALUE_INT) {
+            ESP_LOGI(TAG, "SETUP stream %u: %s = %lld (0x%llx)", (unsigned)i, kv[k].key,
+                     (long long)kv[k].int_value, (unsigned long long)kv[k].int_value);
+          } else {
+            ESP_LOGI(TAG, "SETUP stream %u: %s (type %d, %u bytes)", (unsigned)i, kv[k].key, kv[k].value_type,
+                     (unsigned)kv[k].value_len);
+          }
           if (kv[k].value_type == BPLIST_VALUE_INT) {
             if (strcmp(kv[k].key, "ct") == 0) {
               codec_type = (int64_t)kv[k].int_value;
             } else if (strcmp(kv[k].key, "sr") == 0) {
               conn->sample_rate = (int)kv[k].int_value;
+            } else if (strcmp(kv[k].key, "audioFormat") == 0) {
+              audio_format = (uint64_t)kv[k].int_value;
             } else if (strcmp(kv[k].key, "spf") == 0) {
               spf = (int)kv[k].int_value;
             } else if (strcmp(kv[k].key, "latencyMin") == 0) {
@@ -900,6 +915,12 @@ static void handle_setup(int socket, RtspConn *conn, const RtspRequest *req, con
   TransportAudioConfig audio{};
   audio.stream_type = conn->stream_type > 0 ? conn->stream_type : 96;
   audio.sample_rate = conn->sample_rate;
+  // audioFormat names the rate too, and 5.1 / 7.1 exist only at 48 kHz.
+  // Channels stay 2: the decoder mixes any AAC layout down to stereo.
+  aac_stream_format_t aac_format{};
+  if (aac_format_from_audio_format(audio_format, &aac_format)) {
+    audio.sample_rate = (int)aac_format.sample_rate;
+  }
   audio.channels = (conn->channels != 0) ? conn->channels : 2;
   audio.bits_per_sample = 16;
   audio.event_port = conn->event_port;
@@ -1024,7 +1045,7 @@ static void handle_setup(int socket, RtspConn *conn, const RtspRequest *req, con
   // Realtime (type 96) plays out latencyMin samples after the anchor; buffered
   // (type 103) plays at the anchor (0). 11025 = 250 ms default (upstream).
   audio.playout_latency_samples = buffered ? 0 : (latency_min > 0 ? latency_min : 11025);
-  audio.audio_buffer_size = buffered ? RTSP_AP2_AUDIO_BUFFER_SIZE : RTSP_AP2_REALTIME_AUDIO_BUFFER_SIZE;
+  audio.audio_buffer_size = buffered ? BUFFERED_AUDIO_BUFFER_BYTES : RTSP_AP2_REALTIME_AUDIO_BUFFER_SIZE;
 
   // Hand the fully-configured stream to the audio engine.
   TransportEventData data{};
@@ -1038,7 +1059,7 @@ static void handle_setup(int socket, RtspConn *conn, const RtspRequest *req, con
     uint16_t ad_port = buffered ? conn->buffered_port : conn->data_port;
     size_t plist_len = bplist_build_stream_setup(plist_body, sizeof(plist_body), stream_type, ad_port,
                                                  conn->control_port,
-                                                 buffered ? RTSP_AP2_AUDIO_BUFFER_SIZE
+                                                 buffered ? BUFFERED_AUDIO_BUFFER_BYTES
                                                           : RTSP_AP2_REALTIME_AUDIO_BUFFER_SIZE);
     if (plist_len == 0) {
       rtsp_send_response(socket, conn, 500, "Internal Error", req->cseq, nullptr, nullptr, 0);
@@ -1291,6 +1312,14 @@ static void handle_teardown(int socket, RtspConn *conn, const RtspRequest *req, 
   if (has_streams) {
     conn->stream_paused = true;
     transport_events_emit(TRANSPORT_EVENT_PAUSED, nullptr);
+    // The next buffered SETUP gets a new port, as in shairport-sync. Reusing
+    // it kept the torn-down stream's TCP connection being read: the Apple TV
+    // does SETUP -> TEARDOWN -> SETUP within a second, and its new anchor was
+    // applied to the old stream's packets, a random RTP base away. A new port
+    // makes audio_receiver_start_buffered() restart the listener, which
+    // closes the old connection.
+    socket_utils_release_reservation(conn->buffered_port);
+    conn->buffered_port = 0;
   }
   conn->stream_active = false;
   rtsp_send_ok(socket, conn, req->cseq);
@@ -1401,6 +1430,18 @@ static void handle_setpeers(int socket, RtspConn *conn, const RtspRequest *req, 
   rtsp_send_ok(socket, conn, req->cseq);
 }
 
+// Apple TV sends this right after SETUP for video content. Its body is not
+// needed (no loudness processing here). With a 501 reply the Apple TV
+// stopped sending audio ~2 s into playback (suspected cause, 2026-10-06).
+static void handle_loudness_normalization(int socket, RtspConn *conn, const RtspRequest *req, const uint8_t *raw,
+                                          size_t raw_len) {
+  (void) raw;
+  (void) raw_len;
+  ESP_LOGI(TAG, "LOUDNESSNORMALIZATION: content_type='%s' body_len=%u", req->content_type,
+           (unsigned) req->body_len);
+  rtsp_send_ok(socket, conn, req->cseq);
+}
+
 // ===========================================================================
 // Dispatch table
 // ===========================================================================
@@ -1428,6 +1469,7 @@ static const RtspMethodHandler method_handlers[] = {
     {"SETRATEANCHORTIME", handle_setrateanchortime},
     {"SETPEERS", handle_setpeers},
     {"SETPEERSX", handle_setpeers},
+    {"LOUDNESSNORMALIZATION", handle_loudness_normalization},
     {nullptr, nullptr},
 };
 
@@ -1593,6 +1635,9 @@ static void server_task(void *pv) {
 
 AirPlay2Transport::AirPlay2Transport() = default;
 AirPlay2Transport::~AirPlay2Transport() { this->stop(); }
+
+void AirPlay2Transport::set_buffer_stream_formats(uint64_t formats) { s_buffer_stream_formats = formats; }
+void AirPlay2Transport::set_audio_stream_formats(uint64_t formats) { s_audio_stream_formats = formats; }
 
 void AirPlay2Transport::setup(CryptoModule *crypto, const std::string &device_name) {
   if (this->started_) {

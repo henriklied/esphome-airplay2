@@ -33,6 +33,7 @@
 
 #include "esphome/core/log.h"
 
+#include "esp_heap_caps.h"
 #include "esp_timer.h"
 
 #include "../allocator.h"
@@ -162,7 +163,11 @@ static esp_err_t audio_receiver_ensure_engine_v2(audio_stream_type_t type) {
     esp_err_t err =
         audio_decode_worker_create(&receiver, &receiver.decode_worker);
     if (err != ESP_OK) {
-      ESP_LOGE(TAG, "Decode worker create failed: %s", esp_err_to_name(err));
+      // The decode task's stack is the largest internal-RAM allocation the
+      // component makes; say how close the heap was.
+      ESP_LOGE(TAG, "Decode worker create failed: %s (internal free %u, largest block %u)", esp_err_to_name(err),
+               (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+               (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
       return err;
     }
   }
@@ -450,6 +455,11 @@ void audio_receiver_set_anchor_time(uint64_t clock_id, uint64_t network_time_ns,
     return;
   }
 
+  receiver.last_anchor_clock_id = clock_id;
+  receiver.last_anchor_network_ns = network_time_ns;
+  receiver.last_anchor_rtp = rtp_time;
+  receiver.last_anchor_received_us = esp_timer_get_time();
+
   int sample_rate = receiver.stream->format.sample_rate;
   if (sample_rate <= 0) {
     sample_rate = 44100;
@@ -711,8 +721,22 @@ esp_err_t audio_receiver_start(uint16_t data_port, uint16_t control_port) {
 
   receiver.timing.ptp_locked = ptp_clock_is_locked();
   audio_receiver_reset_blocks();
+  receiver.realtime_stream_started_us = esp_timer_get_time();
 
   return receiver.stream->ops->start(receiver.stream, data_port);
+}
+
+// Starting a stream resets all timing state (including pause tracking) and
+// the RTP gates a previous seek or anchor change left armed.
+static void audio_receiver_reset_for_new_stream(void) {
+  audio_receiver_reset_stats();
+  audio_receiver_flush();
+  // audio_timing defaults to playing; mirror that onto the engine, which
+  // starts paused, so a sender that never sends an explicit rate=1 still
+  // produces audio.
+  audio_engine_v2_set_playing(&receiver.engine_v2, receiver.timing.playing);
+  receiver.timing.ptp_locked = ptp_clock_is_locked();
+  audio_receiver_reset_blocks();
 }
 
 esp_err_t audio_receiver_start_buffered(uint16_t tcp_port) {
@@ -743,6 +767,16 @@ esp_err_t audio_receiver_start_buffered(uint16_t tcp_port) {
   // restart.  The realtime path has always restarted unconditionally.
   if (receiver.stream->running) {
     if (receiver.buffered_port == tcp_port) {
+      // With no live connection this SETUP is a new stream (a track change
+      // tears the old one down), and its audio arrives on a new connection
+      // that cannot carry stale data.  The sender pushes the track's opening
+      // *before* the anchor that says to play it now, so a seek flush's
+      // discard-until-anchor gate, or the old track's anchor tripping Path B
+      // in audio_receiver_set_anchor_time(), dropped the first ~1 s of every
+      // track after a change.
+      if (receiver.buffered_client_socket < 0) {
+        audio_receiver_reset_for_new_stream();
+      }
       return ESP_OK;
     }
     ESP_LOGI(TAG, "Buffered port %u -> %u: restarting the listener",
@@ -752,19 +786,7 @@ esp_err_t audio_receiver_start_buffered(uint16_t tcp_port) {
     }
   }
 
-  // Starting a stream resets all timing state (including pause tracking)
-  audio_receiver_reset_stats();
-  audio_receiver_reset_engine_v2();
-  audio_timing_reset(&receiver.timing);
-  // audio_timing defaults to playing; mirror that onto the engine, which
-  // starts paused, so a sender that never sends an explicit rate=1 still
-  // produces audio.
-  audio_engine_v2_set_playing(&receiver.engine_v2, receiver.timing.playing);
-  audio_receiver_reset_resend_state();
-
-  receiver.timing.ptp_locked = ptp_clock_is_locked();
-  audio_receiver_reset_blocks();
-
+  audio_receiver_reset_for_new_stream();
   return receiver.stream->ops->start(receiver.stream, tcp_port);
 }
 
@@ -913,7 +935,28 @@ void audio_receiver_flush(void) {
   receiver.blocks_read_in_sequence = 1;
 }
 
+// A FLUSH this soon after the anchor is part of the same resume handshake.
+static constexpr int64_t RESUME_ANCHOR_REUSE_WINDOW_US = 500000;
+
 void audio_receiver_seek_flush(void) {
+  // A realtime resume runs start_stream -> sync packet (anchor) -> FLUSH, all
+  // within ~70 ms. The anchor already describes the resumed stream, so dropping
+  // it makes playback wait ~1 s for the next sync packet. Only an anchor
+  // received since this stream started qualifies: one from before a mid-stream
+  // seek maps the old position.
+  const int64_t now_us = esp_timer_get_time();
+  const bool reuse_anchor =
+      receiver.stream != nullptr &&
+      receiver.stream->type == AUDIO_STREAM_REALTIME &&
+      receiver.realtime_stream_started_us > 0 &&
+      receiver.last_anchor_received_us >= receiver.realtime_stream_started_us &&
+      now_us - receiver.last_anchor_received_us <= RESUME_ANCHOR_REUSE_WINDOW_US;
+  const uint64_t anchor_clock_id = receiver.last_anchor_clock_id;
+  const uint64_t anchor_network_ns = receiver.last_anchor_network_ns;
+  const uint32_t anchor_rtp = receiver.last_anchor_rtp;
+  // One use per stream start, so a later seek never replays it.
+  receiver.realtime_stream_started_us = 0;
+
   // Mid-stream seek flush (FLUSH / immediate FLUSHBUFFERED).  Same as
   // audio_receiver_flush(); the timeline re-prerolls from the new anchor by
   // itself.  Also disarms any pending deferred flush (audio_timing_reset
@@ -928,6 +971,13 @@ void audio_receiver_seek_flush(void) {
   // from filling the buffer between FLUSHBUFFERED and SETRATEANCHORTIME, which
   // would cause a second flush and double the startup delay.
   receiver.discard_all_until_anchor = true;
+
+  if (reuse_anchor) {
+    ESP_LOGI(TAG, "seek flush: reusing resume anchor rtp=%lu",
+             (unsigned long)anchor_rtp);
+    audio_receiver_set_anchor_time(anchor_clock_id, anchor_network_ns,
+                                   anchor_rtp);
+  }
 }
 
 void audio_receiver_set_deferred_flush(uint32_t flush_until_ts) {
