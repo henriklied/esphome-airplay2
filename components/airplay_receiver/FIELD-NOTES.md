@@ -180,6 +180,13 @@ permitted**, found by reading it after a reboot fixed what a rebuild had not. It
 is not confirmed as what actually happened. The counters were added to settle
 that and had not yet caught an occurrence at the time of writing.
 
+A third way to stay unlocked, with packets arriving (2026-11-20): the sender's
+timescale moves by more than the 50 ms outlier threshold under the same clock
+id, so every sample is rejected against the stale filter and `samples=` climbs
+with no `LOCKED:`. Geneva sat there through whole sessions on 2026-11-01 and
+-02, still playing on a frozen clock map with the drift servo idle. The filter
+now reseeds after 16 consecutive outliers (~2 s) and logs `Reseeding:`.
+
 ### 5. The buffered listener stayed bound to the previous sender's port
 
 Reproduce by playing to the board from one device and then selecting it from a

@@ -76,6 +76,14 @@ static const char *const TAG = "airplay_ptp";
 #define LOCK_STABLE_TIME_MS  250 // 250ms of stable readings to declare lock
 #define LOCK_TIMEOUT_MS      5000
 #define OUTLIER_THRESHOLD_NS 50000000LL // 50ms - reject samples beyond this
+// Consecutive outliers before the filter reseeds: ~2 s at the 8 Hz SYNC rate.
+// The sender's timescale can move while its clock ID stays the same (an
+// iPhone back from sleep), so ptp_clock_set_master_clock_id() never resets,
+// and every new sample lands as an outlier against the stale estimate: no
+// lock, ever, while sample_count keeps climbing.  Seen on Geneva 2026-11-01
+// 14:21-14:37 and 2026-11-02 07:25-08:00: unlocked through whole sessions,
+// playing on a frozen clock map with the drift servo idle.
+#define OUTLIER_RESEED_COUNT 16
 // Asymmetric filter parameters (modeled after nqptp):
 // Network delays only ADD positive bias to the measured offset, so
 //   offset_measured = true_offset - one_way_delay
@@ -191,6 +199,7 @@ struct PtpState {
   uint32_t announce_count = 0;
   uint32_t rejected_master_count = 0;  // SYNC/FOLLOW_UP from a non-matching master
   uint32_t outlier_count = 0;          // samples rejected by 50ms threshold
+  uint32_t outlier_run = 0;            // consecutive outliers, for reseeding
 
   // Master clock filter (0 = accept any master)
   uint64_t expected_clock_id = 0;
@@ -349,8 +358,25 @@ static void update_offset(int64_t new_offset_ns) {
     }
     if (diff > OUTLIER_THRESHOLD_NS) {
       ptp.outlier_count++;
+      if (++ptp.outlier_run < OUTLIER_RESEED_COUNT) {
+        return;
+      }
+      ESP_LOGW(TAG, "Reseeding: %lu consecutive outliers, offset moved %+lld ms",
+               (unsigned long)ptp.outlier_run,
+               (long long)((new_offset_ns - ptp.filtered_offset_ns) / 1000000LL));
+      ptp.locked = false;
+      ptp.lock_start_ms = 0;
+      ptp.lock_candidate_start_ms = 0;
+      ptp.sample_count = 1;
+      ptp.outlier_run = 0;
+      ptp.previous_offset = new_offset_ns;
+      ptp.previous_offset_time_ms = now_ms;
+      ptp.filtered_offset_ns = new_offset_ns;
+      ptp.mastership_start_ms = now_ms;
+      ptp_publish_offset(new_offset_ns);
       return;
     }
+    ptp.outlier_run = 0;
 
     int64_t jitter = new_offset_ns - ptp.previous_offset;
     uint32_t mastership_time_ms = now_ms - ptp.mastership_start_ms;
@@ -862,6 +888,7 @@ void ptp_clock_clear(void) {
   ptp.sample_count = 0;
   ptp.previous_offset = 0;
   ptp.previous_offset_time_ms = 0;
+  ptp.outlier_run = 0;
   ptp.mastership_start_ms = 0;
 
   ptp.last_sync_seq = 0;
@@ -891,6 +918,7 @@ void ptp_clock_notify_resume(uint32_t pause_duration_ms) {
   // We also reset mastership_start_ms so the STARTUP_DURATION_MS aggressive-
   // positive window kicks in again for a faster upward catch-up.
   ptp.previous_offset_time_ms = 0;
+  ptp.outlier_run = 0;
   ptp.mastership_start_ms = 0;
   ESP_LOGI(TAG,
            "notify_resume: pause=%lu ms, resetting PTP smoothing "
@@ -941,6 +969,7 @@ void ptp_clock_set_master_clock_id(uint64_t clock_id) {
   ptp.sample_count = 0;
   ptp.previous_offset = 0;
   ptp.previous_offset_time_ms = 0;
+  ptp.outlier_run = 0;
   ptp.awaiting_followup = false;
 }
 
