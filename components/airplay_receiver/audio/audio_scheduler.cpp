@@ -176,9 +176,7 @@ void audio_scheduler_begin_epoch(audio_scheduler_t *scheduler, uint32_t epoch,
   scheduler->playout_error_samples = 0;
   scheduler->filtered_playout_error_q16 = 0;
   scheduler->max_abs_playout_error_samples = 0;
-  scheduler->estimated_drift_ppm = 0;
-  scheduler->drift_reference_error_q16 = 0;
-  scheduler->drift_reference_network_ns = 0;
+  scheduler->drift_estimate = {};
   scheduler->rendered_samples = 0;
   scheduler->error_filter_valid = false;
   scheduler->drift_servo_accum = 0;
@@ -277,8 +275,8 @@ size_t audio_scheduler_render(audio_scheduler_t *scheduler,
     if (!scheduler->error_filter_valid) {
       scheduler->filtered_playout_error_q16 = raw_q16;
       scheduler->error_filter_valid = true;
-      scheduler->drift_reference_error_q16 = raw_q16;
-      scheduler->drift_reference_network_ns = midpoint_network_ns;
+      drift_estimate_anchor(&scheduler->drift_estimate, raw_q16,
+                            midpoint_network_ns);
     } else {
       /* alpha = 1/8: removes callback phase jitter while still following
        * real clock drift within a few hundred milliseconds. */
@@ -295,29 +293,9 @@ size_t audio_scheduler_render(audio_scheduler_t *scheduler,
       scheduler->max_abs_playout_error_samples = abs_error;
     }
 
-    if (scheduler->drift_reference_network_ns != 0 &&
-        midpoint_network_ns - scheduler->drift_reference_network_ns >=
-            1000000000LL) {
-      int64_t elapsed_ns =
-          midpoint_network_ns - scheduler->drift_reference_network_ns;
-      int64_t delta_q16 = scheduler->filtered_playout_error_q16 -
-                          scheduler->drift_reference_error_q16;
-      int64_t elapsed_samples =
-          (elapsed_ns * (int64_t)clock_map->sample_rate) / 1000000000LL;
-      if (elapsed_samples > 0) {
-        /* Divide in q16: truncating delta to whole samples first would
-         * quantise the result to one sample per window, 22 ppm at 44.1 kHz. */
-        int64_t ppm = (delta_q16 * 1000000LL) / (elapsed_samples * 65536LL);
-        if (ppm > 20000)
-          ppm = 20000;
-        if (ppm < -20000)
-          ppm = -20000;
-        scheduler->estimated_drift_ppm = (int32_t)ppm;
-      }
-      scheduler->drift_reference_error_q16 =
-          scheduler->filtered_playout_error_q16;
-      scheduler->drift_reference_network_ns = midpoint_network_ns;
-    }
+    drift_estimate_update(&scheduler->drift_estimate,
+                          scheduler->filtered_playout_error_q16,
+                          midpoint_network_ns, clock_map->sample_rate);
 
     if (scheduler->drift_servo_warmup < DRIFT_SERVO_WARMUP_RENDERS) {
       scheduler->drift_servo_warmup++;
@@ -383,8 +361,7 @@ size_t audio_scheduler_render(audio_scheduler_t *scheduler,
       scheduler->raw_playout_error_samples = 0;
       scheduler->playout_error_samples = 0;
       scheduler->filtered_playout_error_q16 = 0;
-      scheduler->drift_reference_error_q16 = 0;
-      scheduler->drift_reference_network_ns = 0;
+      scheduler->drift_estimate.reference_network_ns = 0;
       scheduler->drift_servo_accum = 0;
       scheduler->drift_servo_phase = 0;
       scheduler->drift_servo_warmup = 0;
@@ -427,8 +404,7 @@ size_t audio_scheduler_render(audio_scheduler_t *scheduler,
         scheduler->raw_playout_error_samples = 0;
         scheduler->playout_error_samples = 0;
         scheduler->filtered_playout_error_q16 = 0;
-        scheduler->drift_reference_error_q16 = 0;
-        scheduler->drift_reference_network_ns = 0;
+        scheduler->drift_estimate.reference_network_ns = 0;
         scheduler->drift_servo_accum = 0;
         scheduler->drift_servo_phase = 0;
         scheduler->drift_servo_warmup = 0;
@@ -458,8 +434,7 @@ size_t audio_scheduler_render(audio_scheduler_t *scheduler,
     scheduler->raw_playout_error_samples = 0;
     scheduler->playout_error_samples = 0;
     scheduler->filtered_playout_error_q16 = 0;
-    scheduler->drift_reference_error_q16 = 0;
-    scheduler->drift_reference_network_ns = 0;
+    scheduler->drift_estimate.reference_network_ns = 0;
     scheduler->drift_servo_accum = 0;
     scheduler->drift_servo_phase = 0;
     scheduler->drift_servo_warmup = 0;

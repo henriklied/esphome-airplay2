@@ -26,6 +26,7 @@
 
 #include "audio_clock_map.h"
 #include "audio_timeline.h"
+#include "drift_estimate.h"
 
 namespace esphome {
 namespace airplay_receiver {
@@ -68,9 +69,7 @@ typedef struct {
   int32_t playout_error_samples;
   int64_t filtered_playout_error_q16;
   int32_t max_abs_playout_error_samples;
-  int32_t estimated_drift_ppm;
-  int64_t drift_reference_error_q16;
-  int64_t drift_reference_network_ns;
+  DriftEstimate drift_estimate;
   uint64_t rendered_samples;
   bool error_filter_valid;
   /* Drift servo: closes the loop between the output crystal and the sender's

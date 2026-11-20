@@ -236,6 +236,8 @@ rxpath:  stack=N task=N gap=N away=N qrun=N
 - `buffered` -- healthy is ~250 blocks. Dips during loss bursts.
 - `drift` / `filt` -- clock health. Healthy is +-40ppm and +-0.05ms. Wild values
   (hundreds of ppm, milliseconds) mean the problem is timing, not loss.
+  `drift` is telemetry only (the servo does not read it) and keeps its last
+  value across a PTP timescale step (`audio/drift_estimate.h`).
 - `under` -- I2S underruns. Non-zero means CPU starvation of the playback task,
   a different problem entirely.
 - `ins` -- steady ~125/s resampler insertion. Flat regardless of artefacts; not

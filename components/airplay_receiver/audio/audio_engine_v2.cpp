@@ -197,9 +197,7 @@ void audio_engine_v2_wait_for_anchor(audio_engine_v2_t *engine,
   engine->scheduler.playout_error_samples = 0;
   engine->scheduler.filtered_playout_error_q16 = 0;
   engine->scheduler.max_abs_playout_error_samples = 0;
-  engine->scheduler.estimated_drift_ppm = 0;
-  engine->scheduler.drift_reference_error_q16 = 0;
-  engine->scheduler.drift_reference_network_ns = 0;
+  engine->scheduler.drift_estimate = {};
   engine->scheduler.error_filter_valid = false;
   engine->scheduler.drift_servo_accum = 0;
   engine->scheduler.drift_servo_phase = 0;
@@ -564,7 +562,7 @@ size_t audio_engine_v2_render(audio_engine_v2_t *engine,
              raw_us < 0 ? "-" : "", raw_abs_us / 1000U, raw_abs_us % 1000U,
              span_us, filtered_us < 0 ? "-" : "", filtered_abs_us / 1000U,
              filtered_abs_us % 1000U, filtered_samples,
-             engine->scheduler.estimated_drift_ppm, new_trims,
+             engine->scheduler.drift_estimate.ppm, new_trims,
              engine->scheduler.drift_servo_trims,
              (unsigned)audio_timeline_count(&engine->timeline),
              engine->concealed_samples, engine->conceal_events, new_conceals,
