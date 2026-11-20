@@ -25,6 +25,7 @@
 #include "audio_stream.h"
 
 #include "audio_receiver_internal.h"
+#include "audio_udp_diagnostics.h"
 #include "../allocator.h"
 
 #include "esphome/core/defines.h"
@@ -179,27 +180,15 @@ static void resend_log_stats(audio_receiver_state_t *state) {
   state->resend_late_stale_count = 0;
 }
 
-// Separates loss on air from loss inside the board, which `holes` cannot: both
-// surface only as an RTP sequence gap.
+// Reports the audio mailbox's actual posts alongside global UDP activity.
+// lwIP bumps udp.recv before PCB lookup and before the receive mailbox. So:
 //
-// lwIP bumps udp.recv at the top of udp_input(), before the pcb lookup and
-// before recv_udp() posts the packet to the socket's receive mbox. That mbox is
-// CONFIG_LWIP_UDP_RECVMBOX_SIZE deep (32 packets, ~250ms at 125 pkt/s) and
-// overflow is discarded by sys_mbox_trypost with no counter of any kind. So:
+//   stack -- every UDP datagram that reached lwIP
+//   task  -- what this receiver read off the data socket
+//   gap   -- stack - task, including non-audio traffic and queued backlog
 //
-//   stack -- every UDP datagram that reached lwIP, i.e. survived the air
-//   task  -- what this receiver actually read off the data socket
-//   gap   -- stack - task, dominated by recvmbox overflow
-//
-// gap ~= 0 while holes > 0 means the packets never arrived: on-air loss, and
-// only the radio side can fix it. gap tracking holes means the board is
-// dropping packets it already received, which is a config fix.
-//
-// stack counts all UDP, not just audio: PTP on 319/320, mDNS, and the control
-// socket. Those are low-rate next to 125 pkt/s but not zero -- read the idle
-// floor off a capture with no stream running and subtract it.
-//
-// gap says packets died in the mbox, not why. Two more fields answer that:
+// gap includes non-audio traffic and backlog, so it cannot count drops.
+// udp_drop records actual failed mailbox posts. Two more fields give context:
 //
 //   away -- longest time (ms) between one recvfrom() returning and the next
 //           call: inline decrypt/decode plus any preemption during it. The
@@ -210,8 +199,7 @@ static void resend_log_stats(audio_receiver_state_t *state) {
 //           off while blocked in recvfrom() (audio_play outranks it on this
 //           core). qrun near 32 with small away means preemption.
 //
-// gap above the floor with neither high means the drop is not this task's.
-#if LWIP_STATS
+// Small away/qrun cannot exclude a brief burst overflowing the mailbox.
 #define RXPATH_QUEUED_US 100  // recvfrom() on a non-empty mbox returns well inside this
 
 static void rxpath_track_recv(audio_receiver_state_t *state, int64_t call_us,
@@ -240,25 +228,40 @@ static void rxpath_log_stats(audio_receiver_state_t *state) {
     return;
   }
 
+#if LWIP_STATS
   uint32_t udp_recv = (uint32_t) lwip_stats.udp.recv;
+#endif
   uint32_t received = state->stats.packets_received;
+  const audio_udp_counters_t udp = audio_udp_diagnostics_counters();
 
   // First call since the stream started: seed the baselines, or the first
   // sample reports everything counted since boot.
   if (state->rxpath_log_us == 0) {
     state->rxpath_log_us = now;
+#if LWIP_STATS
     state->rxpath_prev_udp_recv = udp_recv;
+#endif
     state->rxpath_prev_packets_received = received;
+    state->rxpath_prev_udp_queued = udp.queued;
+    state->rxpath_prev_udp_dropped = udp.dropped;
     state->rxpath_max_away_us = 0;
     state->rxpath_max_queued_run = 0;
     return;
   }
 
   state->rxpath_log_us = now;
-  uint32_t stack_delta = udp_recv - state->rxpath_prev_udp_recv;
-  uint32_t task_delta = received - state->rxpath_prev_packets_received;
+#if LWIP_STATS
+  // lwIP's stats type can be 16-bit, so narrow before widening a wrap delta.
+  uint32_t stack_delta = static_cast<decltype(lwip_stats.udp.recv)>(
+      udp_recv - state->rxpath_prev_udp_recv);
   state->rxpath_prev_udp_recv = udp_recv;
+#endif
+  uint32_t task_delta = received - state->rxpath_prev_packets_received;
+  const uint32_t queued_delta = udp.queued - state->rxpath_prev_udp_queued;
+  const uint32_t dropped_delta = udp.dropped - state->rxpath_prev_udp_dropped;
   state->rxpath_prev_packets_received = received;
+  state->rxpath_prev_udp_queued = udp.queued;
+  state->rxpath_prev_udp_dropped = udp.dropped;
 
   // Beacon RSSI, to see whether the signal dips during a stall; 0 = unknown.
   int rssi = 0;
@@ -268,24 +271,27 @@ static void rxpath_log_stats(audio_receiver_state_t *state) {
   }
 #endif
   ESP_LOGI(TAG,
-           "rxpath: stack=%" PRIu32 " task=%" PRIu32 " gap=%" PRId32
+           "rxpath: "
+#if LWIP_STATS
+           "stack=%" PRIu32 " task=%" PRIu32 " gap=%" PRId32 " "
+#else
+           "task=%" PRIu32 " "
+#endif
+           "udp_watch=%d udp_ok=%" PRIu32 " udp_drop=%" PRIu32
+           " udp_drop_total=%" PRIu32
            " away=%" PRIu32 " qrun=%" PRIu32 " rssi=%d",
+#if LWIP_STATS
            stack_delta, task_delta, (int32_t) (stack_delta - task_delta),
+#else
+           task_delta,
+#endif
+           state->rxpath_udp_watch ? 1 : 0, queued_delta, dropped_delta,
+           udp.dropped,
            (uint32_t) (state->rxpath_max_away_us / 1000),
            state->rxpath_max_queued_run, rssi);
   state->rxpath_max_away_us = 0;
   state->rxpath_max_queued_run = 0;
 }
-#else
-static void rxpath_track_recv(audio_receiver_state_t *state, int64_t call_us,
-                              int64_t return_us, bool got_packet) {
-  (void) state;
-  (void) call_us;
-  (void) return_us;
-  (void) got_packet;
-}
-static void rxpath_log_stats(audio_receiver_state_t *state) { (void) state; }
-#endif
 
 static void resend_slide_window(audio_receiver_state_t *state) {
   while (state->resend_missing_mask != 0 &&
@@ -792,12 +798,17 @@ static esp_err_t realtime_start(audio_stream_t *stream, uint16_t port) {
   struct timeval tv = {.tv_sec = 0, .tv_usec = 100000};
   setsockopt(state->data_socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
   state->data_port = bound_port;
+  state->rxpath_udp_watch = audio_udp_diagnostics_start(state->data_socket);
+  if (!state->rxpath_udp_watch) {
+    ESP_LOGW(TAG, "Audio UDP queue counters unavailable");
+  }
 
   if (state->control_port > 0) {
     uint16_t ctrl_bound = state->control_port;
     state->control_socket =
         socket_utils_bind_udp(state->control_port, 1, 0, &ctrl_bound);
     if (state->control_socket < 0) {
+      audio_udp_diagnostics_stop();
       close(state->data_socket);
       state->data_socket = 0;
       return ESP_FAIL;
@@ -822,6 +833,7 @@ static esp_err_t realtime_start(audio_stream_t *stream, uint16_t port) {
       close(state->control_socket);
       state->control_socket = 0;
     }
+    audio_udp_diagnostics_stop();
     close(state->data_socket);
     state->data_socket = 0;
     stream->running = false;
@@ -838,6 +850,7 @@ static esp_err_t realtime_start(audio_stream_t *stream, uint16_t port) {
       close(state->control_socket);
       state->control_socket = 0;
       stream->running = false;
+      audio_udp_diagnostics_stop();
       close(state->data_socket);
       state->data_socket = 0;
       realtime_wait_for_tasks_stopped(state, 20);
@@ -857,6 +870,7 @@ static void realtime_stop(audio_stream_t *stream) {
   stream->running = false;
 
   if (state->data_socket > 0) {
+    audio_udp_diagnostics_stop();
     close(state->data_socket);
     state->data_socket = 0;
   }

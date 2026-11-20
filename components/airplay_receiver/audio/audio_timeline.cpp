@@ -193,6 +193,7 @@ esp_err_t audio_timeline_init(audio_timeline_t *t, uint16_t capacity,
   }
 
   t->capacity = capacity;
+  t->gap_fader.reset();
   portMUX_TYPE lock = portMUX_INITIALIZER_UNLOCKED;
   t->lock = lock;
   return ESP_OK;
@@ -225,6 +226,7 @@ void audio_timeline_clear_slots(audio_timeline_t *t) {
   t->count = 0U;
   t->base_valid = false;
   t->playback_floor_valid = false;
+  t->clear_generation++;
 
   portEXIT_CRITICAL(&t->lock);
 }
@@ -653,6 +655,16 @@ size_t audio_timeline_read(audio_timeline_t *t, uint32_t epoch, uint32_t start,
   uint32_t cursor = start;
   bool released_slot = false;
 
+  portENTER_CRITICAL(&t->lock);
+  const uint32_t generation = t->clear_generation;
+  portEXIT_CRITICAL(&t->lock);
+  if (!t->read_position_valid || t->read_epoch != epoch ||
+      t->read_next_rtp != start || t->read_generation != generation) {
+    t->gap_fader.reset();
+  }
+  t->read_generation = generation;
+  t->read_epoch = epoch;
+
   while (produced < requested) {
     uint16_t index = UINT16_MAX;
     uint32_t block_start = 0U;
@@ -681,7 +693,7 @@ size_t audio_timeline_read(audio_timeline_t *t, uint32_t epoch, uint32_t start,
                               requested - produced);
       portEXIT_CRITICAL(&t->lock);
 
-      memset(&out[produced * channels], 0, n * channels * sizeof(int16_t));
+      t->gap_fader.conceal(&out[produced * channels], n, channels);
       produced += n;
       cursor += (uint32_t)n;
       if (concealed) {
@@ -727,6 +739,7 @@ size_t audio_timeline_read(audio_timeline_t *t, uint32_t epoch, uint32_t start,
     if (!still_valid) {
       /* A flush landed mid-copy: the samples belong to a discarded stream. */
       memset(&out[produced * channels], 0, n * channels * sizeof(int16_t));
+      t->gap_fader.reset();
       produced += n;
       if (concealed) {
         *concealed += n;
@@ -734,6 +747,7 @@ size_t audio_timeline_read(audio_timeline_t *t, uint32_t epoch, uint32_t start,
       break;
     }
 
+    t->gap_fader.recover(&out[produced * channels], n, channels);
     produced += n;
     cursor += (uint32_t)n;
   }
@@ -741,6 +755,8 @@ size_t audio_timeline_read(audio_timeline_t *t, uint32_t epoch, uint32_t start,
   if (released_slot && t->space_available) {
     xSemaphoreGive(t->space_available);
   }
+  t->read_next_rtp = start + static_cast<uint32_t>(produced);
+  t->read_position_valid = produced > 0U;
   return produced;
 }
 

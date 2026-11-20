@@ -181,12 +181,13 @@ typedef struct audio_receiver_state {
   uint32_t resend_late_recovered_count;
   uint32_t resend_late_stale_count;
   int64_t resend_stats_log_us;
-  // RX-path accounting, also once a second. lwIP counts udp.recv before the
-  // socket's receive mbox, so the delta against packets_received is what was
-  // dropped between the stack and this task -- loss the sequence-gap counters
-  // cannot separate from loss on air. See rxpath_log_stats().
+  // RX-path accounting, also once a second. Global UDP includes non-audio
+  // traffic and backlog. The socket mailbox counters measure actual posts.
   uint32_t rxpath_prev_udp_recv;
   uint32_t rxpath_prev_packets_received;
+  uint32_t rxpath_prev_udp_queued;
+  uint32_t rxpath_prev_udp_dropped;
+  bool rxpath_udp_watch;
   int64_t rxpath_log_us;
   // Why the mbox overflowed, if it did: the longest time this task spent away
   // from recvfrom(), and the longest run of reads that found a packet already

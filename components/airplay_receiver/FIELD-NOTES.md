@@ -228,7 +228,8 @@ playout: raw=.. span=.. filt=.. drift=..ppm trims=../s (N) buffered=N
          concealed=N holes=N (+N) under=N dfail=N qdrop=N edrop=N ins=N
          dsp=N.N% pk=N.N%
 resend:  sent=N recovered=N stale=N unmarked_ok=N unmarked_stale=N
-rxpath:  stack=N task=N gap=N away=N qrun=N
+rxpath:  stack=N task=N gap=N udp_watch=1 udp_ok=N udp_drop=N
+         udp_drop_total=N away=N qrun=N rssi=N
 ```
 
 - `holes` -- concealment *events*; `(+N)` is new ones this second. The number
@@ -323,23 +324,29 @@ watchdog stopped between sessions. `ensure_ptp_started()` in the transport is
 still called per session: `ptp_clock_init()` is idempotent, and that call is
 what re-arms `ptp_clock_notify_session_start()`.
 
-`rxpath:` is what separates loss on air from loss inside the board, which
-`holes` alone cannot:
+`rxpath:` reports socket mailbox drops alongside receive-task activity.
 
 - `stack` -- every UDP datagram that reached lwIP, from `udp.recv`, incremented
   at the top of `udp_input()` before the pcb lookup and before the receive mbox.
   This is what survived the air.
 - `task` -- what the receiver actually read off the data socket. Nominal ~125/s.
-- `gap` -- `stack - task`, dominated by receive-mbox overflow.
+- `gap` -- `stack - task`, including non-audio traffic and queued backlog.
+- `udp_watch` -- 1 when the audio mailbox counter is installed. A 0 is
+  accompanied by an `Audio UDP queue counters unavailable` warning.
+- `udp_ok` -- successful audio receive-mailbox posts since the previous line.
+- `udp_drop` -- failed posts to that same mailbox since the previous line.
+- `udp_drop_total` -- failed posts since the socket counter was installed.
+  It resets at the next realtime socket start. PTP, mDNS, control and TCP
+  mailboxes are excluded.
 
 `gap` steady while `holes` is 0 is the non-audio floor: PTP on 319/320 plus
-whatever mDNS the segment carries (~30/s on the reference network). The failure
-signature is `task` dipping below 125 and then **overshooting** on the next
-second while `stack` stays high -- the task draining a backlog after an
-overflow. If `stack` falls along with `task`, the packets genuinely never
-arrived and only the radio side can help.
+whatever mDNS the segment carries (~30/s on the reference network). An
+overshooting `task` on the next second can be the receiver draining a backlog.
+A positive `gap` alone cannot establish an overflow. Use `udp_drop` to count
+failed audio-mailbox posts. A `stack` dip locates loss before the global UDP
+counter, which includes the Wi-Fi driver and IP receive path.
 
-`gap` says packets died in the mbox, not why. Two per-second maxima do:
+Two per-second maxima provide context when `udp_drop` rises.
 
 - `away` -- longest ms between one `recvfrom()` returning and the next call:
   inline decrypt/decode plus any preemption during it. The 32-slot mbox lasts
@@ -351,7 +358,8 @@ arrived and only the radio side can help.
   `audio_recv`, priority 8, on the audio core). `qrun` near 32 with small
   `away` means preemption.
 
-`gap` above the floor with both low means the drop is not the receiver task's.
+Small `away` and `qrun` can still accompany a short arrival burst that fills
+the mailbox. They do not exclude overflow.
 
 `rssi` (2026-10-25) is the last beacon's RSSI, sampled once a second (0 when
 unknown or on Ethernet). On Geneva it read ~8 dB below what the AP reports for
@@ -359,9 +367,41 @@ the board, and fell further during the 0.5-1 s stalls (-72 -> -82 dBm).
 `esp_wifi_statis_dump()` was tried for driver counters and prints nothing
 through ESPHome's log on the S3 (IDF 5.5); it was removed.
 
-Requires `CONFIG_LWIP_STATS`, which the component does **not** set -- it is a
-diagnostic, not a requirement. Enable it in the board YAML when investigating;
-without it the line compiles out via `#if LWIP_STATS`.
+`stack` and `gap` require `CONFIG_LWIP_STATS`. The audio mailbox counters,
+`task`, `away`, `qrun` and RSSI are reported with that option off too.
+
+## Realtime loss concealment and exact mailbox counts (2026-11-20)
+
+Implemented and verified by host tests and a firmware build. Listening and
+live overflow verification on the boards are pending.
+
+`audio_gap_fader.h` ramps the last emitted PCM sample toward silence over
+88 frames, about 2 ms at 44.1 kHz. When PCM returns, it crossfades from the
+last concealed sample to incoming audio over another 88 frames. The state
+survives partial reads, render boundaries and the drift servo's one-frame
+reads. A timeline clear, epoch change or discontinuous read resets it.
+Healthy contiguous PCM passes through exactly. Missing-frame counts and RTP
+advancement retain their existing meanings. Concealment applies to gaps
+rendered by the timeline. Empty-timeline recovery still uses the scheduler's
+silence/preroll path.
+
+`audio_udp_diagnostics.cpp` wraps `sys_mbox_trypost()` through the component's
+link flag and observes the real return value for the realtime data socket's
+receive mailbox. Registration and reset run on the lwIP core. The watch is
+removed before socket close, including startup failure paths. The wrapper
+calls the original post once and preserves its result and message ownership.
+It counts queue-post failures. Allocation failures before the post, driver
+loss and on-air loss need other instruments.
+
+The 1 Hz `rxpath:` line carries `udp_watch`, `udp_ok`, `udp_drop` and
+`udp_drop_total`. Existing captures without those fields cannot provide an
+exact audio-mailbox drop count from `gap` alone. The old subtraction also
+mixed different seconds of arrival/draining with multicast traffic.
+
+Host regression checks in `tests/test_realtime_audio.py` cover single and
+consecutive missing packets, RTP wrap, split fades and one-frame reads,
+signed sample extremes, short-gap recovery, clear/reset with the same epoch
+and RTP, healthy AAC, queue overflow, unrelated mailboxes and socket reuse.
 
 ## Output DSP: what the design constraints actually were
 

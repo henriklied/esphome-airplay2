@@ -457,6 +457,9 @@ def _add_lwip_requirements() -> None:
     # default, so lwIP compiles the option out and setsockopt() silently fails.
     esp32_platform.add_idf_sdkconfig_option("CONFIG_LWIP_UDP_RECVMBOX_SIZE", _LWIP_UDP_RECVMBOX_SIZE)
 
+    # Observe actual post failures for the realtime audio socket's mailbox.
+    cg.add_build_flag("-Wl,--wrap=sys_mbox_trypost")
+
 
 def _register_recursive_sources() -> None:
     """Let ESPHome collect this component's one-level subdir sources.

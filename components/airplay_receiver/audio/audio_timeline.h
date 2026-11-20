@@ -34,6 +34,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "audio_gap_fader.h"
+
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h"
@@ -127,6 +129,15 @@ struct audio_timeline_t {
   /* Signalled by the consumer whenever a slot is released, so producers can
    * block instead of polling for space. */
   SemaphoreHandle_t space_available;
+
+  /* Only the consumer updates the fader. A clear increments the generation
+   * under the metadata lock, so a flush never races a PCM fade. */
+  uint32_t clear_generation;
+  uint32_t read_generation;
+  uint32_t read_epoch;
+  uint32_t read_next_rtp;
+  bool read_position_valid;
+  audio_gap_fader_t gap_fader;
 
   portMUX_TYPE lock;
 };
