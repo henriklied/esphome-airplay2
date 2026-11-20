@@ -153,7 +153,8 @@ cd .check && esphome compile amped-s3.yaml
 - `FIELD-NOTES.md` — what hardware taught us: five distinct faults that look identical from
   outside, how to read the 1Hz `playout:` / `resend:` / `rxpath:` telemetry, and the dead-ends
   list. Read before debugging any artefact.
-- `audio/audio_gap_fader.h` — 88-frame fades into and out of timeline gaps.
+- `audio/audio_plc.{h,cpp}` — packet-loss concealment: pitch-matched loops from both
+  sides of a timeline hole, crossfaded. A/B renders: `uv run tools/plc_demo/run.py <song>`.
 - `audio/audio_udp_diagnostics.{h,cpp}` — actual realtime audio-mailbox post
   successes/failures, exposed as `udp_ok`, `udp_drop` and `udp_drop_total` on
   `rxpath:`. `udp_watch=1` confirms installation. Works without `LWIP_STATS`.

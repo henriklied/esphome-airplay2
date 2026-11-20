@@ -26,6 +26,7 @@
 #include <cstring>
 
 #include "freertos/task.h"
+#include "esp_timer.h"
 
 namespace esphome {
 namespace airplay_receiver {
@@ -193,7 +194,8 @@ esp_err_t audio_timeline_init(audio_timeline_t *t, uint16_t capacity,
   }
 
   t->capacity = capacity;
-  t->gap_fader.reset();
+  /* Without its buffers the PLC conceals with silence; not fatal. */
+  (void)audio_plc_init(&t->plc);
   portMUX_TYPE lock = portMUX_INITIALIZER_UNLOCKED;
   t->lock = lock;
   return ESP_OK;
@@ -208,6 +210,7 @@ void audio_timeline_deinit(audio_timeline_t *t) {
   }
   airplay_free(t->desc);
   airplay_free(t->pcm_pool);
+  audio_plc_deinit(&t->plc);
   memset(t, 0, sizeof(*t));
 }
 
@@ -640,6 +643,56 @@ static size_t conceal_span_locked(audio_timeline_t *t, uint32_t epoch,
   return limit;
 }
 
+/* Copies up to `max_frames` contiguous READY frames from `start` into `out`
+ * at PLC_STRIDE interleaving, without retiring them.  Consumer only; takes the
+ * lock itself.  Returns 0 if a flush lands mid-copy. */
+static size_t timeline_peek(audio_timeline_t *t, uint32_t epoch,
+                            uint32_t start, int16_t *out, size_t max_frames,
+                            uint8_t channels) {
+  size_t got = 0U;
+  uint32_t cursor = start;
+  while (got < max_frames) {
+    portENTER_CRITICAL(&t->lock);
+    if (!t->base_valid || t->base_epoch != epoch) {
+      portEXIT_CRITICAL(&t->lock);
+      break;
+    }
+    const uint32_t block_start = block_start_for_cursor(t, cursor);
+    const uint16_t index = ready_index_for_start(t, epoch, block_start);
+    const size_t off = (size_t)(cursor - block_start);
+    if (index == UINT16_MAX || off >= t->frame_samples) {
+      portEXIT_CRITICAL(&t->lock);
+      break;
+    }
+    size_t n = t->frame_samples - off;
+    if (n > max_frames - got) {
+      n = max_frames - got;
+    }
+    t->desc[index].reading = true;
+    portEXIT_CRITICAL(&t->lock);
+
+    const int16_t *src = &slot_pcm(t, index)[off * channels];
+    for (size_t i = 0; i < n; i++) {
+      out[(got + i) * PLC_STRIDE] = src[i * channels];
+      out[(got + i) * PLC_STRIDE + 1] = src[i * channels + (channels - 1U)];
+    }
+
+    portENTER_CRITICAL(&t->lock);
+    audio_timeline_desc_t *desc = &t->desc[index];
+    desc->reading = false;
+    const bool still_valid = desc->used && desc->epoch == epoch &&
+                             desc->rtp_start == block_start && t->base_valid &&
+                             t->base_epoch == epoch;
+    portEXIT_CRITICAL(&t->lock);
+    if (!still_valid) {
+      return 0U;
+    }
+    got += n;
+    cursor += (uint32_t)n;
+  }
+  return got;
+}
+
 size_t audio_timeline_read(audio_timeline_t *t, uint32_t epoch, uint32_t start,
                            int16_t *out, size_t requested, uint8_t channels,
                            bool conceal, size_t *concealed) {
@@ -660,7 +713,7 @@ size_t audio_timeline_read(audio_timeline_t *t, uint32_t epoch, uint32_t start,
   portEXIT_CRITICAL(&t->lock);
   if (!t->read_position_valid || t->read_epoch != epoch ||
       t->read_next_rtp != start || t->read_generation != generation) {
-    t->gap_fader.reset();
+    audio_plc_reset(&t->plc);
   }
   t->read_generation = generation;
   t->read_epoch = epoch;
@@ -691,9 +744,28 @@ size_t audio_timeline_read(audio_timeline_t *t, uint32_t epoch, uint32_t start,
       /* Conceal only the real hole up to the next READY AAC frame. */
       n = conceal_span_locked(t, epoch, cursor, block_start,
                               requested - produced);
+      const bool plan = !t->plc.active;
+      const size_t hole =
+          plan ? conceal_span_locked(t, epoch, cursor, block_start,
+                                     PLC_MAX_FILL_FRAMES + 1U)
+               : 0U;
       portEXIT_CRITICAL(&t->lock);
 
-      t->gap_fader.conceal(&out[produced * channels], n, channels);
+      if (plan) {
+        uint32_t future = 0U;
+        if (hole <= PLC_MAX_FILL_FRAMES && t->plc.future) {
+          future = (uint32_t)timeline_peek(t, epoch, cursor + (uint32_t)hole,
+                                           t->plc.future, PLC_FUTURE_FRAMES,
+                                           channels);
+        }
+        const int64_t begin_us = esp_timer_get_time();
+        audio_plc_begin(&t->plc, (uint32_t)hole, future);
+        const uint32_t took_us = (uint32_t)(esp_timer_get_time() - begin_us);
+        if (took_us > t->plc_begin_us_max) {
+          t->plc_begin_us_max = took_us;
+        }
+      }
+      audio_plc_conceal(&t->plc, &out[produced * channels], n, channels);
       produced += n;
       cursor += (uint32_t)n;
       if (concealed) {
@@ -739,7 +811,7 @@ size_t audio_timeline_read(audio_timeline_t *t, uint32_t epoch, uint32_t start,
     if (!still_valid) {
       /* A flush landed mid-copy: the samples belong to a discarded stream. */
       memset(&out[produced * channels], 0, n * channels * sizeof(int16_t));
-      t->gap_fader.reset();
+      audio_plc_reset(&t->plc);
       produced += n;
       if (concealed) {
         *concealed += n;
@@ -747,7 +819,7 @@ size_t audio_timeline_read(audio_timeline_t *t, uint32_t epoch, uint32_t start,
       break;
     }
 
-    t->gap_fader.recover(&out[produced * channels], n, channels);
+    audio_plc_recover(&t->plc, &out[produced * channels], n, channels);
     produced += n;
     cursor += (uint32_t)n;
   }

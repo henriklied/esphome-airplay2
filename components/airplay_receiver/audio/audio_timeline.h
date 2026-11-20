@@ -34,7 +34,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "audio_gap_fader.h"
+#include "audio_plc.h"
 
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
@@ -130,14 +130,16 @@ struct audio_timeline_t {
    * block instead of polling for space. */
   SemaphoreHandle_t space_available;
 
-  /* Only the consumer updates the fader. A clear increments the generation
-   * under the metadata lock, so a flush never races a PCM fade. */
+  /* Only the consumer touches the PLC. A clear increments the generation
+   * under the metadata lock, so a flush never races a concealment. */
   uint32_t clear_generation;
   uint32_t read_generation;
   uint32_t read_epoch;
   uint32_t read_next_rtp;
   bool read_position_valid;
-  audio_gap_fader_t gap_fader;
+  audio_plc_t plc;
+  /* Slowest audio_plc_begin() since the engine last read it, for playout:. */
+  uint32_t plc_begin_us_max;
 
   portMUX_TYPE lock;
 };

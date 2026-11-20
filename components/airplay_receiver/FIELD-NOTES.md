@@ -232,13 +232,15 @@ without removing the counters.
 
 ```
 playout: raw=.. span=.. filt=.. drift=..ppm trims=../s (N) buffered=N
-         concealed=N holes=N (+N) under=N dfail=N qdrop=N edrop=N ins=N
-         dsp=N.N% pk=N.N%
+         concealed=N holes=N (+N) plc=N/N plc_us=N under=N dfail=N qdrop=N
+         edrop=N ins=N dsp=N.N% pk=N.N%
 resend:  sent=N recovered=N stale=N unmarked_ok=N unmarked_stale=N
 rxpath:  stack=N task=N gap=N udp_watch=1 udp_ok=N udp_drop=N
          udp_drop_total=N away=N qrun=N rssi=N
 ```
 
+- `plc` -- holes concealed two-sided / forward-only, cumulative. `plc_us` --
+  slowest concealment start this second.
 - `holes` -- concealment *events*; `(+N)` is new ones this second. The number
   that matters. `concealed` is concealed samples.
 - `buffered` -- healthy is ~250 blocks. Dips during loss bursts.
@@ -382,15 +384,29 @@ through ESPHome's log on the S3 (IDF 5.5); it was removed.
 Implemented and verified by host tests and a firmware build. Listening and
 live overflow verification on the boards are pending.
 
-`audio_gap_fader.h` ramps the last emitted PCM sample toward silence over
-88 frames, about 2 ms at 44.1 kHz. When PCM returns, it crossfades from the
-last concealed sample to incoming audio over another 88 frames. The state
-survives partial reads, render boundaries and the drift servo's one-frame
-reads. A timeline clear, epoch change or discontinuous read resets it.
-Healthy contiguous PCM passes through exactly. Missing-frame counts and RTP
-advancement retain their existing meanings. Concealment applies to gaps
-rendered by the timeline. Empty-timeline recovery still uses the scheduler's
-silence/preroll path.
+Concealment (`audio_plc.{h,cpp}`, 2026-11-21; replaced the 2 ms fade to
+silence) fills a hole with audio. Playout runs ~2 s behind arrival, so the audio
+after a hole is normally already in the timeline when the hole is played:
+
+- The last ~75 ms of output is searched for a repetition period (10-30 ms,
+  correlation on both channels, decimated by 8 then refined) and looped
+  forward; the first 46 ms after the hole is searched the same way and looped
+  backward so it ends on the real audio.
+- Holes up to 240 ms crossfade forward into backward across the whole hole.
+  Longer ones fade each side over 120 ms with silence between.
+- No audio after the hole (end unknown, or the hole exceeds 500 ms): hold the
+  forward loop 20 ms, fade out over 100 ms, then silence.
+- Resumed audio blends in over 2 ms from the loop it was cut from, or from the
+  fill when a late packet ends the hole early.
+
+The fill is synthesized per frame as it plays; only the period search runs at
+the hole start (`plc_us=` on `playout:`, host estimate 1-3 ms on the S3).
+History survives partial reads, render boundaries and the drift servo's
+one-frame reads; a timeline clear, epoch change or discontinuous read resets
+it. Healthy contiguous PCM passes through exactly. Missing-frame counts and RTP
+advancement keep their meanings. Empty-timeline recovery still uses the
+scheduler's silence/preroll path. A/B renders: `uv run tools/plc_demo/run.py
+<song>`.
 
 `audio_udp_diagnostics.cpp` wraps `sys_mbox_trypost()` through the component's
 link flag and observes the real return value for the realtime data socket's
