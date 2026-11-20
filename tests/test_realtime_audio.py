@@ -16,7 +16,7 @@ COMPONENT = ROOT / "components" / "airplay_receiver"
 HOST = ROOT / "tests" / "host"
 
 sys.path.insert(0, str(HOST))
-from host_stubs import write_stubs  # noqa: E402
+from host_stubs import write_stubs
 
 pytestmark = pytest.mark.skipif(shutil.which("c++") is None, reason="needs a C++ compiler")
 
@@ -35,10 +35,10 @@ def test_realtime_audio(tmp_path: Path, harness: str, sources: tuple[str, ...]) 
          f"-I{COMPONENT}", str(HOST / f"{harness}.cpp"),
          *(str(COMPONENT / "audio" / f"{source}.cpp") for source in sources),
          "-o", str(binary)],
-        capture_output=True, text=True,
+        capture_output=True, text=True, check=False,
     )
     assert build.returncode == 0, build.stderr
-    run = subprocess.run([str(binary)], capture_output=True, text=True, timeout=15)
+    run = subprocess.run([str(binary)], capture_output=True, text=True, timeout=15, check=False)
     assert run.returncode == 0, run.stderr
     assert run.stdout.strip() == "ok"
 

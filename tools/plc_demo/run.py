@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[2]
 COMPONENT = ROOT / "components" / "airplay_receiver"
 HOST = ROOT / "tests" / "host"
 sys.path.insert(0, str(HOST))
-from host_stubs import write_stubs  # noqa: E402
+from host_stubs import write_stubs
 
 logger = logging.getLogger("plc_demo")
 
