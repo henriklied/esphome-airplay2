@@ -17,6 +17,7 @@
 //
 // Not thread-safe. The owner serialises add_sample() against offset_at().
 
+#include <cmath>
 #include <cstdint>
 
 namespace esphome {
@@ -132,6 +133,11 @@ class PeerClock {
     return line.offset_ns + (int64_t) (line.rate * (double) (local_ns - line.at_ns));
   }
 
+  /// RMS distance of the kept exchanges from the line: the measurement noise
+  /// the fit averages down. Its error at the newest point is roughly this
+  /// over sqrt(samples), times ~2 for extrapolating past the centre.
+  int64_t residual_rms_ns() const { return this->residual_rms_ns_; }
+
   int64_t min_rtt_ns() const { return this->min_rtt_ns_; }
   int64_t last_rtt_ns() const { return this->last_rtt_ns_; }
   double rate() const { return this->rate_; }
@@ -202,6 +208,13 @@ class PeerClock {
     this->rate_ = rate;
     this->at_ns_ = at_ref + (int64_t) mean_x;
     this->offset_ns_ = offset_ref + (int64_t) mean_y;
+    double sum_squares = 0.0;
+    for (int i = 0; i < n; i++) {
+      const double residual = (double) (this->kept_[i].offset_ns - this->offset_ns_) -
+                              rate * (double) (this->kept_[i].at_ns - this->at_ns_);
+      sum_squares += residual * residual;
+    }
+    this->residual_rms_ns_ = (int64_t) std::sqrt(sum_squares / n);
   }
 
   int64_t rtts_[RTT_WINDOW] = {};
@@ -217,6 +230,7 @@ class PeerClock {
   int64_t at_ns_{0};
   int64_t offset_ns_{0};
   double rate_{0.0};
+  int64_t residual_rms_ns_{0};
   int outlier_run_{0};
   uint32_t reseeds_{0};
 };

@@ -1209,12 +1209,32 @@ void audio_receiver_peer_deferred_flush(uint32_t flush_rtp) {
   }
 }
 
+// Not audio_engine_v2_push_pcm_wait(): that waits only while the timeline is
+// completely full. The timeline is a direct ring, so a frame can also find its
+// own slot still holding the frame one ring earlier while other slots are free
+// (holes left by a join or a lost datagram), and push_pcm then fails at once.
+// The primary never sees this, its decoder only pushes into a full timeline;
+// the secondary sees it whenever it plays a few ms behind the primary, and
+// every such loss leaves a hole that makes the next one likely. So wait for
+// the slot itself: the playback task frees one every frame.
+static constexpr uint32_t PEER_PUSH_WAIT_SLICE_MS = 5;
+
 bool audio_receiver_peer_push(uint32_t first_rtp, const int16_t *stereo, size_t samples, uint32_t timeout_ms) {
   if (!receiver.engine_v2_ready) {
     return false;
   }
-  return audio_engine_v2_push_pcm_wait(&receiver.engine_v2, audio_epoch_get(&receiver.engine_v2.epoch), first_rtp,
-                                       stereo, samples, 2, timeout_ms);
+  audio_engine_v2_t *engine = &receiver.engine_v2;
+  const uint32_t epoch = audio_epoch_get(&engine->epoch);
+  const int64_t deadline_us = esp_timer_get_time() + (int64_t) timeout_ms * 1000LL;
+  for (;;) {
+    if (audio_engine_v2_push_pcm(engine, epoch, first_rtp, stereo, samples, 2)) {
+      return true;
+    }
+    if (audio_epoch_get(&engine->epoch) != epoch || esp_timer_get_time() >= deadline_us) {
+      return false;
+    }
+    (void) audio_timeline_wait_for_space(&engine->timeline, PEER_PUSH_WAIT_SLICE_MS);
+  }
 }
 
 }  // namespace airplay_receiver

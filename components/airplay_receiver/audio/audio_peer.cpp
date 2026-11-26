@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cerrno>
 #include <cinttypes>
+#include <cstdio>
 #include <cstring>
 #include <new>
 
@@ -41,7 +42,11 @@ static constexpr uint32_t RING_SLOTS = 128;
 // Yield after this many datagrams in a row, so a backlog cannot monopolise
 // the Wi-Fi TX queue or the core.
 static constexpr int DATAGRAMS_PER_YIELD = 16;
-static constexpr int SEND_RETRIES = 5;
+// A full Wi-Fi TX queue (ENOMEM) clears in milliseconds, and the audio being
+// sent is seconds ahead of its playout: wait rather than drop. Measured
+// 2026-11-26: 5 one-tick retries still dropped up to 27 datagrams per 5 s
+// with a stereo forward beside the incoming AirPlay stream.
+static constexpr int SEND_RETRIES = 50;
 
 // Secondary.
 static constexpr uint32_t RX_TIMEOUT_MS = 50;
@@ -491,6 +496,8 @@ static peer::PeerClock *g_relay_clock = nullptr;
 struct RelayStats {
   int64_t last_rtt_ns;
   int64_t min_rtt_ns;
+  int64_t residual_ns;
+  int kept;
   double rate;
   uint32_t reseeds;
   uint32_t pongs;
@@ -581,6 +588,8 @@ static void secondary_clock_task(void *arg) {
           g_relay_line = line;
           g_relay_stats.last_rtt_ns = clock.last_rtt_ns();
           g_relay_stats.min_rtt_ns = clock.min_rtt_ns();
+          g_relay_stats.residual_ns = clock.residual_rms_ns();
+          g_relay_stats.kept = clock.samples();
           g_relay_stats.rate = clock.rate();
           g_relay_stats.reseeds = clock.reseeds();
           g_relay_stats.pongs++;
@@ -635,8 +644,39 @@ struct SecondaryStats {
   uint32_t stale;
   uint32_t push_fail;
   uint32_t not_ready;
+  // Primary's network time minus this board's own PTP time, both read here:
+  // the clock disagreement a PTP-timed secondary plays with (positive: it
+  // plays late). Includes the relay's own error.
+  int64_t clock_diff_sum_ns;
+  int64_t clock_diff_min_ns;
+  int64_t clock_diff_max_ns;
+  uint32_t clock_diff_count;
 };
 static SecondaryStats g_secondary_stats{};
+
+static bool ptp_follows(const peer::State &state);
+
+static void sample_clock_diff() {
+  if (!ptp_follows(g_mirror.state)) {
+    return;
+  }
+  portENTER_CRITICAL(&g_clock_lock);
+  const peer::PeerClock::Line line = g_relay_line;
+  portEXIT_CRITICAL(&g_clock_lock);
+  if (!line.valid) {
+    return;
+  }
+  const int64_t diff = peer::PeerClock::offset_on(line, local_now_ns()) - ptp_clock_get_offset_ns();
+  SecondaryStats &stats = g_secondary_stats;
+  if (stats.clock_diff_count == 0 || diff < stats.clock_diff_min_ns) {
+    stats.clock_diff_min_ns = diff;
+  }
+  if (stats.clock_diff_count == 0 || diff > stats.clock_diff_max_ns) {
+    stats.clock_diff_max_ns = diff;
+  }
+  stats.clock_diff_sum_ns += diff;
+  stats.clock_diff_count++;
+}
 
 // Reassembly of one forwarded frame from its chunks, which are sent in order.
 struct Assembly {
@@ -865,19 +905,29 @@ static void log_secondary_stats() {
   const bool relay_valid = g_relay_line.valid;
   g_relay_stats.pongs = 0;
   portEXIT_CRITICAL(&g_clock_lock);
-  if (stats.datagrams == 0 && !g_mirror.link_up) {
+  // Quiet while idle: heartbeats and pongs alone are not worth a line.
+  if (stats.frames == 0 && stats.seq_lost == 0 && stats.stale == 0 && stats.push_fail == 0 &&
+      stats.incomplete == 0) {
     return;
+  }
+  char clock_diff[48] = "n/a";
+  if (stats.clock_diff_count > 0) {
+    snprintf(clock_diff, sizeof(clock_diff), "%+.1f/%+.1f/%+.1fus",
+             (double) stats.clock_diff_sum_ns / stats.clock_diff_count / 1e3, (double) stats.clock_diff_min_ns / 1e3,
+             (double) stats.clock_diff_max_ns / 1e3);
   }
   ESP_LOGI(TAG,
            "peer rx: datagrams=%" PRIu32 " lost=%" PRIu32 " frames=%" PRIu32 " incomplete=%" PRIu32
            " stale=%" PRIu32 " push_fail=%" PRIu32 " not_ready=%" PRIu32
-           " link=%d clock=%s anchor=%s/%d ptp=%d relay=%d rtt=%.2f/%.2fms rate=%+.2fppm reseeds=%" PRIu32
-           " pongs=%" PRIu32,
+           " link=%d clock=%s anchor=%s/%d ptp=%d relay=%d rtt=%.2f/%.2fms fit=%.1fus/%d rate=%+.2fppm"
+           " reseeds=%" PRIu32
+           " pongs=%" PRIu32 " relay-ptp=%s",
            stats.datagrams, stats.seq_lost, stats.frames, stats.incomplete, stats.stale, stats.push_fail,
            stats.not_ready, g_mirror.link_up, clock_source_name(g_source.load()),
            anchor_domain_name(g_mirror.state.domain), g_mirror.anchor_applied, ptp_follows(g_mirror.state),
-           relay_valid, (double) relay.last_rtt_ns / 1e6, (double) relay.min_rtt_ns / 1e6, relay.rate * 1e6,
-           relay.reseeds, relay.pongs);
+           relay_valid, (double) relay.last_rtt_ns / 1e6, (double) relay.min_rtt_ns / 1e6,
+           (double) relay.residual_ns / 1e3, relay.kept, relay.rate * 1e6,
+           relay.reseeds, relay.pongs, clock_diff);
 }
 
 static void secondary_task(void *arg) {
@@ -940,6 +990,7 @@ static void secondary_task(void *arg) {
       g_assembly.active = false;
     }
     reconcile_anchor();
+    sample_clock_diff();
 
     if (now_us - last_stats_us >= STATS_INTERVAL_US) {
       log_secondary_stats();

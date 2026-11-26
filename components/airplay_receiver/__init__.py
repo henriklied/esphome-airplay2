@@ -343,7 +343,8 @@ def _warn_if_pair_doubles_channel(config):
     pair = config.get(_CONFIG_PAIR)
     if pair and pair[_CONFIG_ROLE] == "primary":
         forwarded = pair.get(_CONFIG_CHANNEL, _PAIR_DEFAULT_CHANNEL)
-        if forwarded == config[_CONFIG_AUDIO_CHANNEL_MODE]:
+        # Same side twice is a mistake; stereo to stereo is a mirror.
+        if forwarded in ("left", "right") and forwarded == config[_CONFIG_AUDIO_CHANNEL_MODE]:
             _LOGGER.warning(
                 "pair primary plays '%s' and forwards '%s' too: set audio_channel_mode to the other side",
                 config[_CONFIG_AUDIO_CHANNEL_MODE],
