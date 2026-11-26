@@ -17,8 +17,12 @@ namespace airplay_receiver {
 
 // Maximum codec name length stored in a connection.
 #define AIRPLAY_CODEC_NAME_MAX 32
-// Current volume running default (dB, 0 = max, -30 = mute).
-#define AIRPLAY_DEFAULT_VOLUME_DB (-15.0f)
+// Sender volume scale: dB, 0 = max, AIRPLAY_MIN_VOLUME_DB and below = mute.
+// A sender's slider is linear in dB across it.
+#define AIRPLAY_MIN_VOLUME_DB (-30.0f)
+// Start volume until the component restores or configures one: 20% of the
+// slider (-24 dB). Was -15 dB (50%), loud for a first connection.
+#define AIRPLAY_DEFAULT_VOLUME_DB (-24.0f)
 
 /**
  * Per-connection RTSP/AirPlay session state.
@@ -80,6 +84,13 @@ void rtsp_conn_set_volume(RtspConn *conn, float volume_db);
  * Get volume as Q15 scale factor (0 = mute, 32768 = unity).
  */
 int32_t rtsp_conn_get_volume_q15(RtspConn *conn);
+
+/**
+ * Set the volume the next connection starts at, before any sender has set
+ * one (boot: the saved or configured start volume). Does not touch a live
+ * connection.
+ */
+void rtsp_conn_set_start_volume(float volume_db);
 
 }  // namespace airplay_receiver
 }  // namespace esphome

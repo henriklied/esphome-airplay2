@@ -45,6 +45,7 @@ that adds one fails validation (`Platform not found`), which prevents two RTSP s
 | `amp_enable_pin` | `-1` | amp unmute GPIO line. `-1` = unconfigured. |
 | `amp_enable_inverted` | `false` | invert the amp-enable polarity |
 | `amp_idle_timeout` | `60` | seconds of silence before the amp-enable line de-asserts (mutes). `0` = never. |
+| `initial_volume` | `20%` | start volume until a sender sets one; afterwards the last sender volume (not mute) is restored at boot |
 | `sample_rate` | `44100` | output sample rate |
 | `audio_channel_mode` | `"stereo"` | `stereo \| mono \| left \| right` (AuMONO modes) |
 | `dsp` | — | output biquad cascade, see below |

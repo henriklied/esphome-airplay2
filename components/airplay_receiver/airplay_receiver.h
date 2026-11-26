@@ -2,6 +2,7 @@
 
 #include "esphome/core/component.h"
 #include "esphome/components/media_player/media_player.h"
+#include "esphome/core/preferences.h"
 
 #include <atomic>
 #include <string>
@@ -53,6 +54,10 @@ class AirPlayReceiver : public Component, public media_player::MediaPlayer {
 
   /// Idle power-down for the amp-enable line (seconds, 0 disables). Default 60.
   void set_amp_idle_timeout(int seconds) { this->amp_idle_timeout_s_ = seconds; }
+
+  /// Start volume (0-1 of the sender's slider) until a sender has set one;
+  /// after that the last sender volume is kept across reboots.
+  void set_initial_volume(float fraction) { this->initial_volume_ = fraction; }
   /// Advertise 5.1 AAC in GET /info so senders can choose it (mixed down to
   /// stereo on the board). Off by default: /info stays as it always was.
 
@@ -188,11 +193,17 @@ class AirPlayReceiver : public Component, public media_player::MediaPlayer {
   /// sockets bind.
   void start_ptp_when_network_up_();
   void start_peer_when_network_up_();
+  void restore_volume_();
+  void save_volume_if_changed_();
   void publish_secondary_state_();
 
   uint32_t buffer_size_{1000000};
   bool ptp_started_{false};
+  float initial_volume_{0.2f};
+  ESPPreferenceObject volume_pref_;
+  float saved_volume_db_{0.0f};
   PeerConfig pair_config_{};
+
   bool peer_started_{false};
 
   // Audio board wiring (I2S PCM5100 + amp-enable).

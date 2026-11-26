@@ -14,13 +14,13 @@ static const char *const TAG = "airplay_conn";
 // Convert dB (0 = max, -30 = mute) into a perceptual Q15 multiplier using the
 // upstream squared volume curve.
 static int32_t db_to_q15(float volume_db) {
-  if (volume_db <= -30.0f) {
+  if (volume_db <= AIRPLAY_MIN_VOLUME_DB) {
     return 0;
   }
   if (volume_db >= 0.0f) {
     return 32768;
   }
-  float normalized = (volume_db + 30.0f) / 30.0f;
+  float normalized = (volume_db - AIRPLAY_MIN_VOLUME_DB) / -AIRPLAY_MIN_VOLUME_DB;
   float curved = normalized * normalized;
   return static_cast<int32_t>(curved * 32768.0f);
 }
@@ -82,6 +82,10 @@ void rtsp_conn_set_volume(RtspConn *conn, float volume_db) {
   conn->volume_q15 = db_to_q15(volume_db);
   transport_set_volume_state(conn->volume_db, conn->volume_q15);
   transport_events_emit(TRANSPORT_EVENT_VOLUME, nullptr);
+}
+
+void rtsp_conn_set_start_volume(float volume_db) {
+  transport_set_volume_state(volume_db, db_to_q15(volume_db));
 }
 
 int32_t rtsp_conn_get_volume_q15(RtspConn *conn) {

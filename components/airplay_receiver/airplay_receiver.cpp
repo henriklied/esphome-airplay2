@@ -6,6 +6,8 @@
 #include <string>
 
 #include "timing/ptp_clock.h"
+#include "transport/rtsp_conn.h"
+#include "transport/rtsp_events.h"
 
 #include "esphome/components/network/util.h"
 #ifdef USE_WIFI_RUNTIME_ROAMING_SUPPRESSION
@@ -87,6 +89,8 @@ void AirPlayReceiver::setup() {
   audio_receiver_set_crypto_module(&this->crypto_);
   audio_peer_configure(this->pair_config_);
 
+  this->restore_volume_();
+
   if (this->pair_config_.role == PeerRole::SECONDARY) {
     // A secondary is not an AirPlay destination: no advertisement, no RTSP.
     // Everything it plays arrives from the primary over the peer link.
@@ -102,7 +106,7 @@ void AirPlayReceiver::setup() {
   // Reflect the initial transport state to Home Assistant.
   this->audio_ready_ = true;
   this->state = media_player::MEDIA_PLAYER_STATE_IDLE;
-  this->volume = 0.5f;
+  this->volume = (this->saved_volume_db_ - AIRPLAY_MIN_VOLUME_DB) / -AIRPLAY_MIN_VOLUME_DB;
   this->publish_state();
 }
 
@@ -113,6 +117,7 @@ void AirPlayReceiver::loop() {
     this->publish_secondary_state_();
   } else {
     this->transport_.loop();
+    this->save_volume_if_changed_();
   }
   // The loudness shelf follows the volume; its redesign belongs here, off the
   // RTSP task that reports the volume and the audio task that plays it.
@@ -155,6 +160,34 @@ void AirPlayReceiver::start_ptp_when_network_up_() {
     this->ptp_started_ = true;
   }
   // Anything else means the sockets could not be built yet; retry next loop.
+}
+
+// Senders do not send a volume when they connect, only when the slider moves,
+// so whatever the board starts at plays until then. Start where the last
+// session left off.
+static constexpr uint32_t VOLUME_PREF_KEY = 0x41505631;  // "APV1"
+
+void AirPlayReceiver::restore_volume_() {
+  this->volume_pref_ = global_preferences->make_preference<float>(VOLUME_PREF_KEY);
+  float volume_db = 0.0f;
+  if (!this->volume_pref_.load(&volume_db) || !(volume_db > AIRPLAY_MIN_VOLUME_DB && volume_db <= 0.0f)) {
+    volume_db = AIRPLAY_MIN_VOLUME_DB * (1.0f - this->initial_volume_);
+  }
+  this->saved_volume_db_ = volume_db;
+  rtsp_conn_set_start_volume(volume_db);
+  ESP_LOGI(TAG, "Start volume %.1f dB", volume_db);
+}
+
+// ESPHome batches preference writes (flash_write_interval), so a slider sweep
+// costs one flash write, not one per step. Mute is not kept: a muted session
+// should not make the next one start silent.
+void AirPlayReceiver::save_volume_if_changed_() {
+  const float volume_db = transport_volume_db();
+  if (volume_db == this->saved_volume_db_ || !(volume_db > AIRPLAY_MIN_VOLUME_DB && volume_db <= 0.0f)) {
+    return;
+  }
+  this->saved_volume_db_ = volume_db;
+  this->volume_pref_.save(&volume_db);
 }
 
 void AirPlayReceiver::start_peer_when_network_up_() {

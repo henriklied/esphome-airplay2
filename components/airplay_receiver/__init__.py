@@ -43,6 +43,7 @@ _CONFIG_AMP_ENABLE = "amp_enable_pin"
 _CONFIG_SAMPLE_RATE = "sample_rate"
 _CONFIG_AMP_INVERTED = "amp_enable_inverted"
 _CONFIG_AMP_IDLE_TIMEOUT = "amp_idle_timeout"
+_CONFIG_INITIAL_VOLUME = "initial_volume"
 _CONFIG_DSP = "dsp"
 _CONFIG_DSP_ENABLED = "enabled"
 _CONFIG_DSP_PREAMP = "preamp"
@@ -381,6 +382,9 @@ CONFIG_SCHEMA = cv.All(
             # de-asserted to mute the amplifier. 0 disables the power-down
             # watchdog (amp stays on for the whole session). Default 60.
             cv.Optional(_CONFIG_AMP_IDLE_TIMEOUT, default=60): cv.int_,
+            # Start volume until a sender has set one; after that the last
+            # sender volume survives reboots.
+            cv.Optional(_CONFIG_INITIAL_VOLUME, default="20%"): cv.percentage,
             cv.Optional(_CONFIG_AUDIO_CHANNEL_MODE, default="stereo"): cv.enum(AUDIO_CHANNEL_MODE_ENUM, lower=True),
             cv.Optional(_CONFIG_DSP): _DSP_SCHEMA,
             cv.Optional(_CONFIG_PAIR): _PAIR_SCHEMA,
@@ -429,6 +433,7 @@ async def _build_airplay_receiver(config):
                                 config[_CONFIG_AMP_ENABLE], config[_CONFIG_SAMPLE_RATE],
                                 config[_CONFIG_AMP_INVERTED]))
     cg.add(var.set_amp_idle_timeout(config[_CONFIG_AMP_IDLE_TIMEOUT]))
+    cg.add(var.set_initial_volume(config[_CONFIG_INITIAL_VOLUME]))
     cg.add(var.set_i2s_mclk(config[_CONFIG_I2S_MCLK]))
     # cv.enum returns the string key ("stereo"/"mono"...), so map to the
     # audio_channel_mode_t integer before the C++ setter.

@@ -100,6 +100,9 @@ airplay_receiver:
 * **amp_enable_pin** (Optional, pin): Amplifier enable/unmute line (default: unused);
 * **amp_enable_inverted** (Optional, bool): True if the amp-enable line is active-LOW (default: false);
 * **amp_idle_timeout** (Optional, int): Seconds of silence before the amp line is de-asserted. `0` keeps the amp on (default: 60);
+* **initial_volume** (Optional, percentage): Start volume until a sender has set one. Senders send a
+  volume only when the slider moves, never on connect, so after that the board keeps the last sender
+  volume across reboots (not mute) and starts there (default: 20%);
 * **sample_rate** (Optional, int): Output sample rate (default: 44100);
 * **audio_channel_mode** (Optional, string): `stereo`, `mono`, `left` or `right`. Use `left`/`right` for a stereo pair of boards (default: stereo);
 * **buffer_size** (Optional, int): Internal buffer size in bytes (default: 1000000);

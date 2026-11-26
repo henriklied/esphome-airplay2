@@ -13,8 +13,29 @@ one ordinary receiver and the two boards handle audio distribution and synchroni
 ## Status (2026-11-26)
 
 Steps 1-4 below are built as `pair:` (`components/airplay_receiver/audio/audio_peer.{h,cpp}`).
-Both pair examples and the standalone gate compile, and the host tests pass. **Nothing has run on
-hardware yet.**
+The house boards run them: `boston-x90-r` (X90 pair, garage) is the primary, playing stereo. It
+forwards stereo to `boston-x90-l` (Geneva, kitchen), the secondary. Playback, skips and session
+starts work without holes or static.
+
+Established on that hardware:
+
+- **The secondary cannot hear the sender's PTP.** Geneva received no SYNC, FOLLOW_UP or ANNOUNCE
+  all session. The X90 started receiving them the moment its own session opened, so the phone's
+  PTP reaches the session's receiver only. `clock: ptp` cannot work here, and `auto` runs on the
+  relay.
+- **The relay**, on a 3.2 ms minimum round trip, fits the primary's clock to about 80-100 us RMS
+  residual, with about 7-23 ppm between the two crystals. That is measurement noise, not a skew
+  measurement. Skew between the speakers needs one microphone hearing both, which these rooms do
+  not allow.
+- **Four faults found and fixed:**
+  - The secondary dropped a frame whose ring slot was still occupied, instead of waiting for it.
+  - The forward was unpaced. A skip's refill burst starved the primary decoder's internal RAM
+    (`DQ1 allocation drop`).
+  - The relay fitted the primary's *network* time. That time vanishes between sessions, so every
+    start re-locked the relay, lost the opening burst and started 7 ms off-grid, heard as static.
+    It now fits the primary's local clock and carries the network offset per PONG.
+  - The start volume was a hard-coded 50%. It is now the last sender volume, restored after
+    reboot, or `initial_volume`.
 
 What the build does, and where it departs from the steps:
 
@@ -41,9 +62,7 @@ What the build does, and where it departs from the steps:
 
 Still open, in order:
 
-1. Hardware verification below. The first run should A/B `clock: ptp` against `clock: relay` for
-   output skew. Whether the secondary hears the sender's PTP at all on `10.0.40.0/24` is unmeasured
-   (research section 3.5).
+1. Acoustic skew, with both speakers in one room and one microphone.
 2. CPU, internal heap and largest block with the link active, during stream start and reconnects.
    The two peer tasks take 7 KiB of internal stack on each board.
 3. The join gap. Resending the primary's queued timeline on (re)join would close it.
