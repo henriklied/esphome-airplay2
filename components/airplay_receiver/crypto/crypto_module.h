@@ -121,6 +121,14 @@ class CryptoModule {
   CryptoModule();
   ~CryptoModule();
 
+  /**
+   * Which pairing identity this instance is, before setup(): the preference
+   * slot its Ed25519 key persists in, and the deviceid it signs in
+   * pair-verify. Defaults are the board's own (0x4150, the Wi-Fi MAC); a
+   * second AirPlay identity on the same board needs its own of both.
+   */
+  void set_identity(uint32_t pref_key, const uint8_t device_mac[6]);
+
   void setup();
   void loop();
 
@@ -200,6 +208,9 @@ class CryptoModule {
   uint8_t device_secret_key_[HAP_ED25519_SECRET_KEY_SIZE]{};
   // ESPHome preference handle (created lazily in setup()).
   ESPPreferenceObject pref_keypair_;
+  uint32_t pref_key_{0x4150};  // "AP"
+  uint8_t device_mac_[6]{};
+  bool have_device_mac_{false};
 };
 
 }  // namespace airplay_receiver

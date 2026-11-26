@@ -47,6 +47,7 @@ struct TransportMetadata {
 
 /// Audio stream description handed to the engine via TRANSPORT_EVENT_AUDIO_CONFIGURED.
 struct TransportAudioConfig {
+  int identity = 0;               // AirPlayIdentity index the sender connected to
   int64_t stream_type = 96;       // 96 = UDP realtime, 103 = TCP buffered
   uint16_t data_port = 0;         // port the audio engine should listen on
   uint16_t control_port = 0;      // control (NACK/retransmit) port

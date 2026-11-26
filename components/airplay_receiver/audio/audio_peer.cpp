@@ -14,6 +14,7 @@
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include <lwip/inet.h>
 #include <lwip/sockets.h>
@@ -186,6 +187,10 @@ static portMUX_TYPE g_ring_lock = portMUX_INITIALIZER_UNLOCKED;
 static uint32_t g_flush_serial = 0;
 static uint32_t g_flush_rtp = 0;
 static TaskHandle_t g_primary_task = nullptr;
+// Whether the current session is forwarded, and which forwarded session it
+// is. A primary that is not on demand forwards everything as session 1.
+static std::atomic<bool> g_forwarding{false};
+static std::atomic<uint32_t> g_session{0};
 
 struct PrimaryStats {
   uint32_t blocks_sent;
@@ -201,7 +206,8 @@ static PrimaryStats g_primary_stats{};
 static uint8_t forward_channels() { return g_config.forward == PeerForward::STEREO ? 2 : 1; }
 
 void audio_peer_tap_pcm(uint32_t epoch, uint32_t first_rtp, const int16_t *pcm, size_t samples, uint8_t channels) {
-  if (g_role.load(std::memory_order_relaxed) != PeerRole::PRIMARY || g_ring == nullptr || pcm == nullptr ||
+  if (g_role.load(std::memory_order_relaxed) != PeerRole::PRIMARY || !g_forwarding.load(std::memory_order_relaxed) ||
+      g_ring == nullptr || pcm == nullptr ||
       samples == 0 || samples > AUDIO_PCM_BLOCK_MAX_SAMPLES || channels == 0) {
     return;
   }
@@ -255,9 +261,25 @@ void audio_peer_tap_pcm(uint32_t epoch, uint32_t first_rtp, const int16_t *pcm, 
   }
 }
 
+void audio_peer_set_forwarding(bool forwarding) {
+  if (!g_config.on_demand || g_role.load() != PeerRole::PRIMARY) {
+    return;
+  }
+  if (forwarding && !g_forwarding.load()) {
+    g_session.fetch_add(1);
+    ESP_LOGI(TAG, "peer: forwarding session %" PRIu32, g_session.load());
+  } else if (!forwarding && g_forwarding.load()) {
+    ESP_LOGI(TAG, "peer: forwarding stopped");
+  }
+  g_forwarding.store(forwarding);
+  if (g_primary_task != nullptr) {
+    xTaskNotifyGive(g_primary_task);
+  }
+}
+
 void audio_peer_tap_deferred_flush(uint32_t epoch, uint32_t flush_rtp) {
   (void) epoch;
-  if (g_role.load(std::memory_order_relaxed) != PeerRole::PRIMARY) {
+  if (g_role.load(std::memory_order_relaxed) != PeerRole::PRIMARY || !g_forwarding.load(std::memory_order_relaxed)) {
     return;
   }
   portENTER_CRITICAL(&g_ring_lock);
@@ -274,7 +296,8 @@ static bool state_equal(const peer::State &a, const peer::State &b) {
          a.flush_rtp == b.flush_rtp && a.sample_rate == b.sample_rate && a.frame_samples == b.frame_samples &&
          a.playing == b.playing && a.output_running == b.output_running && a.anchor_valid == b.anchor_valid &&
          a.domain == b.domain && a.anchor_rtp == b.anchor_rtp && a.anchor_network_ns == b.anchor_network_ns &&
-         a.playout_offset_ns == b.playout_offset_ns && a.clock_id == b.clock_id && a.volume_q15 == b.volume_q15;
+         a.playout_offset_ns == b.playout_offset_ns && a.clock_id == b.clock_id && a.volume_q15 == b.volume_q15 &&
+         a.forwarding == b.forwarding && a.session == b.session;
 }
 
 static void primary_snapshot(peer::State *state) {
@@ -287,6 +310,8 @@ static void primary_snapshot(peer::State *state) {
   state->output_running = audio_output_is_running();
   state->volume_q15 = audio_output_get_volume_q15();
   state->clock_id = state->domain == peer::AnchorDomain::PTP ? ptp_clock_get_master_clock_id() : 0;
+  state->forwarding = g_forwarding.load();
+  state->session = g_session.load();
 }
 
 // Datagram buffers, allocated by the role that needs them so a standalone
@@ -482,6 +507,10 @@ static esp_err_t start_primary() {
     ESP_LOGE(TAG, "Peer task creation failed");
     return ESP_ERR_NO_MEM;
   }
+  if (!g_config.on_demand) {
+    g_session.store(1);
+    g_forwarding.store(true);
+  }
   // Last: the taps start copying once the role reads PRIMARY.
   g_role.store(PeerRole::PRIMARY);
   return ESP_OK;
@@ -649,6 +678,16 @@ struct Mirror {
 };
 static Mirror g_mirror{};
 
+// On-demand secondary: whether the peer link owns the engine, the session it
+// yielded to a local one (not to be taken back), and the local takeover.
+static std::atomic<bool> g_active{false};
+static bool g_have_suspended = false;
+static uint32_t g_suspended_session = 0;
+static audio_peer_takeover_fn g_takeover = nullptr;
+static void *g_takeover_ctx = nullptr;
+static std::atomic<bool> g_yield_requested{false};
+static SemaphoreHandle_t g_yield_done = nullptr;
+
 struct SecondaryStats {
   uint32_t datagrams;
   uint32_t seq_lost;
@@ -788,8 +827,8 @@ static void reconcile_anchor() {
              anchor_domain_name(state.domain));
   }
 
-  const bool want = g_mirror.prepared && g_mirror.epoch_known && g_mirror.link_up && state.anchor_valid &&
-                    source != ClockSource::NONE;
+  const bool want = g_active.load() && g_mirror.prepared && g_mirror.epoch_known && g_mirror.link_up &&
+                    state.anchor_valid && source != ClockSource::NONE;
   if (!want) {
     if (g_mirror.anchor_applied) {
       audio_receiver_peer_set_anchor(false, 0, 0, 0);
@@ -809,9 +848,63 @@ static void reconcile_anchor() {
   g_mirror.applied_offset_ns = offset_ns;
 }
 
+// Forget what was applied to the engine, so the next STATE applies all of it.
+static void reset_mirror_apply() {
+  g_mirror.prepared = false;
+  g_mirror.epoch_known = false;
+  g_mirror.playing = false;
+  g_mirror.output_running = false;
+  g_mirror.volume_q15 = -1;
+  g_mirror.anchor_applied = false;
+  g_assembly.active = false;
+}
+
+static void activate() {
+  if (g_config.on_demand) {
+    ESP_LOGI(TAG, "peer: playing the primary's session %" PRIu32 "; local session stopped", g_mirror.state.session);
+    if (g_takeover != nullptr) {
+      g_takeover(g_takeover_ctx);
+    }
+  }
+  audio_receiver_peer_set_playing(false);
+  reset_mirror_apply();
+  g_active.store(true);
+}
+
+// Hand the engine back for a local session: silent, stopped and flushed.
+static void release() {
+  g_active.store(false);
+  if (g_mirror.anchor_applied) {
+    audio_receiver_peer_set_anchor(false, 0, 0, 0);
+  }
+  audio_receiver_peer_set_playing(false);
+  if (g_mirror.output_running) {
+    audio_output_stop();
+  }
+  audio_receiver_stop();
+  reset_mirror_apply();
+  ESP_LOGI(TAG, "peer: released the engine");
+}
+
+static bool want_active(const peer::State &state) {
+  if (!g_config.on_demand) {
+    return true;
+  }
+  return g_mirror.link_up && state.forwarding && !(g_have_suspended && state.session == g_suspended_session);
+}
+
 static void handle_state(const peer::State &state) {
   g_mirror.state = state;
   g_mirror.have_state = true;
+  const bool want = want_active(state);
+  if (want && !g_active.load()) {
+    activate();
+  } else if (!want && g_active.load()) {
+    release();
+  }
+  if (!g_active.load()) {
+    return;
+  }
   if (!state.engine_ready) {
     // The primary has not streamed since it booted; nothing to mirror yet.
     return;
@@ -853,6 +946,9 @@ static void handle_state(const peer::State &state) {
 }
 
 static void handle_pcm(const peer::PcmChunk &chunk, const int16_t *pcm) {
+  if (!g_active.load()) {
+    return;
+  }
   if (!g_mirror.prepared || chunk.frame_samples > g_mirror.frame_samples) {
     g_secondary_stats.not_ready++;
     return;
@@ -952,6 +1048,16 @@ static void secondary_task(void *arg) {
   int64_t last_stats_us = esp_timer_get_time();
 
   for (;;) {
+    if (g_yield_requested.load()) {
+      if (g_active.load()) {
+        release();
+      }
+      g_suspended_session = g_mirror.state.session;
+      g_have_suspended = g_mirror.have_state;
+      g_yield_requested.store(false);
+      xSemaphoreGive(g_yield_done);
+    }
+
     sockaddr_in from{};
     socklen_t from_len = sizeof(from);
     const int length = recvfrom(fd, buffer, peer::MAX_DATAGRAM, 0, reinterpret_cast<sockaddr *>(&from), &from_len);
@@ -999,6 +1105,10 @@ static void secondary_task(void *arg) {
                (long long) ((now_us - g_mirror.last_rx_us) / 1000));
       g_mirror.link_up = false;
       g_assembly.active = false;
+      // On demand, a primary gone quiet frees the board for its own sender.
+      if (g_config.on_demand && g_active.load()) {
+        release();
+      }
     }
     reconcile_anchor();
     sample_clock_diff();
@@ -1024,6 +1134,10 @@ static esp_err_t start_secondary() {
   g_relay_clock = new (clock_storage) peer::PeerClock();
   g_mirror.volume_q15 = -1;
   g_primary_ip.store(g_config.peer_ip);
+  g_yield_done = xSemaphoreCreateBinary();
+  if (g_yield_done == nullptr) {
+    return ESP_ERR_NO_MEM;
+  }
   if (xTaskCreatePinnedToCore(secondary_task, "peer_rx", DATA_TASK_STACK, nullptr, DATA_TASK_PRIORITY, nullptr,
                               PEER_CORE) != pdPASS ||
       xTaskCreatePinnedToCore(secondary_clock_task, "peer_clk", CLOCK_TASK_STACK, nullptr, CLOCK_TASK_PRIORITY,
@@ -1071,9 +1185,33 @@ esp_err_t audio_peer_start(void) {
 
 PeerRole audio_peer_role(void) { return g_role.load(std::memory_order_relaxed); }
 
+bool audio_peer_secondary_active(void) {
+  return g_role.load(std::memory_order_relaxed) == PeerRole::SECONDARY && g_active.load(std::memory_order_relaxed);
+}
+
+void audio_peer_set_takeover(audio_peer_takeover_fn takeover, void *ctx) {
+  g_takeover = takeover;
+  g_takeover_ctx = ctx;
+}
+
+// Bounded: a stuck peer task must not wedge the transport for good.
+static constexpr uint32_t YIELD_TIMEOUT_MS = 3000;
+
+void audio_peer_secondary_yield(void) {
+  if (g_role.load() != PeerRole::SECONDARY || !g_config.on_demand || g_yield_done == nullptr) {
+    return;
+  }
+  (void) xSemaphoreTake(g_yield_done, 0);
+  g_yield_requested.store(true);
+  if (xSemaphoreTake(g_yield_done, pdMS_TO_TICKS(YIELD_TIMEOUT_MS)) != pdTRUE) {
+    ESP_LOGW(TAG, "peer: no yield acknowledgement in %u ms", (unsigned) YIELD_TIMEOUT_MS);
+  }
+}
+
 void audio_peer_get_status(audio_peer_status_t *status) {
   status->role = g_role.load();
   status->link_up = g_mirror.link_up;
+  status->active = audio_peer_secondary_active();
   status->playing = g_mirror.playing;
   status->output_running = g_mirror.output_running;
   status->clock = clock_source_name(g_source.load());

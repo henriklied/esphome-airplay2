@@ -141,6 +141,8 @@ static void test_state_round_trip() {
   s.playout_offset_ns = -250000000LL;
   s.clock_id = 0xBAC6D397D0D50008ULL;
   s.volume_q15 = 16384;
+  s.forwarding = true;
+  s.session = 0xC0FFEE;
   uint8_t datagram[MAX_DATAGRAM];
   const size_t length = encode_state(datagram, sizeof(datagram), 5, 6, s);
   CHECK(length == HEADER_BYTES + STATE_FIELDS_BYTES);
@@ -154,7 +156,7 @@ static void test_state_round_trip() {
         d.frame_samples == 1024 && d.engine_ready && d.playing && !d.output_running && d.anchor_valid &&
         d.domain == AnchorDomain::LOCAL && d.anchor_rtp == 0x80000001u &&
         d.anchor_network_ns == 0x123456789ABCDEFULL && d.playout_offset_ns == -250000000LL &&
-        d.clock_id == 0xBAC6D397D0D50008ULL && d.volume_q15 == 16384);
+        d.clock_id == 0xBAC6D397D0D50008ULL && d.volume_q15 == 16384 && d.forwarding && d.session == 0xC0FFEE);
 
   // An unknown domain is rejected rather than misread.
   datagram[HEADER_BYTES + 21] = 9;

@@ -21,6 +21,7 @@
 #include <string>
 
 #include "../crypto/crypto_module.h"
+#include "rtsp_conn.h"
 #include "rtsp_events.h"
 
 namespace esphome {
@@ -46,6 +47,26 @@ class AirPlay2Transport {
    * @param device_name  user-facing device name (mDNS service instance).
    */
   void setup(CryptoModule *crypto, const std::string &device_name);
+
+  /**
+   * Start one AirPlay destination per identity, each advertised under its
+   * own name, deviceid, key and port. Only one session plays at a time; a
+   * connection to any of them supersedes the active one.
+   */
+  void setup(const AirPlayIdentity *identities, size_t count);
+
+  /// Last sender volume on identity `index`, for persisting.
+  float identity_volume_db(size_t index) const;
+
+  /**
+   * Drop every client connection without a DISCONNECTED event, and wait up
+   * to `timeout_ms` for their tasks to exit. For handing the audio engine to
+   * something else (a pair secondary taking over). True if they all exited.
+   */
+  bool disconnect_clients(uint32_t timeout_ms);
+
+  /// A sender is connected (any identity).
+  bool has_client() const;
 
   /// GET /info "supportedFormats.bufferStream" bitmask (decoder/aac_format.h
   /// bits). 0, the default, omits the key and leaves /info as it always was.

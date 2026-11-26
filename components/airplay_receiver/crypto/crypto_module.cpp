@@ -493,6 +493,12 @@ CryptoModule::~CryptoModule() {
   }
 }
 
+void CryptoModule::set_identity(uint32_t pref_key, const uint8_t device_mac[6]) {
+  this->pref_key_ = pref_key;
+  std::memcpy(this->device_mac_, device_mac, sizeof(this->device_mac_));
+  this->have_device_mac_ = true;
+}
+
 void CryptoModule::setup() {
   if (this->initialized_) {
     return;
@@ -509,7 +515,7 @@ void CryptoModule::setup() {
     uint8_t secret_key[HAP_ED25519_SECRET_KEY_SIZE];
   } kp;
 
-  this->pref_keypair_ = global_preferences->make_preference<Keypair>(0x4150);  // "AP"
+  this->pref_keypair_ = global_preferences->make_preference<Keypair>(this->pref_key_);
   bool loaded = this->pref_keypair_.load(&kp);
 
   if (!loaded) {
@@ -603,7 +609,11 @@ int CryptoModule::pair_verify_m1(HAPSession *session, const uint8_t *input, size
   }
 
   uint8_t mac[6];
-  esp_read_mac(mac, ESP_MAC_WIFI_STA);
+  if (this->have_device_mac_) {
+    std::memcpy(mac, this->device_mac_, sizeof(mac));
+  } else {
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+  }
   char device_id[18];
   std::snprintf(device_id, sizeof(device_id), "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1],
                 mac[2], mac[3], mac[4], mac[5]);

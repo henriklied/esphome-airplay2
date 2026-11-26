@@ -913,7 +913,7 @@ size_t audio_receiver_read(int16_t *buffer, size_t samples) {
   if (engine_v2_active()) {
     const int64_t now_us = esp_timer_get_time();
     int64_t network_offset_ns = 0;
-    if (audio_peer_role() == PeerRole::SECONDARY) {
+    if (audio_peer_secondary_active()) {
       // The secondary's anchors come from the primary, already published or
       // withdrawn; only the clock they are read against is chosen here.
       if (!audio_peer_secondary_offset_ns(now_us * 1000LL, &network_offset_ns)) {

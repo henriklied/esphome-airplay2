@@ -70,7 +70,8 @@ class AirPlayReceiver : public Component, public media_player::MediaPlayer {
 
   /// Stereo pair role (audio/audio_peer.h). `peer_ip` is dotted IPv4, empty
   /// for none; the enums are PeerRole, PeerForward and PeerClockMode.
-  void set_pair(int role, const char *peer_ip, int port, int forward, int clock, int delay_us);
+  void set_pair(int role, const char *peer_ip, int port, int forward, int clock, int delay_us, const char *pair_name,
+                bool standalone);
 
   // ---- output DSP (audio/audio_dsp.h) ----
   //
@@ -193,15 +194,21 @@ class AirPlayReceiver : public Component, public media_player::MediaPlayer {
   /// sockets bind.
   void start_ptp_when_network_up_();
   void start_peer_when_network_up_();
-  void restore_volume_();
-  void save_volume_if_changed_();
+  void restore_volumes_();
+  void save_volumes_if_changed_();
+  /// The peer link drives this board's audio right now (a pair secondary).
+  bool mirrors_primary_() const;
+  static void on_peer_takeover(void *ctx);
   void publish_secondary_state_();
 
   uint32_t buffer_size_{1000000};
   bool ptp_started_{false};
   float initial_volume_{0.2f};
-  ESPPreferenceObject volume_pref_;
-  float saved_volume_db_{0.0f};
+  AirPlayIdentity identities_[AIRPLAY_MAX_IDENTITIES];
+  size_t identity_count_{0};
+  ESPPreferenceObject volume_prefs_[AIRPLAY_MAX_IDENTITIES];
+  float saved_volume_db_[AIRPLAY_MAX_IDENTITIES]{};
+  std::string pair_name_;
   PeerConfig pair_config_{};
 
   bool peer_started_{false};
@@ -267,6 +274,8 @@ class AirPlayReceiver : public Component, public media_player::MediaPlayer {
 
   // AirPlay 2 pairing + audio crypto.
   CryptoModule crypto_;
+  // Pairing identity of the pair destination (primary with a pair name only).
+  CryptoModule pair_crypto_;
   // RTSP server + mDNS + control plane.
   AirPlay2Transport transport_;
 };

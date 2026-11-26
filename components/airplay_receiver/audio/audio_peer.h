@@ -69,7 +69,15 @@ struct PeerConfig {
   PeerClockMode clock = PeerClockMode::AUTO;
   /// Secondary only: added to its playout time. Positive plays later.
   int32_t delay_us = 0;
+  /// Primary: forward only while audio_peer_set_forwarding() says so (it has
+  /// a pair destination of its own). Secondary: keep its own AirPlay
+  /// destination, and play the primary's only while the primary forwards.
+  bool on_demand = false;
 };
+
+/// Secondary, on demand: stop the local AirPlay session and release the
+/// engine, before the peer link takes it. Runs on the peer task.
+typedef void (*audio_peer_takeover_fn)(void *ctx);
 
 /// Set before audio_peer_start(); ignored afterwards.
 void audio_peer_configure(const PeerConfig &config);
@@ -90,6 +98,10 @@ void audio_peer_tap_pcm(uint32_t epoch, uint32_t first_rtp, const int16_t *pcm, 
 /// The primary's timeline dropped everything from `flush_rtp` on.
 void audio_peer_tap_deferred_flush(uint32_t epoch, uint32_t flush_rtp);
 
+/// On-demand primary: forward the session that is starting (true) or not.
+/// Call before the stream starts, so its first epoch is forwarded too.
+void audio_peer_set_forwarding(bool forwarding);
+
 // ---------------------------------------------------------------------------
 // Secondary
 // ---------------------------------------------------------------------------
@@ -101,6 +113,22 @@ void audio_peer_tap_deferred_flush(uint32_t epoch, uint32_t flush_rtp);
  */
 bool audio_peer_secondary_offset_ns(int64_t local_ns, int64_t *offset_ns);
 
+/// Secondary: the peer link owns the audio engine right now. Always true for
+/// a secondary that is not on demand, once started.
+bool audio_peer_secondary_active(void);
+
+/// On-demand secondary: how to stop the local session when the primary
+/// starts forwarding.
+void audio_peer_set_takeover(audio_peer_takeover_fn takeover, void *ctx);
+
+/**
+ * On-demand secondary: a local AirPlay session is starting. Releases the
+ * engine if the peer link holds it, and stays off the primary's current
+ * session; the next one the primary forwards takes over again. Blocks until
+ * the release is done. Call from the transport event handler.
+ */
+void audio_peer_secondary_yield(void);
+
 // ---------------------------------------------------------------------------
 // Status
 // ---------------------------------------------------------------------------
@@ -108,6 +136,7 @@ bool audio_peer_secondary_offset_ns(int64_t local_ns, int64_t *offset_ns);
 typedef struct {
   PeerRole role;
   bool link_up;          // secondary: heard from the primary recently
+  bool active;           // secondary: the peer link owns the engine
   bool playing;          // secondary: mirrored play state
   bool output_running;   // secondary: mirrored output state
   const char *clock;     // secondary: "ptp", "relay" or "none"

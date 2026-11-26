@@ -77,6 +77,8 @@ _CONFIG_ROLE = "role"
 _CONFIG_PEER = "peer"
 _CONFIG_CHANNEL = "channel"
 _CONFIG_CLOCK = "clock"
+_CONFIG_STANDALONE = "standalone"
+_CONFIG_NAME = "name"
 
 # Output channel mode -> audio_channel_mode_t (audio/audio_output.h): 0=STEREO
 # 1=LEFT 2=RIGHT 3=MONO. Applied after audio_output_init() so the AuMONO
@@ -112,8 +114,8 @@ _PAIR_DEFAULT_CHANNEL = "right"
 _PAIR_DEFAULT_CLOCK = "auto"
 # Keys that mean something to one role only. Setting one on the other role is
 # a config that does not do what it reads like.
-_PAIR_PRIMARY_ONLY = (_CONFIG_CHANNEL,)
-_PAIR_SECONDARY_ONLY = (_CONFIG_CLOCK, _CONFIG_DELAY)
+_PAIR_PRIMARY_ONLY = (_CONFIG_CHANNEL, _CONFIG_NAME)
+_PAIR_SECONDARY_ONLY = (_CONFIG_CLOCK, _CONFIG_DELAY, _CONFIG_STANDALONE)
 
 
 # Output DSP biquad shapes -> airplay_dsp_filter_type_t (audio/audio_dsp.h).
@@ -324,6 +326,13 @@ _PAIR_SCHEMA = cv.All(
             cv.Optional(CONF_PORT, default=_PAIR_DEFAULT_PORT): cv.All(cv.port, cv.Range(max=65534)),
             # Primary: what the secondary plays.
             cv.Optional(_CONFIG_CHANNEL): cv.enum(PAIR_FORWARD_ENUM, lower=True),
+            # Primary: advertise the pair as a destination of its own, under
+            # this name, and forward only sessions on it. The board's own name
+            # then plays on this board alone. Absent: every session is forwarded.
+            cv.Optional(_CONFIG_NAME): cv.All(cv.string_strict, cv.Length(min=1, max=63)),
+            # Secondary: keep this board's own AirPlay destination, and play the
+            # primary's only while it forwards. Pairs with a primary `name:`.
+            cv.Optional(_CONFIG_STANDALONE): cv.boolean,
             # Secondary: which network clock to play against.
             cv.Optional(_CONFIG_CLOCK): cv.enum(PAIR_CLOCK_ENUM, lower=True),
             # Secondary: plays this much later, to line up with the primary
@@ -456,6 +465,8 @@ def _add_pair(var, pair_config) -> None:
             PAIR_FORWARD_ENUM[pair_config.get(_CONFIG_CHANNEL, _PAIR_DEFAULT_CHANNEL)],
             PAIR_CLOCK_ENUM[pair_config.get(_CONFIG_CLOCK, _PAIR_DEFAULT_CLOCK)],
             int(delay.total_microseconds) if delay is not None else 0,
+            pair_config.get(_CONFIG_NAME, ""),
+            pair_config.get(_CONFIG_STANDALONE, False),
         )
     )
 

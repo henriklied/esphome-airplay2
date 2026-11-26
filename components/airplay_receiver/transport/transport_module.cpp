@@ -11,6 +11,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <strings.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -25,6 +26,7 @@
 #include "esphome/core/log.h"
 #include "esp_err.h"
 #include "esp_mac.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -64,14 +66,18 @@ static const char *const TAG = "airplay_transport";
 // the upstream single-receiver model). Accessed from the FreeRTOS server,
 // client and event-port tasks.
 // ---------------------------------------------------------------------------
-static CryptoModule *s_crypto = nullptr;
+static AirPlayIdentity s_identities[AIRPLAY_MAX_IDENTITIES];
+static size_t s_identity_count = 0;
 
-static int server_socket = -1;
+// One listening socket per identity, all served by the one server task, so a
+// new connection on any of them supersedes the active one in a single place.
+static int server_sockets[AIRPLAY_MAX_IDENTITIES] = {-1, -1};
 static TaskHandle_t server_task_handle = nullptr;
 static volatile bool server_running = false;
 
 struct ClientSlot {
   RtspConn *conn = nullptr;
+  int identity = 0;  // index into s_identities: which destination was dialled
   TaskHandle_t task = nullptr;
   int socket = -1;
   volatile bool should_stop = false;
@@ -88,10 +94,6 @@ static int event_listen_socket = -1;
 static TaskHandle_t event_task_handle = nullptr;
 static volatile bool event_task_should_stop = false;
 
-// Device info for /info + pairing (fixed buffer — keeps ALL transport heap on
-// the airplay_* path; never a std::string).
-#define AIRPLAY_DEVICE_NAME_MAX 80
-static char s_device_name[AIRPLAY_DEVICE_NAME_MAX] = "AirPlay2";
 static uint64_t s_buffer_stream_formats = 0;
 static uint64_t s_audio_stream_formats = 0;
 
@@ -354,7 +356,7 @@ static void client_task(void *pv) {
   int slot_idx = (int)(intptr_t)pv;
   ClientSlot *slot = &clients[slot_idx];
 
-  RtspConn *conn = rtsp_conn_create(s_crypto);
+  RtspConn *conn = rtsp_conn_create(&s_identities[slot->identity]);
   if (conn == nullptr) {
     ESP_LOGE(TAG, "Failed to create connection state");
     close(slot->socket);
@@ -522,14 +524,11 @@ static void handle_get(int socket, RtspConn *conn, const RtspRequest *req, const
   (void)raw;
   (void)raw_len;
   if (strcmp(req->path, "/info") == 0) {
-    uint8_t mac[6];
-    esp_read_mac(mac, ESP_MAC_WIFI_STA);
     char device_id[18];
-    snprintf(device_id, sizeof(device_id), "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4],
-             mac[5]);
+    airplay_format_device_id(conn->identity->device_mac, device_id);
 
     uint64_t features = ((uint64_t)AIRPLAY_FEATURES_HI << 32) | AIRPLAY_FEATURES_LO;
-    const uint8_t *pk = (s_crypto != nullptr) ? s_crypto->device_public_key() : nullptr;
+    const uint8_t *pk = (conn->crypto != nullptr) ? conn->crypto->device_public_key() : nullptr;
     if (pk == nullptr) {
       static const uint8_t zero_pk[32] = {};
       pk = zero_pk;
@@ -540,9 +539,9 @@ static void handle_get(int socket, RtspConn *conn, const RtspRequest *req, const
     // being sent on the other slot. 1024 B on the 8 KiB client-task stack is
     // fine.
     uint8_t body[1024];
-    size_t body_len = bplist_build_info_response(body, sizeof(body), device_id, s_device_name, pk, 32,
+    size_t body_len = bplist_build_info_response(body, sizeof(body), device_id, conn->identity->name, pk, 32,
                                                  features, 2, s_buffer_stream_formats,
-                                                 s_audio_stream_formats);
+                                                 s_audio_stream_formats, conn->identity->pairing_id);
     if (body_len == 0) {
       ESP_LOGE(TAG, "Failed to build binary /info response");
       rtsp_send_response(socket, conn, 500, "Internal Error", req->cseq, nullptr, nullptr, 0);
@@ -568,8 +567,8 @@ static void handle_post(int socket, RtspConn *conn, const RtspRequest *req, cons
 
   if (strstr(req->path, "/pair-setup")) {
     conn->protocol_version = 2;
-    if (conn->hap_session == nullptr && s_crypto != nullptr) {
-      conn->hap_session = s_crypto->create_session();
+    if (conn->hap_session == nullptr && conn->crypto != nullptr) {
+      conn->hap_session = conn->crypto->create_session();
     }
     if (conn->hap_session == nullptr) {
       rtsp_send_response(socket, conn, 500, "Internal Error", req->cseq, nullptr, nullptr, 0);
@@ -597,18 +596,18 @@ static void handle_post(int socket, RtspConn *conn, const RtspRequest *req, cons
       if (tlv8_find(body, body_len, 0x06, &state, &state_len) && state_len == 1) {  // TLV8_STATE
         switch (state[0]) {
           case 1:
-            err = s_crypto->pair_setup_m1(conn->hap_session, body, body_len, response, response_cap, &response_len);
+            err = conn->crypto->pair_setup_m1(conn->hap_session, body, body_len, response, response_cap, &response_len);
             break;
           case 3:
-            err = s_crypto->pair_setup_m3(conn->hap_session, body, body_len, response, response_cap, &response_len);
+            err = conn->crypto->pair_setup_m3(conn->hap_session, body, body_len, response, response_cap, &response_len);
             // M4 is sent in the clear below; the channel switches to ChaCha20
             // only after it (matching upstream rtsp_handlers.c).
-            if (err == 0 && s_crypto->is_pair_setup_transient(conn->hap_session)) {
+            if (err == 0 && conn->crypto->is_pair_setup_transient(conn->hap_session)) {
               enable_encryption_after_response = true;
             }
             break;
           case 5:
-            err = s_crypto->pair_setup_m5(conn->hap_session, body, body_len, response, response_cap, &response_len);
+            err = conn->crypto->pair_setup_m5(conn->hap_session, body, body_len, response, response_cap, &response_len);
             // Successful M5 (device added) enables the encrypted control channel.
             if (err == 0) {
               conn->encrypted_mode = true;
@@ -641,8 +640,8 @@ static void handle_post(int socket, RtspConn *conn, const RtspRequest *req, cons
 
   if (strstr(req->path, "/pair-verify")) {
     conn->protocol_version = 2;
-    if (conn->hap_session == nullptr && s_crypto != nullptr) {
-      conn->hap_session = s_crypto->create_session();
+    if (conn->hap_session == nullptr && conn->crypto != nullptr) {
+      conn->hap_session = conn->crypto->create_session();
     }
     if (conn->hap_session == nullptr) {
       rtsp_send_response(socket, conn, 500, "Internal Error", req->cseq, nullptr, nullptr, 0);
@@ -663,9 +662,9 @@ static void handle_post(int socket, RtspConn *conn, const RtspRequest *req, cons
       size_t state_len = 0;
       if (tlv8_find(body, body_len, 0x06, &state, &state_len) && state_len == 1) {  // TLV8_STATE
         if (state[0] == 0x01) {
-          err = s_crypto->pair_verify_m1(conn->hap_session, body, body_len, response, response_cap, &response_len);
+          err = conn->crypto->pair_verify_m1(conn->hap_session, body, body_len, response, response_cap, &response_len);
         } else if (state[0] == 0x03) {
-          err = s_crypto->pair_verify_m3(conn->hap_session, body, body_len, response, response_cap, &response_len);
+          err = conn->crypto->pair_verify_m3(conn->hap_session, body, body_len, response, response_cap, &response_len);
           // Successful TLV8 M3 establishes the encrypted RTSP control channel.
           if (err == 0) {
             conn->encrypted_mode = true;
@@ -676,9 +675,9 @@ static void handle_post(int socket, RtspConn *conn, const RtspRequest *req, cons
         // Raw (non-TLV8) pair-verify: used for audio-key exchange, not the RTSP
         // channel. The CryptoModule tracks its internal state; we try M1 first,
         // then M3 as a fallback for the case where M1 was already consumed.
-        err = s_crypto->pair_verify_m1_raw(conn->hap_session, body, body_len, response, response_cap, &response_len);
+        err = conn->crypto->pair_verify_m1_raw(conn->hap_session, body, body_len, response, response_cap, &response_len);
         if (err != 0 || response_len == 0) {
-          err = s_crypto->pair_verify_m3_raw(conn->hap_session, body, body_len, response, response_cap, &response_len);
+          err = conn->crypto->pair_verify_m3_raw(conn->hap_session, body, body_len, response, response_cap, &response_len);
         }
       }
     }
@@ -964,9 +963,9 @@ static void handle_setup(int socket, RtspConn *conn, const RtspRequest *req, con
     // secret, else HKDF-derive the audio key. `conn->hap_session` supplies the
     // shared secret; configure_audio_encryption handles the shk path even when
     // the session is not yet established.
-    if (s_crypto != nullptr) {
+    if (conn->crypto != nullptr) {
       AudioEncrypt enc{};
-      if (s_crypto->configure_audio_encryption(conn->hap_session, ekey_encrypted, ekey_len, eiv, eiv_len,
+      if (conn->crypto->configure_audio_encryption(conn->hap_session, ekey_encrypted, ekey_len, eiv, eiv_len,
                                                shk, shk_len, &enc) == 0 &&
           enc.type == AudioEncryptType::CHACHA20_POLY1305 && enc.key_len > 0) {
         audio.has_encrypt = true;
@@ -1048,6 +1047,7 @@ static void handle_setup(int socket, RtspConn *conn, const RtspRequest *req, con
   audio.audio_buffer_size = buffered ? BUFFERED_AUDIO_BUFFER_BYTES : RTSP_AP2_REALTIME_AUDIO_BUFFER_SIZE;
 
   // Hand the fully-configured stream to the audio engine.
+  audio.identity = conn->identity->index;
   TransportEventData data{};
   data.audio = audio;
   transport_events_emit(TRANSPORT_EVENT_AUDIO_CONFIGURED, &data);
@@ -1554,12 +1554,71 @@ static void signal_old_client_stop(int old_slot) {
   }
 }
 
+static int open_listen_socket(uint16_t port) {
+  const int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  if (fd < 0) {
+    ESP_LOGE(TAG, "Failed to create socket: %d", errno);
+    return -1;
+  }
+  int opt = 1;
+  setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+  struct sockaddr_in server_addr;
+  memset(&server_addr, 0, sizeof(server_addr));
+  server_addr.sin_family = AF_INET;
+  server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+  server_addr.sin_port = htons(port);
+  if (bind(fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+    ESP_LOGE(TAG, "Failed to bind RTSP socket on %u: %d", (unsigned)port, errno);
+    close(fd);
+    return -1;
+  }
+  if (listen(fd, 5) < 0) {
+    ESP_LOGE(TAG, "Failed to listen on RTSP socket %u: %d", (unsigned)port, errno);
+    close(fd);
+    return -1;
+  }
+  return fd;
+}
+
+// Hand a freshly accepted connection to a client slot, superseding the
+// current one. Runs on the server task only, so supersedes never interleave.
+static void accept_into_slot(int new_socket, int identity) {
+  int new_slot = 1 - current_slot;
+  if (clients[new_slot].task != nullptr) {
+    clients[new_slot].should_stop = true;
+    if (clients[new_slot].socket >= 0) {
+      shutdown(clients[new_slot].socket, SHUT_RDWR);
+    }
+    int timeout = 30;
+    while (clients[new_slot].task != nullptr && timeout > 0) {
+      vTaskDelay(pdMS_TO_TICKS(100));
+      timeout--;
+    }
+    if (clients[new_slot].task != nullptr) {
+      ESP_LOGE(TAG, "Slot %d task did not exit in time", new_slot);
+      close(new_socket);
+      return;
+    }
+  }
+  signal_old_client_stop(current_slot);
+
+  clients[new_slot].socket = new_socket;
+  clients[new_slot].identity = identity;
+  clients[new_slot].should_stop = false;
+  clients[new_slot].task = nullptr;
+  BaseType_t ret = xTaskCreate(client_task, "airplay_client", RTSP_CLIENT_STACK_SIZE, (void *)(intptr_t)new_slot, 5,
+                               &clients[new_slot].task);
+  if (ret != pdPASS || clients[new_slot].task == nullptr) {
+    ESP_LOGE(TAG, "Failed to create client task");
+    close(new_socket);
+    clients[new_slot].socket = -1;
+  } else {
+    current_slot = new_slot;
+  }
+}
+
 static void server_task(void *pv) {
   (void)pv;
-
-  struct sockaddr_in server_addr;
-  struct sockaddr_in client_addr;
-  socklen_t client_addr_len = sizeof(client_addr);
 
   for (int i = 0; i < 2; i++) {
     clients[i].socket = -1;
@@ -1568,83 +1627,52 @@ static void server_task(void *pv) {
     clients[i].should_stop = false;
   }
 
-  server_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-  if (server_socket < 0) {
-    ESP_LOGE(TAG, "Failed to create socket: %d", errno);
-    server_task_handle = nullptr;
-    vTaskDelete(nullptr);
-    return;
+  for (size_t i = 0; i < s_identity_count; i++) {
+    server_sockets[i] = open_listen_socket(s_identities[i].port);
+    if (server_sockets[i] < 0) {
+      for (size_t j = 0; j < i; j++) {
+        close(server_sockets[j]);
+        server_sockets[j] = -1;
+      }
+      server_task_handle = nullptr;
+      vTaskDelete(nullptr);
+      return;
+    }
+    ESP_LOGI(TAG, "RTSP server listening on port %u ('%s')", (unsigned)s_identities[i].port, s_identities[i].name);
   }
-
-  int opt = 1;
-  setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-  memset(&server_addr, 0, sizeof(server_addr));
-  server_addr.sin_family = AF_INET;
-  server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-  server_addr.sin_port = htons(RTSP_PORT);
-
-  if (bind(server_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-    ESP_LOGE(TAG, "Failed to bind RTSP socket: %d", errno);
-    close(server_socket);
-    server_socket = -1;
-    server_task_handle = nullptr;
-    vTaskDelete(nullptr);
-    return;
-  }
-
-  if (listen(server_socket, 5) < 0) {
-    ESP_LOGE(TAG, "Failed to listen on RTSP socket: %d", errno);
-    close(server_socket);
-    server_socket = -1;
-    server_task_handle = nullptr;
-    vTaskDelete(nullptr);
-    return;
-  }
-
-  ESP_LOGI(TAG, "RTSP server listening on port %d", RTSP_PORT);
   server_running = true;
 
   while (server_running) {
-    int new_socket = accept(server_socket, (struct sockaddr *)&client_addr, &client_addr_len);
-    if (new_socket < 0) {
+    fd_set readable;
+    FD_ZERO(&readable);
+    int max_fd = -1;
+    for (size_t i = 0; i < s_identity_count; i++) {
+      if (server_sockets[i] >= 0) {
+        FD_SET(server_sockets[i], &readable);
+        max_fd = server_sockets[i] > max_fd ? server_sockets[i] : max_fd;
+      }
+    }
+    if (max_fd < 0 || select(max_fd + 1, &readable, nullptr, nullptr, nullptr) <= 0) {
       if (server_running) {
-        ESP_LOGE(TAG, "Failed to accept: %d", errno);
+        vTaskDelay(pdMS_TO_TICKS(100));
       }
       continue;
     }
-    ESP_LOGI(TAG, "New client connected");
-
-    int new_slot = 1 - current_slot;
-    if (clients[new_slot].task != nullptr) {
-      clients[new_slot].should_stop = true;
-      if (clients[new_slot].socket >= 0) {
-        shutdown(clients[new_slot].socket, SHUT_RDWR);
-      }
-      int timeout = 30;
-      while (clients[new_slot].task != nullptr && timeout > 0) {
-        vTaskDelay(pdMS_TO_TICKS(100));
-        timeout--;
-      }
-      if (clients[new_slot].task != nullptr) {
-        ESP_LOGE(TAG, "Slot %d task did not exit in time", new_slot);
-        close(new_socket);
+    for (size_t i = 0; i < s_identity_count; i++) {
+      if (server_sockets[i] < 0 || !FD_ISSET(server_sockets[i], &readable)) {
         continue;
       }
-    }
-    signal_old_client_stop(current_slot);
-
-    clients[new_slot].socket = new_socket;
-    clients[new_slot].should_stop = false;
-    clients[new_slot].task = nullptr;
-    BaseType_t ret = xTaskCreate(client_task, "airplay_client", RTSP_CLIENT_STACK_SIZE, (void *)(intptr_t)new_slot, 5,
-                                 &clients[new_slot].task);
-    if (ret != pdPASS || clients[new_slot].task == nullptr) {
-      ESP_LOGE(TAG, "Failed to create client task");
-      close(new_socket);
-      clients[new_slot].socket = -1;
-    } else {
-      current_slot = new_slot;
+      struct sockaddr_in client_addr;
+      socklen_t client_addr_len = sizeof(client_addr);
+      int new_socket = accept(server_sockets[i], (struct sockaddr *)&client_addr, &client_addr_len);
+      if (new_socket < 0) {
+        if (server_running) {
+          ESP_LOGE(TAG, "Failed to accept: %d", errno);
+        }
+        continue;
+      }
+      ESP_LOGI(TAG, "New client connected to '%s'", s_identities[i].name);
+      accept_into_slot(new_socket, (int)i);
     }
   }
 
@@ -1659,9 +1687,11 @@ static void server_task(void *pv) {
   }
   vTaskDelay(pdMS_TO_TICKS(500));
 
-  if (server_socket >= 0) {
-    close(server_socket);
-    server_socket = -1;
+  for (size_t i = 0; i < s_identity_count; i++) {
+    if (server_sockets[i] >= 0) {
+      close(server_sockets[i]);
+      server_sockets[i] = -1;
+    }
   }
   server_task_handle = nullptr;
   vTaskDelete(nullptr);
@@ -1678,19 +1708,27 @@ void AirPlay2Transport::set_buffer_stream_formats(uint64_t formats) { s_buffer_s
 void AirPlay2Transport::set_audio_stream_formats(uint64_t formats) { s_audio_stream_formats = formats; }
 
 void AirPlay2Transport::setup(CryptoModule *crypto, const std::string &device_name) {
-  if (this->started_) {
+  AirPlayIdentity identity;
+  snprintf(identity.name, sizeof(identity.name), "%s", device_name.c_str());
+  esp_read_mac(identity.device_mac, ESP_MAC_WIFI_STA);
+  identity.crypto = crypto;
+  this->setup(&identity, 1);
+}
+
+void AirPlay2Transport::setup(const AirPlayIdentity *identities, size_t count) {
+  if (this->started_ || count == 0) {
     return;
   }
-  s_crypto = crypto;
-  snprintf(s_device_name, sizeof(s_device_name), "%s", device_name.c_str());
-
-  if (crypto != nullptr) {
+  s_identity_count = count < AIRPLAY_MAX_IDENTITIES ? count : AIRPLAY_MAX_IDENTITIES;
+  for (size_t i = 0; i < s_identity_count; i++) {
+    s_identities[i] = identities[i];
+    s_identities[i].index = (int)i;
+    AirPlayIdentity &identity = s_identities[i];
     // Ensure the device identity is loaded/generated before advertising pk.
-    crypto->device_public_key();
+    const uint8_t *pk = identity.crypto != nullptr ? identity.crypto->device_public_key() : nullptr;
+    mdns_airplay_init(identity.name, pk, pk != nullptr ? 32 : 0, identity.device_mac, identity.port,
+                      identity.pairing_id);
   }
-
-  mdns_airplay_init(device_name.c_str(), crypto != nullptr ? crypto->device_public_key() : nullptr,
-                    crypto != nullptr ? 32 : 0);
 
   BaseType_t ret = xTaskCreate(server_task, "airplay_server", RTSP_SERVER_STACK_SIZE, nullptr, 5, &server_task_handle);
   if (ret != pdPASS || server_task_handle == nullptr) {
@@ -1698,8 +1736,28 @@ void AirPlay2Transport::setup(CryptoModule *crypto, const std::string &device_na
     return;
   }
   this->started_ = true;
-  ESP_LOGI(TAG, "AirPlay 2 transport started on port %d", RTSP_PORT);
+  ESP_LOGI(TAG, "AirPlay 2 transport started, %u destination(s)", (unsigned)s_identity_count);
 }
+
+float AirPlay2Transport::identity_volume_db(size_t index) const {
+  return index < s_identity_count ? s_identities[index].volume_db : AIRPLAY_DEFAULT_VOLUME_DB;
+}
+
+bool AirPlay2Transport::disconnect_clients(uint32_t timeout_ms) {
+  // Marked superseded, so their cleanup emits no DISCONNECTED: the caller
+  // takes the audio engine over itself and must not have it stopped under it.
+  for (int i = 0; i < 2; i++) {
+    signal_old_client_stop(i);
+  }
+  const int64_t deadline_us = esp_timer_get_time() + (int64_t)timeout_ms * 1000;
+  while ((clients[0].task != nullptr || clients[1].task != nullptr) && esp_timer_get_time() < deadline_us) {
+    vTaskDelay(pdMS_TO_TICKS(20));
+  }
+  stop_event_port_task();
+  return clients[0].task == nullptr && clients[1].task == nullptr;
+}
+
+bool AirPlay2Transport::has_client() const { return clients[0].task != nullptr || clients[1].task != nullptr; }
 
 void AirPlay2Transport::loop() {
   // All transport work lives in the RTSP tasks; nothing to poll here yet.
@@ -1710,10 +1768,12 @@ void AirPlay2Transport::stop() {
     return;
   }
   server_running = false;
-  if (server_socket >= 0) {
-    shutdown(server_socket, SHUT_RDWR);
-    close(server_socket);
-    server_socket = -1;
+  for (size_t i = 0; i < s_identity_count; i++) {
+    if (server_sockets[i] >= 0) {
+      shutdown(server_sockets[i], SHUT_RDWR);
+      close(server_sockets[i]);
+      server_sockets[i] = -1;
+    }
   }
   stop_event_port_task();
   int timeout = 40;

@@ -1,6 +1,8 @@
 // airplay_receiver RTSP connection state (port of main/rtsp/rtsp_conn.c).
 #include "rtsp_conn.h"
 
+#include <cstdio>
+
 #include "../allocator.h"
 #include "rtsp_events.h"
 #include "socket_utils.h"
@@ -25,20 +27,26 @@ static int32_t db_to_q15(float volume_db) {
   return static_cast<int32_t>(curved * 32768.0f);
 }
 
-RtspConn *rtsp_conn_create(CryptoModule *crypto) {
+void airplay_format_device_id(const uint8_t mac[6], char out[18]) {
+  snprintf(out, 18, "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+}
+
+RtspConn *rtsp_conn_create(AirPlayIdentity *identity) {
   RtspConn *conn = static_cast<RtspConn *>(airplay_calloc(1, sizeof(RtspConn), false));
   if (conn == nullptr) {
     return nullptr;
   }
 
+  CryptoModule *crypto = identity->crypto;
+  conn->identity = identity;
   conn->crypto = crypto;
-  // Start from the last sender volume (AIRPLAY_DEFAULT_VOLUME_DB until the
-  // first one after boot) and publish it immediately. The audio engine's gain
+  // Start from this identity's last sender volume (restored at boot, see
+  // AirPlayReceiver::restore_volumes_()) and publish it immediately. The audio engine's gain
   // is unity until something sets it, and clients send SET_PARAMETER volume
   // only *after* the stream is already running -- so without this the first
   // moments of a connection play at full scale. A fixed default instead
   // jumped the level on every connection, a sender's probe included.
-  conn->volume_db = transport_volume_db();
+  conn->volume_db = identity->volume_db;
   conn->volume_q15 = db_to_q15(conn->volume_db);
   transport_set_volume_state(conn->volume_db, conn->volume_q15);
   transport_events_emit(TRANSPORT_EVENT_VOLUME, nullptr);
@@ -80,12 +88,11 @@ void rtsp_conn_set_volume(RtspConn *conn, float volume_db) {
   ESP_LOGI(TAG, "Sender volume %.2f dB", volume_db);
   conn->volume_db = volume_db;
   conn->volume_q15 = db_to_q15(volume_db);
+  if (conn->identity != nullptr) {
+    conn->identity->volume_db = volume_db;
+  }
   transport_set_volume_state(conn->volume_db, conn->volume_q15);
   transport_events_emit(TRANSPORT_EVENT_VOLUME, nullptr);
-}
-
-void rtsp_conn_set_start_volume(float volume_db) {
-  transport_set_volume_state(volume_db, db_to_q15(volume_db));
 }
 
 int32_t rtsp_conn_get_volume_q15(RtspConn *conn) {

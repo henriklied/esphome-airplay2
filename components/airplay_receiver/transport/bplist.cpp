@@ -565,7 +565,8 @@ size_t bplist_build_info_response(uint8_t *out, size_t capacity,
                                   size_t public_key_len, uint64_t features,
                                   int64_t protocol_version,
                                   uint64_t buffer_stream_formats,
-                                  uint64_t audio_stream_formats) {
+                                  uint64_t audio_stream_formats,
+                                  const char *pairing_id) {
   if (!out || !device_id || !device_name || !public_key ||
       public_key_len == 0 || capacity < 512) {
     return 0;
@@ -661,8 +662,7 @@ size_t bplist_build_info_response(uint8_t *out, size_t capacity,
     return 0;
   }
   ADD_OFFSET(); // 17: pairing identifier
-  if (!bplist_write_ascii_string(out, capacity, &pos,
-                                 "00000000-0000-0000-0000-000000000000")) {
+  if (!bplist_write_ascii_string(out, capacity, &pos, pairing_id)) {
     return 0;
   }
   ADD_OFFSET(); // 18: "name"

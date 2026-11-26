@@ -31,7 +31,7 @@ namespace airplay_receiver {
 namespace peer {
 
 static constexpr uint32_t MAGIC = 0x52505041u;  // "APPR" read little-endian
-static constexpr uint8_t VERSION = 2;
+static constexpr uint8_t VERSION = 3;
 static constexpr uint16_t DEFAULT_PORT = 7011;
 
 // Keeps every datagram under a 1500-byte Ethernet/Wi-Fi MTU after IPv4 (20)
@@ -91,8 +91,14 @@ struct State {
   int64_t playout_offset_ns;
   uint64_t clock_id;
   int32_t volume_q15;
+  // The primary is forwarding this session. A primary with a pair
+  // destination of its own forwards only sessions on that destination.
+  bool forwarding;
+  // Bumped each time forwarding starts: a secondary that yielded to a local
+  // session waits for the next one rather than snatching this one back.
+  uint32_t session;
 };
-static constexpr size_t STATE_FIELDS_BYTES = 4 * 5 + 4 + 1 + 4 + 8 + 8 + 8 + 4;
+static constexpr size_t STATE_FIELDS_BYTES = 4 * 5 + 4 + 1 + 4 + 8 + 8 + 8 + 4 + 4;
 
 struct Ping {
   int64_t t1_local_ns;  // secondary's local time at send
@@ -315,7 +321,7 @@ inline size_t encode_state(uint8_t *buffer, size_t capacity, uint32_t boot_id, u
   w.u32(s.sample_rate);
   w.u32(s.frame_samples);
   const uint8_t flags = (s.engine_ready ? 1 : 0) | (s.playing ? 2 : 0) | (s.output_running ? 4 : 0) |
-                        (s.anchor_valid ? 8 : 0);
+                        (s.anchor_valid ? 8 : 0) | (s.forwarding ? 16 : 0);
   w.u8(flags);
   w.u8((uint8_t) s.domain);
   w.u16(0);  // reserved
@@ -325,6 +331,7 @@ inline size_t encode_state(uint8_t *buffer, size_t capacity, uint32_t boot_id, u
   w.i64(s.playout_offset_ns);
   w.u64(s.clock_id);
   w.i32(s.volume_q15);
+  w.u32(s.session);
   return w.ok() ? w.size() : 0;
 }
 
@@ -339,6 +346,7 @@ inline bool decode_state(Reader &r, State *s) {
   s->playing = (flags & 2) != 0;
   s->output_running = (flags & 4) != 0;
   s->anchor_valid = (flags & 8) != 0;
+  s->forwarding = (flags & 16) != 0;
   const uint8_t domain = r.u8();
   (void) r.u16();
   (void) r.u8();
@@ -347,6 +355,7 @@ inline bool decode_state(Reader &r, State *s) {
   s->playout_offset_ns = r.i64();
   s->clock_id = r.u64();
   s->volume_q15 = r.i32();
+  s->session = r.u32();
   if (domain > (uint8_t) AnchorDomain::LOCAL) {
     return false;
   }

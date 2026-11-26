@@ -18,11 +18,20 @@
 
 #include "esp_heap_caps.h"
 #include <lwip/inet.h>
+#include "esp_mac.h"
 
 namespace esphome {
 namespace airplay_receiver {
 
 static const char *const TAG = "airplay_receiver";
+
+// The board's own destination answers on 7000, a pair destination on 7001.
+static constexpr uint16_t RTSP_BASE_PORT = 7000;
+static constexpr size_t PAIR_IDENTITY_INDEX = 1;
+static constexpr uint8_t LOCALLY_ADMINISTERED_BIT = 0x02;
+// The board's own pairing key is 0x4150 ("AP"); the pair destination's next.
+static constexpr uint32_t PAIR_KEYPAIR_PREF_KEY = 0x4151;
+static constexpr uint32_t TAKEOVER_TIMEOUT_MS = 3000;
 
 void AirPlayReceiver::setup() {
   // The entity name (config `name:`, from the media_player schema) is the user
@@ -89,35 +98,59 @@ void AirPlayReceiver::setup() {
   audio_receiver_set_crypto_module(&this->crypto_);
   audio_peer_configure(this->pair_config_);
 
-  this->restore_volume_();
-
-  if (this->pair_config_.role == PeerRole::SECONDARY) {
+  if (this->pair_config_.role == PeerRole::SECONDARY && !this->pair_config_.on_demand) {
     // A secondary is not an AirPlay destination: no advertisement, no RTSP.
     // Everything it plays arrives from the primary over the peer link.
     ESP_LOGI(TAG, "Pair secondary: AirPlay discovery and RTSP disabled");
   } else {
+    // One identity is this board as itself. A pair primary with a pair name
+    // adds a second, played on both boards: its own deviceid (the Wi-Fi MAC
+    // with the locally-administered bit flipped), pairing key and port.
+    this->identity_count_ = 0;
+    AirPlayIdentity &own = this->identities_[this->identity_count_++];
+    snprintf(own.name, sizeof(own.name), "%s", device_name.c_str());
+    esp_read_mac(own.device_mac, ESP_MAC_WIFI_STA);
+    own.port = RTSP_BASE_PORT;
+    own.crypto = &this->crypto_;
+    if (this->pair_config_.role == PeerRole::PRIMARY && this->pair_config_.on_demand) {
+      AirPlayIdentity &pair = this->identities_[this->identity_count_++];
+      snprintf(pair.name, sizeof(pair.name), "%s", this->pair_name_.c_str());
+      std::memcpy(pair.device_mac, own.device_mac, sizeof(pair.device_mac));
+      pair.device_mac[0] ^= LOCALLY_ADMINISTERED_BIT;
+      snprintf(pair.pairing_id, sizeof(pair.pairing_id), "00000000-0000-0000-0000-%02X%02X%02X%02X%02X%02X",
+               pair.device_mac[0], pair.device_mac[1], pair.device_mac[2], pair.device_mac[3], pair.device_mac[4],
+               pair.device_mac[5]);
+      pair.port = RTSP_BASE_PORT + 1;
+      this->pair_crypto_.set_identity(PAIR_KEYPAIR_PREF_KEY, pair.device_mac);
+      this->pair_crypto_.setup();
+      pair.crypto = &this->pair_crypto_;
+    }
+    this->restore_volumes_();
+    if (this->pair_config_.role == PeerRole::SECONDARY) {
+      audio_peer_set_takeover(&AirPlayReceiver::on_peer_takeover, this);
+    }
     // Start the _airplay._tcp advertisement + RTSP server and hook the audio
     // engine up to the transport events. At AFTER_CONNECTION the network stack
     // and ESPHome's mDNS are already initialized.
-    this->transport_.setup(&this->crypto_, device_name);
+    this->transport_.setup(this->identities_, this->identity_count_);
     this->transport_.register_event_callback(&AirPlayReceiver::on_transport_event, this);
   }
 
   // Reflect the initial transport state to Home Assistant.
   this->audio_ready_ = true;
   this->state = media_player::MEDIA_PLAYER_STATE_IDLE;
-  this->volume = (this->saved_volume_db_ - AIRPLAY_MIN_VOLUME_DB) / -AIRPLAY_MIN_VOLUME_DB;
+  this->volume = (this->identities_[0].volume_db - AIRPLAY_MIN_VOLUME_DB) / -AIRPLAY_MIN_VOLUME_DB;
   this->publish_state();
 }
 
 void AirPlayReceiver::loop() {
   this->start_ptp_when_network_up_();
   this->start_peer_when_network_up_();
-  if (this->pair_config_.role == PeerRole::SECONDARY) {
+  if (this->mirrors_primary_()) {
     this->publish_secondary_state_();
   } else {
     this->transport_.loop();
-    this->save_volume_if_changed_();
+    this->save_volumes_if_changed_();
   }
   // The loudness shelf follows the volume; its redesign belongs here, off the
   // RTSP task that reports the volume and the audio task that plays it.
@@ -164,30 +197,54 @@ void AirPlayReceiver::start_ptp_when_network_up_() {
 
 // Senders do not send a volume when they connect, only when the slider moves,
 // so whatever the board starts at plays until then. Start where the last
-// session left off.
-static constexpr uint32_t VOLUME_PREF_KEY = 0x41505631;  // "APV1"
+// session on that destination left off; one key per identity.
+static constexpr uint32_t VOLUME_PREF_KEY = 0x41505631;  // "APV1", +index
 
-void AirPlayReceiver::restore_volume_() {
-  this->volume_pref_ = global_preferences->make_preference<float>(VOLUME_PREF_KEY);
-  float volume_db = 0.0f;
-  if (!this->volume_pref_.load(&volume_db) || !(volume_db > AIRPLAY_MIN_VOLUME_DB && volume_db <= 0.0f)) {
-    volume_db = AIRPLAY_MIN_VOLUME_DB * (1.0f - this->initial_volume_);
+static bool volume_is_keepable(float volume_db) { return volume_db > AIRPLAY_MIN_VOLUME_DB && volume_db <= 0.0f; }
+
+void AirPlayReceiver::restore_volumes_() {
+  for (size_t i = 0; i < this->identity_count_; i++) {
+    this->volume_prefs_[i] = global_preferences->make_preference<float>(VOLUME_PREF_KEY + i);
+    float volume_db = 0.0f;
+    if (!this->volume_prefs_[i].load(&volume_db) || !volume_is_keepable(volume_db)) {
+      volume_db = AIRPLAY_MIN_VOLUME_DB * (1.0f - this->initial_volume_);
+    }
+    this->identities_[i].volume_db = volume_db;
+    this->saved_volume_db_[i] = volume_db;
+    ESP_LOGI(TAG, "'%s' start volume %.1f dB", this->identities_[i].name, volume_db);
   }
-  this->saved_volume_db_ = volume_db;
-  rtsp_conn_set_start_volume(volume_db);
-  ESP_LOGI(TAG, "Start volume %.1f dB", volume_db);
 }
 
 // ESPHome batches preference writes (flash_write_interval), so a slider sweep
 // costs one flash write, not one per step. Mute is not kept: a muted session
 // should not make the next one start silent.
-void AirPlayReceiver::save_volume_if_changed_() {
-  const float volume_db = transport_volume_db();
-  if (volume_db == this->saved_volume_db_ || !(volume_db > AIRPLAY_MIN_VOLUME_DB && volume_db <= 0.0f)) {
-    return;
+void AirPlayReceiver::save_volumes_if_changed_() {
+  for (size_t i = 0; i < this->identity_count_; i++) {
+    const float volume_db = this->transport_.identity_volume_db(i);
+    if (volume_db == this->saved_volume_db_[i] || !volume_is_keepable(volume_db)) {
+      continue;
+    }
+    this->saved_volume_db_[i] = volume_db;
+    this->volume_prefs_[i].save(&volume_db);
   }
-  this->saved_volume_db_ = volume_db;
-  this->volume_pref_.save(&volume_db);
+}
+
+bool AirPlayReceiver::mirrors_primary_() const {
+  return this->pair_config_.role == PeerRole::SECONDARY &&
+         (!this->pair_config_.on_demand || audio_peer_secondary_active());
+}
+
+// The primary started forwarding a session: whatever this board plays for its
+// own sender stops, without a DISCONNECTED that would stop the engine under
+// the peer link. Runs on the peer task.
+void AirPlayReceiver::on_peer_takeover(void *ctx) {
+  auto *self = static_cast<AirPlayReceiver *>(ctx);
+  if (self->transport_.has_client() && !self->transport_.disconnect_clients(TAKEOVER_TIMEOUT_MS)) {
+    ESP_LOGW(TAG, "Local AirPlay session did not stop within %u ms", (unsigned) TAKEOVER_TIMEOUT_MS);
+  }
+  audio_receiver_stop();
+  audio_output_stop();
+  self->set_roaming_suppressed_(false);
 }
 
 void AirPlayReceiver::start_peer_when_network_up_() {
@@ -203,7 +260,8 @@ void AirPlayReceiver::start_peer_when_network_up_() {
   }
 }
 
-void AirPlayReceiver::set_pair(int role, const char *peer_ip, int port, int forward, int clock, int delay_us) {
+void AirPlayReceiver::set_pair(int role, const char *peer_ip, int port, int forward, int clock, int delay_us,
+                               const char *pair_name, bool standalone) {
   PeerConfig config;
   config.role = static_cast<PeerRole>(role);
   config.peer_ip = (peer_ip != nullptr && *peer_ip != '\0') ? inet_addr(peer_ip) : 0;
@@ -211,6 +269,8 @@ void AirPlayReceiver::set_pair(int role, const char *peer_ip, int port, int forw
   config.forward = static_cast<PeerForward>(forward);
   config.clock = static_cast<PeerClockMode>(clock);
   config.delay_us = delay_us;
+  this->pair_name_ = pair_name != nullptr ? pair_name : "";
+  config.on_demand = config.role == PeerRole::PRIMARY ? !this->pair_name_.empty() : standalone;
   this->pair_config_ = config;
 }
 
@@ -548,7 +608,7 @@ media_player::MediaPlayerTraits AirPlayReceiver::get_traits() {
 }
 
 void AirPlayReceiver::control(const media_player::MediaPlayerCall &call) {
-  if (this->pair_config_.role == PeerRole::SECONDARY) {
+  if (this->mirrors_primary_()) {
     // Volume, play and pause follow the primary; a local change would only be
     // overwritten by the next one, or leave the pair at two volumes.
     ESP_LOGW(TAG, "Pair secondary ignores media_player commands: control the primary");
@@ -652,6 +712,15 @@ void AirPlayReceiver::on_transport_event(TransportEvent event, const TransportEv
 }
 
 void AirPlayReceiver::handle_transport_event(TransportEvent event, const TransportEventData *data) {
+  if (this->pair_config_.role == PeerRole::SECONDARY) {
+    // A local session starting takes the engine back from the peer link; any
+    // other event while the link holds it belongs to a session it replaced.
+    if (event == TRANSPORT_EVENT_AUDIO_CONFIGURED || event == TRANSPORT_EVENT_PLAYING) {
+      audio_peer_secondary_yield();
+    } else if (audio_peer_secondary_active()) {
+      return;
+    }
+  }
   switch (event) {
     case TRANSPORT_EVENT_AUDIO_CONFIGURED: {
       if (data == nullptr) {
@@ -699,6 +768,8 @@ void AirPlayReceiver::handle_transport_event(TransportEvent event, const Transpo
       // engine keeps retransmit_enabled false and send_resend_request() returns
       // early, so every lost RTP packet is concealed instead of re-requested.
       audio_receiver_set_client_control(data->audio.client_ip, data->audio.client_control_port);
+      // Before the stream starts, so its first epoch reaches the secondary.
+      audio_peer_set_forwarding(data->audio.identity == PAIR_IDENTITY_INDEX);
       esp_err_t err = audio_receiver_start_stream(data->audio.data_port, data->audio.control_port, tcp_port);
       ESP_LOGI(TAG, "audio: start_stream type=%lld data=%u ctrl=%u tcp=%u -> %s", (long long) data->audio.stream_type,
                data->audio.data_port, data->audio.control_port, tcp_port, esp_err_to_name(err));
@@ -730,6 +801,7 @@ void AirPlayReceiver::handle_transport_event(TransportEvent event, const Transpo
       break;
     case TRANSPORT_EVENT_DISCONNECTED:
       ESP_LOGI(TAG, "audio: DISCONNECTED");
+      audio_peer_set_forwarding(false);
       audio_receiver_stop();
       audio_output_stop();
       this->set_roaming_suppressed_(false);

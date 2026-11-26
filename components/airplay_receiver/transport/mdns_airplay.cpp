@@ -15,7 +15,6 @@
 #include <cstdio>
 #include <cstring>
 
-#include "esp_mac.h"
 #include "esphome/core/log.h"
 #include "mdns.h"
 
@@ -33,9 +32,9 @@ static const char *const TAG = "airplay_mdns";
 #define AIRPLAY_PROTOCOL_VERSION "2"
 #define AIRPLAY_SOURCE_VERSION "377.40.00"
 
-void mdns_airplay_init(const char *device_name, const uint8_t *public_key, size_t public_key_len) {
-  uint8_t mac[6];
-  esp_read_mac(mac, ESP_MAC_WIFI_STA);
+void mdns_airplay_init(const char *device_name, const uint8_t *public_key, size_t public_key_len,
+                       const uint8_t device_mac[6], uint16_t port, const char *pairing_id) {
+  const uint8_t *mac = device_mac;
 
   char device_id[18];
   snprintf(device_id, sizeof(device_id), "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3],
@@ -62,17 +61,18 @@ void mdns_airplay_init(const char *device_name, const uint8_t *public_key, size_
       {"flags", AIRPLAY_FLAGS},
       {"model", AIRPLAY_MODEL},
       {"pk", pk_str},
-      {"pi", "00000000-0000-0000-0000-000000000000"},
+      {"pi", pairing_id},
       {"srcvers", AIRPLAY_SOURCE_VERSION},
       {"vv", AIRPLAY_PROTOCOL_VERSION},
       {"acl", "0"},
   };
-  esp_err_t err_svc = mdns_service_add(service_name, "_airplay", "_tcp", 7000, airplay_txt,
+  esp_err_t err_svc = mdns_service_add(service_name, "_airplay", "_tcp", port, airplay_txt,
                                        sizeof(airplay_txt) / sizeof(airplay_txt[0]));
   if (err_svc != ESP_OK) {
     ESP_LOGW(TAG, "Failed to add _airplay._tcp service: %s", esp_err_to_name(err_svc));
   } else {
-    ESP_LOGI(TAG, "Advertised _airplay._tcp on port 7000 (deviceid=%s, ft=%s)", device_id, features_str);
+    ESP_LOGI(TAG, "Advertised _airplay._tcp '%s' on port %u (deviceid=%s, ft=%s)", service_name, (unsigned) port,
+             device_id, features_str);
   }
 
   // _raop._tcp — what Apple's picker keys off as the audio destination.
@@ -108,12 +108,13 @@ void mdns_airplay_init(const char *device_name, const uint8_t *public_key, size_
       {"vs", AIRPLAY_SOURCE_VERSION},
       {"vv", AIRPLAY_PROTOCOL_VERSION},
   };
-  esp_err_t err_raop = mdns_service_add(raop_service_name, "_raop", "_tcp", 7000, raop_txt,
+  esp_err_t err_raop = mdns_service_add(raop_service_name, "_raop", "_tcp", port, raop_txt,
                                         sizeof(raop_txt) / sizeof(raop_txt[0]));
   if (err_raop != ESP_OK) {
     ESP_LOGW(TAG, "Failed to add _raop._tcp service: %s", esp_err_to_name(err_raop));
   } else {
-    ESP_LOGI(TAG, "Advertised _raop._tcp '%s' on port 7000 (et=0,1,3,5 cn=0,1,2,3 vv=2)", raop_service_name);
+    ESP_LOGI(TAG, "Advertised _raop._tcp '%s' on port %u (et=0,1,3,5 cn=0,1,2,3 vv=2)", raop_service_name,
+             (unsigned) port);
   }
 }
 

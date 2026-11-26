@@ -29,8 +29,11 @@ namespace airplay_receiver {
  * @param public_key   Ed25519 device long-term public key (32 bytes) from the
  *                     CryptoModule — advertised as the "pk" TXT record.
  * @param public_key_len  length of the public key.
+ * @param device_mac  advertised deviceid; also prefixes the _raop instance name.
+ * @param port        this identity's RTSP port.
  */
-void mdns_airplay_init(const char *device_name, const uint8_t *public_key, size_t public_key_len);
+void mdns_airplay_init(const char *device_name, const uint8_t *public_key, size_t public_key_len,
+                       const uint8_t device_mac[6], uint16_t port, const char *pairing_id);
 
 }  // namespace airplay_receiver
 }  // namespace esphome
