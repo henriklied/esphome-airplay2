@@ -1,13 +1,13 @@
 #pragma once
-// Stereo-pair relayed clock: the secondary's estimate of the primary's
-// network time, from PING/PONG exchanges over the peer link.
+// Stereo-pair relayed clock: the secondary's estimate of the primary's local
+// clock, from PING/PONG exchanges over the peer link. The primary's network
+// offset rides on each PONG separately (audio_peer.cpp).
 //
 // Header-only and free of ESP-IDF includes so tests/host can drive it with a
 // simulated link.
 //
 // Each exchange gives the four NTP timestamps: t1/t4 on the secondary's local
-// clock, t2/t3 on the primary's network clock (the same local -> network
-// mapping its own playback uses). offset = ((t2 - t1) + (t3 - t4)) / 2 is
+// clock, t2/t3 on the primary's. offset = ((t2 - t1) + (t3 - t4)) / 2 is
 // exact for a symmetric path; asymmetry shows as error of half the
 // difference, and Wi-Fi queueing makes that difference large on a slow
 // exchange. So only exchanges close to the recent minimum round trip are
@@ -56,8 +56,8 @@ class PeerClock {
    * Feed one exchange.
    *
    * @param t1_local_ns   secondary local time at PING send
-   * @param t2_network_ns primary network time at PING receipt
-   * @param t3_network_ns primary network time at PONG send
+   * @param t2_network_ns primary time at PING receipt
+   * @param t3_network_ns primary time at PONG send
    * @param t4_local_ns   secondary local time at PONG receipt
    * @return true if the exchange was kept
    */
@@ -110,7 +110,7 @@ class PeerClock {
 
   bool locked() const { return this->fit_count_ >= LOCK_SAMPLES; }
 
-  /// network = local + offset, at local time `local_ns`. False until locked.
+  /// remote = local + offset, at local time `local_ns`. False until locked.
   bool offset_at(int64_t local_ns, int64_t *offset_ns) const {
     if (!this->locked()) {
       return false;

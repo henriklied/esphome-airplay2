@@ -423,10 +423,6 @@ static void primary_clock_task(void *arg) {
   uint8_t *buffer = g_clock_rx_buffer;
   uint8_t *reply = g_clock_tx_buffer;
   uint32_t seq = 0;
-  uint32_t clock_gen = 0;
-  peer::AnchorDomain last_kind = peer::AnchorDomain::NONE;
-  uint64_t last_master = 0;
-  bool last_valid = false;
 
   for (;;) {
     sockaddr_in from{};
@@ -446,21 +442,12 @@ static void primary_clock_task(void *arg) {
 
     int64_t offset_ns = 0;
     peer::AnchorDomain kind = peer::AnchorDomain::NONE;
-    const bool valid = audio_receiver_peer_network_offset_ns(&offset_ns, &kind);
-    const uint64_t master = kind == peer::AnchorDomain::PTP ? ptp_clock_get_master_clock_id() : 0;
-    if (valid != last_valid || kind != last_kind || master != last_master) {
-      clock_gen++;
-      last_valid = valid;
-      last_kind = kind;
-      last_master = master;
-    }
-
     peer::Pong pong{};
     pong.t1_local_ns = ping.t1_local_ns;
-    pong.t2_network_ns = t2_local_ns + offset_ns;
-    pong.clock_gen = clock_gen;
-    pong.network_valid = valid;
-    pong.t3_network_ns = local_now_ns() + offset_ns;
+    pong.t2_primary_ns = t2_local_ns;
+    pong.network_valid = audio_receiver_peer_network_offset_ns(&offset_ns, &kind);
+    pong.network_offset_ns = offset_ns;
+    pong.t3_primary_ns = local_now_ns();
     const size_t reply_length = peer::encode_pong(reply, peer::MAX_DATAGRAM, g_boot_id, seq++, pong);
     (void) sendto(fd, reply, reply_length, 0, reinterpret_cast<sockaddr *>(&from), from_len);
     g_primary_stats.pings++;
@@ -505,7 +492,10 @@ static esp_err_t start_primary() {
 // ===========================================================================
 
 static portMUX_TYPE g_clock_lock = portMUX_INITIALIZER_UNLOCKED;
-static peer::PeerClock::Line g_relay_line{};
+static peer::PeerClock::Line g_relay_line{};  // local -> primary local
+// The primary's local -> network offset, from the latest PONG.
+static bool g_relay_network_valid = false;
+static int64_t g_relay_network_offset_ns = 0;
 static std::atomic<ClockSource> g_source{ClockSource::NONE};
 // The primary's address, from config or learned from its datagrams.
 static std::atomic<uint32_t> g_primary_ip{0};
@@ -523,6 +513,21 @@ struct RelayStats {
 };
 static RelayStats g_relay_stats{};
 
+// local -> primary network: the fitted line to the primary's local clock,
+// plus the primary's own offset from that to its network clock.
+static bool relay_offset_ns(int64_t local_ns, int64_t *offset_ns) {
+  portENTER_CRITICAL(&g_clock_lock);
+  const peer::PeerClock::Line line = g_relay_line;
+  const bool network_valid = g_relay_network_valid;
+  const int64_t network_offset_ns = g_relay_network_offset_ns;
+  portEXIT_CRITICAL(&g_clock_lock);
+  if (!line.valid || !network_valid) {
+    return false;
+  }
+  *offset_ns = peer::PeerClock::offset_on(line, local_ns) + network_offset_ns;
+  return true;
+}
+
 bool audio_peer_secondary_offset_ns(int64_t local_ns, int64_t *offset_ns) {
   switch (g_source.load(std::memory_order_relaxed)) {
     case ClockSource::PTP:
@@ -531,26 +536,16 @@ bool audio_peer_secondary_offset_ns(int64_t local_ns, int64_t *offset_ns) {
       }
       *offset_ns = ptp_clock_get_offset_ns();
       return true;
-    case ClockSource::RELAY: {
-      portENTER_CRITICAL(&g_clock_lock);
-      const peer::PeerClock::Line line = g_relay_line;
-      portEXIT_CRITICAL(&g_clock_lock);
-      if (!line.valid) {
-        return false;
-      }
-      *offset_ns = peer::PeerClock::offset_on(line, local_ns);
-      return true;
-    }
+    case ClockSource::RELAY:
+      return relay_offset_ns(local_ns, offset_ns);
     default:
       return false;
   }
 }
 
 static bool relay_locked() {
-  portENTER_CRITICAL(&g_clock_lock);
-  const bool valid = g_relay_line.valid;
-  portEXIT_CRITICAL(&g_clock_lock);
-  return valid;
+  int64_t offset_ns = 0;
+  return relay_offset_ns(local_now_ns(), &offset_ns);
 }
 
 static void secondary_clock_task(void *arg) {
@@ -564,8 +559,7 @@ static void secondary_clock_task(void *arg) {
   uint8_t *buffer = g_clock_rx_buffer;
   uint32_t seq = 0;
   uint32_t boot_id = 0;
-  uint32_t clock_gen = 0;
-  bool have_gen = false;
+  bool have_boot = false;
 
   for (;;) {
     const uint32_t primary_ip = g_primary_ip.load();
@@ -592,19 +586,19 @@ static void secondary_clock_task(void *arg) {
         peer::Pong pong{};
         if (peer::read_header(reader, &header) && header.type == (uint8_t) peer::MsgType::PONG &&
             peer::decode_pong(reader, &pong) && pong.t1_local_ns == t1) {
-          // A different primary boot or clock is a different line.
-          if (!have_gen || header.boot_id != boot_id || pong.clock_gen != clock_gen || !pong.network_valid) {
+          // The fit is of the primary's local clock, which only a reboot
+          // restarts; its network offset is taken fresh from every PONG.
+          if (!have_boot || header.boot_id != boot_id) {
             clock.reset();
             boot_id = header.boot_id;
-            clock_gen = pong.clock_gen;
-            have_gen = true;
+            have_boot = true;
           }
-          if (pong.network_valid) {
-            clock.add_sample(t1, pong.t2_network_ns, pong.t3_network_ns, t4);
-          }
+          clock.add_sample(t1, pong.t2_primary_ns, pong.t3_primary_ns, t4);
           const peer::PeerClock::Line line = clock.line();
           portENTER_CRITICAL(&g_clock_lock);
           g_relay_line = line;
+          g_relay_network_valid = pong.network_valid;
+          g_relay_network_offset_ns = pong.network_offset_ns;
           g_relay_stats.last_rtt_ns = clock.last_rtt_ns();
           g_relay_stats.min_rtt_ns = clock.min_rtt_ns();
           g_relay_stats.residual_ns = clock.residual_rms_ns();
@@ -679,13 +673,11 @@ static void sample_clock_diff() {
   if (!ptp_follows(g_mirror.state)) {
     return;
   }
-  portENTER_CRITICAL(&g_clock_lock);
-  const peer::PeerClock::Line line = g_relay_line;
-  portEXIT_CRITICAL(&g_clock_lock);
-  if (!line.valid) {
+  int64_t relay_ns = 0;
+  if (!relay_offset_ns(local_now_ns(), &relay_ns)) {
     return;
   }
-  const int64_t diff = peer::PeerClock::offset_on(line, local_now_ns()) - ptp_clock_get_offset_ns();
+  const int64_t diff = relay_ns - ptp_clock_get_offset_ns();
   SecondaryStats &stats = g_secondary_stats;
   if (stats.clock_diff_count == 0 || diff < stats.clock_diff_min_ns) {
     stats.clock_diff_min_ns = diff;
@@ -921,7 +913,7 @@ static void log_secondary_stats() {
   g_secondary_stats = SecondaryStats{};
   portENTER_CRITICAL(&g_clock_lock);
   const RelayStats relay = g_relay_stats;
-  const bool relay_valid = g_relay_line.valid;
+  const bool relay_valid = g_relay_line.valid && g_relay_network_valid;
   g_relay_stats.pongs = 0;
   portEXIT_CRITICAL(&g_clock_lock);
   // Quiet while idle: heartbeats and pongs alone are not worth a line.

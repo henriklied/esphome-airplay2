@@ -1230,7 +1230,10 @@ bool audio_receiver_peer_push(uint32_t first_rtp, const int16_t *stereo, size_t 
     if (audio_engine_v2_push_pcm(engine, epoch, first_rtp, stereo, samples, 2)) {
       return true;
     }
-    if (audio_epoch_get(&engine->epoch) != epoch || esp_timer_get_time() >= deadline_us) {
+    // Nothing frees a slot while the scheduler is not consuming; waiting
+    // would only stall the receive socket into dropping what follows.
+    if (audio_epoch_get(&engine->epoch) != epoch || !engine->playing || !engine->clock_map.valid ||
+        esp_timer_get_time() >= deadline_us) {
       return false;
     }
     (void) audio_timeline_wait_for_space(&engine->timeline, PEER_PUSH_WAIT_SLICE_MS);

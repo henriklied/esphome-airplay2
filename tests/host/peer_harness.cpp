@@ -174,14 +174,15 @@ static void test_ping_pong_round_trip() {
   Ping decoded_ping{};
   CHECK(decode_ping(r, &decoded_ping) && decoded_ping.t1_local_ns == -5);
 
-  Pong pong{1, 2, 3, 4, true};
+  Pong pong{1, 2, 3, -4, true};
   length = encode_pong(datagram, sizeof(datagram), 1, 2, pong);
   CHECK(length == HEADER_BYTES + PONG_FIELDS_BYTES);
   Reader r2(datagram, length);
   CHECK(read_header(r2, &header));
   Pong d{};
   CHECK(decode_pong(r2, &d));
-  CHECK(d.t1_local_ns == 1 && d.t2_network_ns == 2 && d.t3_network_ns == 3 && d.clock_gen == 4 && d.network_valid);
+  CHECK(d.t1_local_ns == 1 && d.t2_primary_ns == 2 && d.t3_primary_ns == 3 && d.network_offset_ns == -4 &&
+        d.network_valid);
 }
 
 static void test_serial_wrap() {

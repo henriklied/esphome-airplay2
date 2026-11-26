@@ -12,8 +12,11 @@
 //   STATE an idempotent snapshot of everything the secondary mirrors: epoch,
 //         format, clock map, play state, volume. Sent on change and as a
 //         heartbeat, so a lost one is repaired by the next.
-//   PONG  the answer to a secondary's PING, carrying the primary's network
-//         time at receipt and at reply (NTP-style four-timestamp exchange).
+//   PONG  the answer to a secondary's PING: the primary's local clock at
+//         receipt and at reply (NTP-style four-timestamp exchange), plus the
+//         local -> network offset its own playback uses at that moment. The
+//         local clock never stops, so the secondary's fit of it survives the
+//         primary losing and regaining its network clock between sessions.
 //
 // Each PCM chunk repeats the epoch and the latest deferred-flush boundary, so
 // the secondary can apply a flush whose STATE was lost before it accepts the
@@ -28,7 +31,7 @@ namespace airplay_receiver {
 namespace peer {
 
 static constexpr uint32_t MAGIC = 0x52505041u;  // "APPR" read little-endian
-static constexpr uint8_t VERSION = 1;
+static constexpr uint8_t VERSION = 2;
 static constexpr uint16_t DEFAULT_PORT = 7011;
 
 // Keeps every datagram under a 1500-byte Ethernet/Wi-Fi MTU after IPv4 (20)
@@ -97,13 +100,13 @@ struct Ping {
 static constexpr size_t PING_FIELDS_BYTES = 8;
 
 struct Pong {
-  int64_t t1_local_ns;    // echoed from the PING
-  int64_t t2_network_ns;  // primary's network time at receipt
-  int64_t t3_network_ns;  // primary's network time at reply
-  uint32_t clock_gen;     // changes whenever the primary's network clock does
-  bool network_valid;     // false: the primary has no clock to relay
+  int64_t t1_local_ns;        // echoed from the PING
+  int64_t t2_primary_ns;      // primary's local time at receipt
+  int64_t t3_primary_ns;      // primary's local time at reply
+  int64_t network_offset_ns;  // primary network = primary local + this, at t3
+  bool network_valid;         // false: the primary has no network clock now
 };
-static constexpr size_t PONG_FIELDS_BYTES = 8 * 3 + 4 + 1;
+static constexpr size_t PONG_FIELDS_BYTES = 8 * 4 + 1;
 
 // ---------------------------------------------------------------------------
 // Byte packing
@@ -367,18 +370,18 @@ inline size_t encode_pong(uint8_t *buffer, size_t capacity, uint32_t boot_id, ui
   Writer w(buffer, capacity);
   write_header(w, MsgType::PONG, boot_id, seq);
   w.i64(pong.t1_local_ns);
-  w.i64(pong.t2_network_ns);
-  w.i64(pong.t3_network_ns);
-  w.u32(pong.clock_gen);
+  w.i64(pong.t2_primary_ns);
+  w.i64(pong.t3_primary_ns);
+  w.i64(pong.network_offset_ns);
   w.u8(pong.network_valid ? 1 : 0);
   return w.ok() ? w.size() : 0;
 }
 
 inline bool decode_pong(Reader &r, Pong *pong) {
   pong->t1_local_ns = r.i64();
-  pong->t2_network_ns = r.i64();
-  pong->t3_network_ns = r.i64();
-  pong->clock_gen = r.u32();
+  pong->t2_primary_ns = r.i64();
+  pong->t3_primary_ns = r.i64();
+  pong->network_offset_ns = r.i64();
   pong->network_valid = r.u8() != 0;
   return r.ok();
 }
