@@ -10,6 +10,7 @@
 #include "audio/audio_control.h"
 #include "audio/audio_dsp.h"
 #include "audio/audio_output.h"
+#include "audio/audio_peer.h"
 #include "audio/audio_receiver.h"
 #include "crypto/crypto_module.h"
 #include "transport/transport_module.h"
@@ -61,6 +62,10 @@ class AirPlayReceiver : public Component, public media_player::MediaPlayer {
   /// Output channel mode (0=STEREO 1=LEFT 2=RIGHT 3=MONO), from the YAML
   /// audio_channel_mode enum. Applied after audio_output_init().
   void set_audio_channel_mode(int mode) { this->audio_channel_mode_ = static_cast<audio_channel_mode_t>(mode); }
+
+  /// Stereo pair role (audio/audio_peer.h). `peer_ip` is dotted IPv4, empty
+  /// for none; the enums are PeerRole, PeerForward and PeerClockMode.
+  void set_pair(int role, const char *peer_ip, int port, int forward, int clock, int delay_us);
 
   // ---- output DSP (audio/audio_dsp.h) ----
   //
@@ -153,6 +158,11 @@ class AirPlayReceiver : public Component, public media_player::MediaPlayer {
 
   /// Concealment events (the `holes` figure in the playout line) and I2S
   /// underruns. Both monotonic; both flat on a healthy board.
+  /// Pair secondary: heard from the primary within the link timeout.
+  bool diag_peer_link_up();
+  /// Pair secondary: the clock it plays against, "ptp", "relay" or "none".
+  std::string diag_peer_clock();
+
   uint32_t diag_holes();
   uint32_t diag_underruns();
 
@@ -177,9 +187,13 @@ class AirPlayReceiver : public Component, public media_player::MediaPlayer {
   /// rather than on the first RTSP session. Idempotent; retries until the
   /// sockets bind.
   void start_ptp_when_network_up_();
+  void start_peer_when_network_up_();
+  void publish_secondary_state_();
 
   uint32_t buffer_size_{1000000};
   bool ptp_started_{false};
+  PeerConfig pair_config_{};
+  bool peer_started_{false};
 
   // Audio board wiring (I2S PCM5100 + amp-enable).
   int i2s_bclk_pin_{-1};

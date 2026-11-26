@@ -152,6 +152,12 @@ void audio_output_set_source_rate(int rate);
  */
 void audio_output_set_volume_q15(int32_t volume_q15);
 
+/// The feed volume last set, Q15 (32768 = unity).
+int32_t audio_output_get_volume_q15(void);
+
+/// True while the playback task runs (between start() and stop()).
+bool audio_output_is_running(void);
+
 /**
  * Return the modelled I2S DMA pipeline latency in microseconds.
  *   (2 * dma_desc_num - 1) * dma_frame_num * 1e6 / (2 * sample_rate)

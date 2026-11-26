@@ -1,3 +1,5 @@
+import logging
+
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import pins
@@ -9,8 +11,10 @@ from esphome.components import esp32 as esp32_platform
 from esphome.components import media_player as media_player_mod
 from esphome.components.esp32 import add_idf_component, include_builtin_idf_component
 from esphome.components.esp32.const import VARIANT_ESP32, VARIANT_ESP32S3
-from esphome.const import CONF_ID
+from esphome.const import CONF_ID, CONF_PORT
 from esphome.core import CORE
+
+_LOGGER = logging.getLogger(__name__)
 
 # The AirPlay receiver wants the I2S bus. ESPHome's I2S driver is excluded by
 # default (DEFAULT_EXCLUDED_IDF_COMPONENTS), so we must re-enable it exactly as
@@ -67,6 +71,11 @@ _CONFIG_AMOUNT = "amount"
 _CONFIG_WIDTH = "width"
 _CONFIG_THRESHOLD = "threshold"
 _CONFIG_RELEASE = "release"
+_CONFIG_PAIR = "pair"
+_CONFIG_ROLE = "role"
+_CONFIG_PEER = "peer"
+_CONFIG_CHANNEL = "channel"
+_CONFIG_CLOCK = "clock"
 
 # Output channel mode -> audio_channel_mode_t (audio/audio_output.h): 0=STEREO
 # 1=LEFT 2=RIGHT 3=MONO. Applied after audio_output_init() so the AuMONO
@@ -77,6 +86,33 @@ AUDIO_CHANNEL_MODE_ENUM = {
     "right": 2,
     "mono": 3,
 }
+
+
+# Stereo pair (audio/audio_peer.h). Integers mirror PeerRole, PeerForward and
+# PeerClockMode; keep them in step.
+PAIR_ROLE_ENUM = {
+    "primary": 1,
+    "secondary": 2,
+}
+PAIR_FORWARD_ENUM = {
+    "left": 0,
+    "right": 1,
+    "mono": 2,
+    "stereo": 3,
+}
+PAIR_CLOCK_ENUM = {
+    "auto": 0,
+    "ptp": 1,
+    "relay": 2,
+}
+# Mirrors peer::DEFAULT_PORT; the clock exchange uses the port above it.
+_PAIR_DEFAULT_PORT = 7011
+_PAIR_DEFAULT_CHANNEL = "right"
+_PAIR_DEFAULT_CLOCK = "auto"
+# Keys that mean something to one role only. Setting one on the other role is
+# a config that does not do what it reads like.
+_PAIR_PRIMARY_ONLY = (_CONFIG_CHANNEL,)
+_PAIR_SECONDARY_ONLY = (_CONFIG_CLOCK, _CONFIG_DELAY)
 
 
 # Output DSP biquad shapes -> airplay_dsp_filter_type_t (audio/audio_dsp.h).
@@ -264,6 +300,58 @@ def _validate_dsp_against_sample_rate(config):
     return config
 
 
+def _validate_pair(config):
+    """Primary needs the secondary's address; role-specific keys stay on their role."""
+    role = config[_CONFIG_ROLE]
+    if role == "primary" and _CONFIG_PEER not in config:
+        raise cv.Invalid("a pair primary needs 'peer:', the secondary's IPv4 address", path=[_CONFIG_PEER])
+    wrong = _PAIR_SECONDARY_ONLY if role == "primary" else _PAIR_PRIMARY_ONLY
+    for key in wrong:
+        if key in config:
+            raise cv.Invalid(f"'{key}:' has no effect on a pair {role}", path=[key])
+    return config
+
+
+# One AirPlay destination on two boards: the primary is an ordinary receiver
+# that forwards one channel to the secondary, which advertises nothing.
+_PAIR_SCHEMA = cv.All(
+    cv.Schema(
+        {
+            cv.Required(_CONFIG_ROLE): cv.enum(PAIR_ROLE_ENUM, lower=True),
+            # Primary: where to send. Secondary: the only primary to accept.
+            cv.Optional(_CONFIG_PEER): cv.ipv4address,
+            cv.Optional(CONF_PORT, default=_PAIR_DEFAULT_PORT): cv.All(cv.port, cv.Range(max=65534)),
+            # Primary: what the secondary plays.
+            cv.Optional(_CONFIG_CHANNEL): cv.enum(PAIR_FORWARD_ENUM, lower=True),
+            # Secondary: which network clock to play against.
+            cv.Optional(_CONFIG_CLOCK): cv.enum(PAIR_CLOCK_ENUM, lower=True),
+            # Secondary: plays this much later, to line up with the primary
+            # when the two output paths differ. Delay only: a board cannot play
+            # earlier than its own pipeline allows.
+            cv.Optional(_CONFIG_DELAY): cv.All(
+                cv.positive_time_period_microseconds,
+                cv.Range(max=cv.TimePeriod(milliseconds=100)),
+            ),
+        }
+    ),
+    _validate_pair,
+)
+
+
+def _warn_if_pair_doubles_channel(config):
+    """A primary playing the channel it forwards leaves the other one unplayed."""
+    pair = config.get(_CONFIG_PAIR)
+    if pair and pair[_CONFIG_ROLE] == "primary":
+        forwarded = pair.get(_CONFIG_CHANNEL, _PAIR_DEFAULT_CHANNEL)
+        if forwarded == config[_CONFIG_AUDIO_CHANNEL_MODE]:
+            _LOGGER.warning(
+                "pair primary plays '%s' and forwards '%s' too: set audio_channel_mode to the other side",
+                config[_CONFIG_AUDIO_CHANNEL_MODE],
+                forwarded,
+            )
+    return config
+
+
 def _optional_output_pin(value):
     """Validate a GPIO pin as an internal output pin, but keep the -1 'unused'
     sentinel for optional pins (defaults in the YAML schema)."""
@@ -294,11 +382,13 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(_CONFIG_AMP_IDLE_TIMEOUT, default=60): cv.int_,
             cv.Optional(_CONFIG_AUDIO_CHANNEL_MODE, default="stereo"): cv.enum(AUDIO_CHANNEL_MODE_ENUM, lower=True),
             cv.Optional(_CONFIG_DSP): _DSP_SCHEMA,
+            cv.Optional(_CONFIG_PAIR): _PAIR_SCHEMA,
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
     .extend(media_player_mod.media_player_schema(AirPlayReceiver)),
     _validate_dsp_against_sample_rate,
+    _warn_if_pair_doubles_channel,
     cv.only_with_framework("esp-idf"),
     cv.only_on_esp32,
 )
@@ -343,7 +433,25 @@ async def _build_airplay_receiver(config):
     # audio_channel_mode_t integer before the C++ setter.
     cg.add(var.set_audio_channel_mode(AUDIO_CHANNEL_MODE_ENUM[config[_CONFIG_AUDIO_CHANNEL_MODE]]))
     _add_dsp(var, config.get(_CONFIG_DSP))
+    _add_pair(var, config.get(_CONFIG_PAIR))
     return var
+
+
+def _add_pair(var, pair_config) -> None:
+    """Emit the stereo-pair role. Absent means a standalone receiver."""
+    if pair_config is None:
+        return
+    delay = pair_config.get(_CONFIG_DELAY)
+    cg.add(
+        var.set_pair(
+            PAIR_ROLE_ENUM[pair_config[_CONFIG_ROLE]],
+            str(pair_config.get(_CONFIG_PEER, "")),
+            pair_config[CONF_PORT],
+            PAIR_FORWARD_ENUM[pair_config.get(_CONFIG_CHANNEL, _PAIR_DEFAULT_CHANNEL)],
+            PAIR_CLOCK_ENUM[pair_config.get(_CONFIG_CLOCK, _PAIR_DEFAULT_CLOCK)],
+            int(delay.total_microseconds) if delay is not None else 0,
+        )
+    )
 
 
 def _add_dsp(var, dsp_config) -> None:

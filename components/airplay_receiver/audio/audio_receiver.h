@@ -31,6 +31,7 @@
 #include "esp_err.h"
 
 #include "../crypto/crypto_module.h"  // AudioEncrypt (audio_encrypt_t mapping)
+#include "peer_protocol.h"
 
 namespace esphome {
 namespace airplay_receiver {
@@ -248,6 +249,44 @@ void audio_receiver_stop_buffered_only(void);
 
 /** Set the stream type (realtime vs buffered). */
 void audio_receiver_set_stream_type(audio_stream_type_t type);
+
+// ---------------------------------------------------------------------------
+// Stereo pair (audio_peer.cpp)
+// ---------------------------------------------------------------------------
+
+/**
+ * Primary: fill the engine half of a peer STATE (epoch, format, play state,
+ * clock map and the clock it is expressed in). The peer module fills the rest.
+ */
+void audio_receiver_peer_snapshot(peer::State *state);
+
+/**
+ * Primary: the local -> network offset its own playback uses right now, for
+ * the relayed clock. `kind` names that clock, so the secondary can tell when
+ * it changes. False when the primary has no clock to relay.
+ */
+bool audio_receiver_peer_network_offset_ns(int64_t *offset_ns, peer::AnchorDomain *kind);
+
+/**
+ * Secondary: create the engine if needed and point it at this format. A
+ * changed frame length re-cuts the slot pool, which starts a new epoch;
+ * *reset says so.
+ */
+bool audio_receiver_peer_prepare(uint32_t sample_rate, uint32_t frame_samples, bool *reset);
+
+/// Secondary: drop everything buffered and wait for an anchor.
+void audio_receiver_peer_begin_epoch(void);
+
+/// Secondary: publish (valid) or withdraw the clock map.
+void audio_receiver_peer_set_anchor(bool valid, uint32_t anchor_rtp, uint64_t anchor_network_ns,
+                                    int64_t playout_offset_ns);
+
+void audio_receiver_peer_set_playing(bool playing);
+void audio_receiver_peer_deferred_flush(uint32_t flush_rtp);
+
+/// Secondary: add one stereo frame to the timeline, waiting up to timeout_ms
+/// for a free slot.
+bool audio_receiver_peer_push(uint32_t first_rtp, const int16_t *stereo, size_t samples, uint32_t timeout_ms);
 
 }  // namespace airplay_receiver
 }  // namespace esphome

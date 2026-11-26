@@ -40,6 +40,7 @@
 #include "audio_buffer.h"
 #include "audio_engine_v2.h"
 #include "audio_output.h"
+#include "audio_peer.h"
 #include "audio_stream.h"
 #include "audio_timeline.h"
 #include "../decoder/audio_decoder.h"
@@ -910,12 +911,24 @@ size_t audio_receiver_read(int16_t *buffer, size_t samples) {
   }
 
   if (engine_v2_active()) {
-    audio_receiver_arm_engine_v2_anchor();
+    const int64_t now_us = esp_timer_get_time();
+    int64_t network_offset_ns = 0;
+    if (audio_peer_role() == PeerRole::SECONDARY) {
+      // The secondary's anchors come from the primary, already published or
+      // withdrawn; only the clock they are read against is chosen here.
+      if (!audio_peer_secondary_offset_ns(now_us * 1000LL, &network_offset_ns)) {
+        std::memset(buffer, 0, samples * (size_t) receiver.engine_v2.format.channels * sizeof(int16_t));
+        receiver.last_read_was_silence = true;
+        return samples;
+      }
+    } else {
+      audio_receiver_arm_engine_v2_anchor();
+      network_offset_ns = audio_receiver_network_offset_ns(nullptr);
+    }
     // The scheduler works in the sender's clock domain: network = local +
     // offset.
     const int64_t playout_network_ns =
-        audio_output_get_next_playout_time_ns(esp_timer_get_time()) +
-        audio_receiver_network_offset_ns(nullptr);
+        audio_output_get_next_playout_time_ns(now_us) + network_offset_ns;
     const size_t produced = audio_engine_v2_render(
         &receiver.engine_v2, playout_network_ns, buffer, samples);
     // Every path in audio_scheduler_render() that cannot play emits silence
@@ -1064,6 +1077,144 @@ void audio_receiver_pause(void) {
 
 uint16_t audio_receiver_get_buffered_port(void) {
   return receiver.buffered_port;
+}
+
+// ---------------------------------------------------------------------------
+// Stereo pair
+// ---------------------------------------------------------------------------
+
+// The clock map is written by the RTSP task and the playback task and read
+// here from the peer task, with no lock. Read it until two copies agree, so a
+// torn read never goes out as an anchor.
+static audio_clock_map_t read_clock_map_stable(void) {
+  audio_clock_map_t first = receiver.engine_v2.clock_map;
+  for (int attempt = 0; attempt < 4; attempt++) {
+    const audio_clock_map_t second = receiver.engine_v2.clock_map;
+    if (std::memcmp(&first, &second, sizeof(first)) == 0) {
+      return first;
+    }
+    first = second;
+  }
+  first.valid = false;
+  return first;
+}
+
+void audio_receiver_peer_snapshot(peer::State *state) {
+  state->engine_ready = engine_v2_active();
+  if (!state->engine_ready) {
+    state->anchor_valid = false;
+    state->domain = peer::AnchorDomain::NONE;
+    return;
+  }
+  audio_engine_v2_t *engine = &receiver.engine_v2;
+  state->epoch = audio_epoch_get(&engine->epoch);
+  state->sample_rate = (uint32_t) engine->format.sample_rate;
+  state->frame_samples = engine->timeline.frame_samples;
+  state->playing = engine->playing;
+  const audio_clock_map_t map = read_clock_map_stable();
+  state->anchor_valid = map.valid;
+  state->anchor_rtp = map.anchor_rtp;
+  state->anchor_network_ns = map.anchor_network_ns;
+  state->playout_offset_ns = map.playout_offset_ns;
+  if (!map.valid) {
+    state->domain = peer::AnchorDomain::NONE;
+  } else if (receiver.engine_v2_anchor_local_fallback) {
+    state->domain = peer::AnchorDomain::LOCAL;
+  } else {
+    state->domain = receiver.engine_v2_anchor_uses_ptp ? peer::AnchorDomain::PTP : peer::AnchorDomain::NTP;
+  }
+}
+
+bool audio_receiver_peer_network_offset_ns(int64_t *offset_ns, peer::AnchorDomain *kind) {
+  // A local-clock anchor is read with offset 0 by the primary's own render
+  // (no clock is locked); relaying exactly that keeps the secondary on it.
+  if (receiver.engine_v2_anchor_local_fallback) {
+    *offset_ns = 0;
+    *kind = peer::AnchorDomain::LOCAL;
+    return true;
+  }
+  bool locked = false;
+  *offset_ns = audio_receiver_network_offset_ns(&locked);
+  *kind = receiver.engine_v2_anchor_uses_ptp ? peer::AnchorDomain::PTP : peer::AnchorDomain::NTP;
+  return locked;
+}
+
+bool audio_receiver_peer_prepare(uint32_t sample_rate, uint32_t frame_samples, bool *reset) {
+  *reset = false;
+  if (!receiver.realtime_stream || sample_rate == 0 || frame_samples == 0 ||
+      frame_samples > AUDIO_TIMELINE_FRAME_SAMPLES) {
+    return false;
+  }
+  audio_format_t format = receiver.realtime_stream->format;
+  if (!receiver.engine_v2_ready || format.sample_rate != (int) sample_rate) {
+    std::strcpy(format.codec, "PCM");
+    format.sample_rate = (int) sample_rate;
+    format.channels = 2;
+    format.bits_per_sample = 16;
+    format.frame_size = (int) frame_samples;
+    receiver.realtime_stream->format = format;
+    receiver.buffered_stream->format = format;
+    audio_output_set_source_rate((int) sample_rate);
+  }
+  if (!receiver.engine_v2_ready) {
+    const esp_err_t err =
+        audio_engine_v2_init(&receiver.engine_v2, &format, AUDIO_TIMELINE_FRAME_SAMPLES, AUDIO_V2_TIMELINE_BLOCKS);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "Peer engine init failed: %s", esp_err_to_name(err));
+      return false;
+    }
+    receiver.engine_v2_ready = true;
+    *reset = true;
+  }
+  if (receiver.engine_v2.format.sample_rate != (int) sample_rate) {
+    audio_engine_v2_set_format(&receiver.engine_v2, &format);
+  }
+  if (receiver.engine_v2.timeline.frame_samples != frame_samples) {
+    // Same order as audio_receiver_ensure_engine_v2(): a stale epoch first,
+    // so the playback task cannot copy through a slot the re-cut moves.
+    audio_receiver_reset_engine_v2();
+    *reset = true;
+    if (!audio_engine_v2_set_frame_samples(&receiver.engine_v2, frame_samples)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void audio_receiver_peer_begin_epoch(void) { audio_receiver_reset_engine_v2(); }
+
+void audio_receiver_peer_set_anchor(bool valid, uint32_t anchor_rtp, uint64_t anchor_network_ns,
+                                    int64_t playout_offset_ns) {
+  if (!receiver.engine_v2_ready) {
+    return;
+  }
+  if (valid) {
+    (void) audio_engine_v2_set_anchor(&receiver.engine_v2, anchor_rtp, anchor_network_ns, playout_offset_ns);
+  } else {
+    audio_engine_v2_wait_for_anchor(&receiver.engine_v2, esp_timer_get_time());
+  }
+}
+
+void audio_receiver_peer_set_playing(bool playing) {
+  audio_timing_set_playing(&receiver.timing, playing);
+  if (receiver.engine_v2_ready) {
+    audio_engine_v2_set_playing(&receiver.engine_v2, playing);
+  }
+}
+
+void audio_receiver_peer_deferred_flush(uint32_t flush_rtp) {
+  if (receiver.engine_v2_ready) {
+    (void) audio_engine_v2_deferred_flush(&receiver.engine_v2, audio_epoch_get(&receiver.engine_v2.epoch),
+                                          flush_rtp);
+  }
+}
+
+bool audio_receiver_peer_push(uint32_t first_rtp, const int16_t *stereo, size_t samples, uint32_t timeout_ms) {
+  if (!receiver.engine_v2_ready) {
+    return false;
+  }
+  return audio_engine_v2_push_pcm_wait(&receiver.engine_v2, audio_epoch_get(&receiver.engine_v2.epoch), first_rtp,
+                                       stereo, samples, 2, timeout_ms);
 }
 
 }  // namespace airplay_receiver

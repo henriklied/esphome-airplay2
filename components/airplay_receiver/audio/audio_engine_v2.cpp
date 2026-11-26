@@ -30,6 +30,7 @@
 
 #include "../allocator.h"
 #include "audio_output.h"
+#include "audio_peer.h"
 
 namespace esphome {
 namespace airplay_receiver {
@@ -266,6 +267,7 @@ size_t audio_engine_v2_deferred_flush(audio_engine_v2_t *engine, uint32_t epoch,
    * the clock map here would leave the scheduler in WAIT_ANCHOR forever. */
   const size_t dropped =
       audio_timeline_discard_from(&engine->timeline, epoch, flush_rtp);
+  audio_peer_tap_deferred_flush(epoch, flush_rtp);
   ESP_LOGI(TAG, "deferred flush at rtp=%" PRIu32 " dropped=%u remaining=%u",
            flush_rtp, (unsigned)dropped,
            (unsigned)audio_timeline_count(&engine->timeline));
@@ -347,6 +349,9 @@ bool audio_engine_v2_push_pcm(audio_engine_v2_t *engine, uint32_t epoch,
   (void)__atomic_add_fetch(&engine->diag_pcm_inserted, 1U, __ATOMIC_RELAXED);
 
   portEXIT_CRITICAL(&engine->publish_lock);
+  // After the commit, so a block the epoch check rejected is never sent; the
+  // duplicate path above returns early, so a resend is not sent twice.
+  audio_peer_tap_pcm(epoch, first_rtp, pcm, samples, channels);
   return true;
 }
 

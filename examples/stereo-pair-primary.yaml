@@ -1,0 +1,85 @@
+# Stereo pair, primary half: one AirPlay destination played by two boards.
+#
+# This board is an ordinary receiver that plays the left channel and forwards
+# the right one to the secondary (stereo-pair-secondary.yaml), which advertises
+# nothing. Senders see one "Living Room"; volume, pause and seek act on both.
+#
+# The secondary's address must not change: give it a DHCP reservation or a
+# `manual_ip:` in its wifi block. Both boards should sit on the same subnet,
+# so the secondary can hear the sender's PTP too (see `clock:` on the other
+# side).
+
+esphome:
+  name: airplay-living-room-l
+  friendly_name: Living Room Left
+  min_version: 2025.1.0
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  cpu_frequency: 240MHz
+  flash_size: 8MB
+  # N8R8 is quad flash + octal PSRAM. `opi` describes the PSRAM, not the
+  # flash, and setting it here produces a board that does not boot.
+  flash_mode: dio
+  flash_frequency: 80MHz
+  framework:
+    type: esp-idf
+    version: recommended
+  toolchain: esp-idf
+  # The default ESPHome layout leaves too little room for two OTA slots once
+  # the codec and crypto libraries are linked in.
+  partitions: ../partitions.csv
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # Modem sleep holds incoming frames until the next beacon, tens of
+  # milliseconds late and unevenly so. The pair's clock exchange reads that
+  # as path asymmetry, which is clock error.
+  power_save_mode: none
+
+api:
+  # No `encryption:` here, and that is not an oversight. API encryption pulls in
+  # esphome/noise-c, which bundles its own libsodium; the component needs
+  # espressif/libsodium for the pairing crypto, and the IDF component manager
+  # refuses to choose between two components both claiming to provide libsodium.
+  # The build fails at CMake configure with "Can't decide which one to pick".
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+logger:
+  # The receiver logs a playout line every second at DEBUG. Useful while
+  # bringing a board up, noisy afterwards.
+  level: INFO
+
+external_components:
+  - source: github://henriklied/esphome-airplay2
+    components: [airplay_receiver]
+
+airplay_receiver:
+  id: airplay
+  # The name senders see in Control Center, and the media_player entity name.
+  name: "Living Room"
+  i2s_bclk_pin: 14
+  i2s_lrclk_pin: 15
+  i2s_dout_pin: 16
+  amp_enable_pin: 17
+  sample_rate: 44100
+  # Drop the amp after a minute of silence. The PCM5100 idles near-silent but
+  # the TPA311x hisses, which is audible in a quiet room at night.
+  amp_idle_timeout: 60
+  audio_channel_mode: left
+  pair:
+    role: primary
+    # The secondary's address.
+    peer: 192.168.1.51
+    # What the secondary plays: left, right, mono, or stereo to send both
+    # channels (for stereo-dependent DSP there).
+    channel: right

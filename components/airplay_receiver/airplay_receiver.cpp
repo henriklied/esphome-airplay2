@@ -15,6 +15,7 @@
 #include "esphome/core/log.h"
 
 #include "esp_heap_caps.h"
+#include <lwip/inet.h>
 
 namespace esphome {
 namespace airplay_receiver {
@@ -84,12 +85,19 @@ void AirPlayReceiver::setup() {
   // Audio receiver + the CryptoModule inject the stream tasks decrypt through.
   audio_receiver_init();
   audio_receiver_set_crypto_module(&this->crypto_);
+  audio_peer_configure(this->pair_config_);
 
-  // Start the _airplay._tcp advertisement + RTSP server and hook the audio
-  // engine up to the transport events. At AFTER_CONNECTION the network stack
-  // and ESPHome's mDNS are already initialized.
-  this->transport_.setup(&this->crypto_, device_name);
-  this->transport_.register_event_callback(&AirPlayReceiver::on_transport_event, this);
+  if (this->pair_config_.role == PeerRole::SECONDARY) {
+    // A secondary is not an AirPlay destination: no advertisement, no RTSP.
+    // Everything it plays arrives from the primary over the peer link.
+    ESP_LOGI(TAG, "Pair secondary: AirPlay discovery and RTSP disabled");
+  } else {
+    // Start the _airplay._tcp advertisement + RTSP server and hook the audio
+    // engine up to the transport events. At AFTER_CONNECTION the network stack
+    // and ESPHome's mDNS are already initialized.
+    this->transport_.setup(&this->crypto_, device_name);
+    this->transport_.register_event_callback(&AirPlayReceiver::on_transport_event, this);
+  }
 
   // Reflect the initial transport state to Home Assistant.
   this->audio_ready_ = true;
@@ -100,7 +108,12 @@ void AirPlayReceiver::setup() {
 
 void AirPlayReceiver::loop() {
   this->start_ptp_when_network_up_();
-  this->transport_.loop();
+  this->start_peer_when_network_up_();
+  if (this->pair_config_.role == PeerRole::SECONDARY) {
+    this->publish_secondary_state_();
+  } else {
+    this->transport_.loop();
+  }
   // The loudness shelf follows the volume; its redesign belongs here, off the
   // RTSP task that reports the volume and the audio task that plays it.
   audio_dsp_service();
@@ -144,6 +157,57 @@ void AirPlayReceiver::start_ptp_when_network_up_() {
   // Anything else means the sockets could not be built yet; retry next loop.
 }
 
+void AirPlayReceiver::start_peer_when_network_up_() {
+  if (this->peer_started_ || this->pair_config_.role == PeerRole::STANDALONE || !network::is_connected()) {
+    return;
+  }
+  const esp_err_t err = audio_peer_start();
+  // Anything but a clean start or "already running" is an allocation or task
+  // failure that a retry every loop pass would only repeat into the log.
+  this->peer_started_ = true;
+  if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+    ESP_LOGE(TAG, "Pair link failed to start: %s", esp_err_to_name(err));
+  }
+}
+
+void AirPlayReceiver::set_pair(int role, const char *peer_ip, int port, int forward, int clock, int delay_us) {
+  PeerConfig config;
+  config.role = static_cast<PeerRole>(role);
+  config.peer_ip = (peer_ip != nullptr && *peer_ip != '\0') ? inet_addr(peer_ip) : 0;
+  config.port = static_cast<uint16_t>(port);
+  config.forward = static_cast<PeerForward>(forward);
+  config.clock = static_cast<PeerClockMode>(clock);
+  config.delay_us = delay_us;
+  this->pair_config_ = config;
+}
+
+// The secondary's entity shows what the pair is doing; its own controls do
+// nothing, so it never claims a state of its own.
+void AirPlayReceiver::publish_secondary_state_() {
+  audio_peer_status_t status{};
+  audio_peer_get_status(&status);
+  media_player::MediaPlayerState next = media_player::MEDIA_PLAYER_STATE_IDLE;
+  if (status.link_up && status.output_running) {
+    next = status.playing ? media_player::MEDIA_PLAYER_STATE_PLAYING : media_player::MEDIA_PLAYER_STATE_PAUSED;
+  }
+  if (next != this->state) {
+    this->state = next;
+    this->publish_state();
+  }
+}
+
+bool AirPlayReceiver::diag_peer_link_up() {
+  audio_peer_status_t status{};
+  audio_peer_get_status(&status);
+  return status.link_up;
+}
+
+std::string AirPlayReceiver::diag_peer_clock() {
+  audio_peer_status_t status{};
+  audio_peer_get_status(&status);
+  return status.clock;
+}
+
 void AirPlayReceiver::dump_config() {
   const char *name = this->get_name().c_str();
   if (name == nullptr || *name == '\0') {
@@ -156,6 +220,12 @@ void AirPlayReceiver::dump_config() {
   ESP_LOGCONFIG(TAG, "  audio i2s bclk=%d lrclk=%d dout=%d amp=%d sr=%d", this->i2s_bclk_pin_, this->i2s_lrclk_pin_,
                 this->i2s_dout_pin_, this->amp_enable_pin_, this->sample_rate_);
   ESP_LOGCONFIG(TAG, "  audio channel mode=%d", (int) this->audio_channel_mode_);
+  if (this->pair_config_.role != PeerRole::STANDALONE) {
+    ESP_LOGCONFIG(TAG, "  pair role=%s port=%u forward=%d clock=%d delay=%dus",
+                  this->pair_config_.role == PeerRole::PRIMARY ? "primary" : "secondary",
+                  (unsigned) this->pair_config_.port, (int) this->pair_config_.forward,
+                  (int) this->pair_config_.clock, (int) this->pair_config_.delay_us);
+  }
   audio_dsp_log_cascade(TAG, ESPHOME_LOG_LEVEL_CONFIG);
   const char *track = airplay_audio_get_track_title();
   if (track != nullptr && *track != '\0') {
@@ -445,6 +515,12 @@ media_player::MediaPlayerTraits AirPlayReceiver::get_traits() {
 }
 
 void AirPlayReceiver::control(const media_player::MediaPlayerCall &call) {
+  if (this->pair_config_.role == PeerRole::SECONDARY) {
+    // Volume, play and pause follow the primary; a local change would only be
+    // overwritten by the next one, or leave the pair at two volumes.
+    ESP_LOGW(TAG, "Pair secondary ignores media_player commands: control the primary");
+    return;
+  }
   // Ha volume (0.0-1.0) -> audio engine percent (0-100).
   if (auto volume = call.get_volume(); volume.has_value()) {
     uint8_t vol_pct = static_cast<uint8_t>(std::round(volume.value() * 100.0f));

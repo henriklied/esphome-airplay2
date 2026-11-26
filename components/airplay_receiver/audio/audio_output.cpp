@@ -679,6 +679,10 @@ void audio_output_set_volume_q15(int32_t volume_q15) {
   audio_dsp_set_volume_q15(volume_q15);  // the loudness stage follows the volume
 }
 
+int32_t audio_output_get_volume_q15(void) { return g_volume_q15; }
+
+bool audio_output_is_running(void) { return g_playback_task != nullptr; }
+
 // The limiter's look-ahead delays every sample on its way to the DAC, so it is
 // part of the output latency the playout clock has to plan around.
 static uint32_t dsp_latency_us(void) {
