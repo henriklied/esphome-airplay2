@@ -7,6 +7,8 @@
 //       with the encoder's own. Prints "frames=<n> header_mismatches=<n>".
 //   aac_format_harness info <formats-hex> [<audio-stream-hex>] <out.plist>
 //       Write the GET /info binary plist.
+//   aac_format_harness info-name <device-name> <out.plist>
+//       Write the GET /info binary plist for a device name, which may be UTF-8.
 
 #include <cstdio>
 #include <cstdlib>
@@ -62,12 +64,13 @@ static int run_headers(const char *in_path, const char *ssrc_hex) {
   return 0;
 }
 
-static int run_info(const char *formats_hex, const char *audio_hex, const char *out_path) {
+static int run_info(const char *device_name, const char *formats_hex, const char *audio_hex,
+                    const char *out_path) {
   static const uint8_t public_key[32] = {};
   uint8_t body[1024];
   const uint64_t formats = strtoull(formats_hex, nullptr, 16);
   const uint64_t audio_formats = strtoull(audio_hex, nullptr, 16);
-  const size_t len = bplist_build_info_response(body, sizeof(body), "AA:BB:CC:DD:EE:FF", "Test", public_key,
+  const size_t len = bplist_build_info_response(body, sizeof(body), "AA:BB:CC:DD:EE:FF", device_name, public_key,
                                                 sizeof(public_key), 0x1C340405F4A00ULL, 2, formats,
                                                 audio_formats);
   if (len == 0) {
@@ -87,11 +90,14 @@ int main(int argc, char **argv) {
     return run_headers(argv[2], argv[3]);
   }
   if (argc == 4 && strcmp(argv[1], "info") == 0) {
-    return run_info(argv[2], "0", argv[3]);
+    return run_info("Test", argv[2], "0", argv[3]);
   }
   if (argc == 5 && strcmp(argv[1], "info") == 0) {
-    return run_info(argv[2], argv[3], argv[4]);
+    return run_info("Test", argv[2], argv[3], argv[4]);
   }
-  fprintf(stderr, "usage: aac_format_harness headers <in.adts> <ssrc-hex> | info <formats-hex> [<audio-hex>] <out>\n");
+  if (argc == 4 && strcmp(argv[1], "info-name") == 0) {
+    return run_info(argv[2], "0", "0", argv[3]);
+  }
+  fprintf(stderr, "usage: aac_format_harness headers <in.adts> <ssrc-hex> | info <formats-hex> [<audio-hex>] <out> | info-name <name> <out>\n");
   return 2;
 }

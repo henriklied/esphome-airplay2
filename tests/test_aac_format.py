@@ -115,5 +115,14 @@ def test_info_advertises_audio_stream_formats(harness: Path, tmp_path: Path) -> 
     assert info["name"] == "Test"
 
 
+
+@pytest.mark.parametrize("name", ["Kjøkkenet", "Stue 🎵", "Café", "Boston X90"])
+def test_info_name_round_trips(harness: Path, tmp_path: Path, name: str) -> None:
+    """Non-ASCII names must be UTF-16 in the plist; iOS shows the /info name after a tap."""
+    out = tmp_path / "info.plist"
+    _run([str(harness), "info-name", name, str(out)])
+    assert plistlib.loads(out.read_bytes())["name"] == name
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v", "-s"]))

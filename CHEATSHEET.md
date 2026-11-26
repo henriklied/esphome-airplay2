@@ -202,6 +202,9 @@ The RTSP `TRANSPORT_EVENT_METADATA` handler calls `airplay_audio_set_track_title
 media_player has no title/artist fields, so the title is held here and logged).
 
 ## Pitfalls / gotchas (already handled, don't regress)
+- **Non-ASCII names go into `GET /info` as UTF-16BE.** A bplist ASCII string holding UTF-8
+  bytes shows up on iOS as mojibake once the destination is tapped ("Kjøkkenet" -> "KjÃ¸kkenet").
+  mDNS is UTF-8 and was always fine. `bplist_write_string()` handles this; keep the name on it.
 - **`api:` must not enable `encryption:`.** It pulls `esphome/noise-c`, which brings its own
   `libsodium`; the pairing crypto needs `espressif/libsodium`, and the IDF component manager
   refuses to choose ("Requirement espressif__libsodium and requirement libsodium are both added as

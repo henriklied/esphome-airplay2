@@ -164,6 +164,81 @@ static bool bplist_write_ascii_string(uint8_t *out, size_t capacity,
   return true;
 }
 
+static constexpr uint32_t UNICODE_REPLACEMENT_CHAR = 0xFFFD;
+static constexpr uint32_t UNICODE_MAX = 0x10FFFF;
+static constexpr uint32_t UTF16_BMP_LIMIT = 0x10000;
+static constexpr uint16_t UTF16_HIGH_SURROGATE = 0xD800;
+static constexpr uint16_t UTF16_LOW_SURROGATE = 0xDC00;
+
+// Decodes one UTF-8 sequence at *p, advancing it. Malformed input yields U+FFFD.
+static uint32_t utf8_next(const uint8_t **p, const uint8_t *end) {
+  const uint8_t lead = *(*p)++;
+  size_t extra;
+  uint32_t cp;
+  uint32_t min_cp;
+  if (lead < 0x80) {
+    return lead;
+  } else if ((lead & 0xE0) == 0xC0) {
+    extra = 1, cp = lead & 0x1F, min_cp = 0x80;
+  } else if ((lead & 0xF0) == 0xE0) {
+    extra = 2, cp = lead & 0x0F, min_cp = 0x800;
+  } else if ((lead & 0xF8) == 0xF0) {
+    extra = 3, cp = lead & 0x07, min_cp = UTF16_BMP_LIMIT;
+  } else {
+    return UNICODE_REPLACEMENT_CHAR;
+  }
+  for (size_t i = 0; i < extra; i++) {
+    if (*p >= end || (**p & 0xC0) != 0x80) {
+      return UNICODE_REPLACEMENT_CHAR;
+    }
+    cp = (cp << 6) | (*(*p)++ & 0x3F);
+  }
+  const bool surrogate = cp >= UTF16_HIGH_SURROGATE && cp < 0xE000;
+  if (cp < min_cp || cp > UNICODE_MAX || surrogate) {
+    return UNICODE_REPLACEMENT_CHAR;
+  }
+  return cp;
+}
+
+static void bplist_write_utf16_unit(uint8_t *out, size_t *pos, uint16_t unit) {
+  out[(*pos)++] = (uint8_t)(unit >> 8);
+  out[(*pos)++] = (uint8_t)unit;
+}
+
+// Writes a string object: ASCII as-is, anything else as UTF-16BE, which is the
+// only non-ASCII string form bplist has. UTF-8 bytes in an ASCII string read
+// back as Latin-1 ("KjÃ¸kkenet") on iOS.
+static bool bplist_write_string(uint8_t *out, size_t capacity, size_t *pos,
+                                const char *value) {
+  const uint8_t *begin = (const uint8_t *)value;
+  const uint8_t *end = begin + strlen(value);
+  size_t units = 0;
+  bool ascii = true;
+  for (const uint8_t *p = begin; p < end;) {
+    const uint32_t cp = utf8_next(&p, end);
+    ascii = ascii && cp < 0x80;
+    units += cp >= UTF16_BMP_LIMIT ? 2 : 1;
+  }
+  if (ascii) {
+    return bplist_write_ascii_string(out, capacity, pos, value);
+  }
+  if (!bplist_write_length(out, capacity, pos, 0x60, units) ||
+      !bplist_has_room(*pos, units * 2, capacity)) {
+    return false;
+  }
+  for (const uint8_t *p = begin; p < end;) {
+    const uint32_t cp = utf8_next(&p, end);
+    if (cp < UTF16_BMP_LIMIT) {
+      bplist_write_utf16_unit(out, pos, (uint16_t)cp);
+    } else {
+      const uint32_t offset = cp - UTF16_BMP_LIMIT;
+      bplist_write_utf16_unit(out, pos, (uint16_t)(UTF16_HIGH_SURROGATE | (offset >> 10)));
+      bplist_write_utf16_unit(out, pos, (uint16_t)(UTF16_LOW_SURROGATE | (offset & 0x3FF)));
+    }
+  }
+  return true;
+}
+
 static bool bplist_write_data(uint8_t *out, size_t capacity, size_t *pos,
                               const uint8_t *data, size_t len) {
   if (!bplist_write_length(out, capacity, pos, 0x40, len) ||
@@ -670,7 +745,7 @@ size_t bplist_build_info_response(uint8_t *out, size_t capacity,
     return 0;
   }
   ADD_OFFSET(); // 19: device name
-  if (!bplist_write_ascii_string(out, capacity, &pos, device_name)) {
+  if (!bplist_write_string(out, capacity, &pos, device_name)) {
     return 0;
   }
   ADD_OFFSET(); // 20: "audioFormats"
