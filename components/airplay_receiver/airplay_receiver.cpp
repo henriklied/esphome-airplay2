@@ -6,6 +6,7 @@
 #include <string>
 
 #include "audio/dsp_spec.h"
+#include "audio/group_spec.h"
 #include "timing/ptp_clock.h"
 #include "transport/rtsp_conn.h"
 #include "transport/rtsp_events.h"
@@ -15,6 +16,7 @@
 #include "esphome/components/wifi/wifi_component.h"
 #endif
 
+#include "esphome/core/application.h"
 #include "esphome/core/log.h"
 
 #include "esp_heap_caps.h"
@@ -32,9 +34,18 @@ static constexpr size_t PAIR_IDENTITY_INDEX = 1;
 static constexpr uint8_t LOCALLY_ADMINISTERED_BIT = 0x02;
 // The board's own pairing key is 0x4150 ("AP"); the pair destination's next.
 static constexpr uint32_t PAIR_KEYPAIR_PREF_KEY = 0x4151;
+static constexpr uint32_t GROUP_PREF_KEY = 0x41504752;  // "APGR"
+static constexpr uint32_t GROUP_REBOOT_DELAY_MS = 1000;
+static constexpr const char *GROUP_SPEC_YAML = "yaml";
+
+/// NVS record for set_group_spec(); an empty text means "use the YAML role".
+struct GroupPref {
+  char text[GROUP_SPEC_MAX_LEN + 1];
+};
 static constexpr uint32_t TAKEOVER_TIMEOUT_MS = 3000;
 
 void AirPlayReceiver::setup() {
+  this->load_group_from_nvs_();
   // The entity name (config `name:`, from the media_player schema) is the user
   // visible AirPlay device name. Fall back if it is not populated yet.
   std::string device_name = this->get_name().c_str();
@@ -260,6 +271,66 @@ void AirPlayReceiver::start_peer_when_network_up_() {
   if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
     ESP_LOGE(TAG, "Pair link failed to start: %s", esp_err_to_name(err));
   }
+}
+
+void AirPlayReceiver::load_group_from_nvs_() {
+  this->group_pref_ = global_preferences->make_preference<GroupPref>(GROUP_PREF_KEY);
+  GroupPref stored{};
+  if (!this->group_pref_.load(&stored) || stored.text[0] == '\0') {
+    return;
+  }
+  stored.text[sizeof(stored.text) - 1] = '\0';
+  GroupSpec spec;
+  if (!group_spec_parse(stored.text, &spec)) {
+    ESP_LOGW(TAG, "Stored group role \"%s\" does not parse; using the YAML role", stored.text);
+    return;
+  }
+  this->set_pair(static_cast<int>(spec.role), spec.peer, spec.port, static_cast<int>(spec.channel),
+                 static_cast<int>(spec.clock), spec.delay_us, spec.name, spec.standalone);
+  ESP_LOGI(TAG, "Group role from NVS: %s", stored.text);
+}
+
+bool AirPlayReceiver::set_group_spec(const std::string &spec) {
+  GroupPref stored{};
+  if (!spec.empty() && spec != GROUP_SPEC_YAML) {
+    GroupSpec parsed;
+    if (!group_spec_parse(spec.c_str(), &parsed)) {
+      ESP_LOGW(TAG, "Group role \"%s\" refused", spec.c_str());
+      return false;
+    }
+    char canonical[sizeof(stored.text)];
+    if (group_spec_format(parsed, canonical, sizeof(canonical)) == 0) {
+      return false;
+    }
+    if (this->get_group_spec() == canonical) {
+      return true;
+    }
+    snprintf(stored.text, sizeof(stored.text), "%s", canonical);
+  }
+  this->group_pref_.save(&stored);
+  global_preferences->sync();
+  ESP_LOGI(TAG, "Group role set to \"%s\"; rebooting to apply", stored.text[0] ? stored.text : GROUP_SPEC_YAML);
+  this->set_timeout("group_reboot", GROUP_REBOOT_DELAY_MS, []() { App.safe_reboot(); });
+  return true;
+}
+
+std::string AirPlayReceiver::get_group_spec() const {
+  GroupSpec spec;
+  spec.role = this->pair_config_.role;
+  if (this->pair_config_.peer_ip != 0) {
+    struct in_addr addr;
+    addr.s_addr = this->pair_config_.peer_ip;
+    inet_ntoa_r(addr, spec.peer, sizeof(spec.peer));
+  }
+  spec.port = this->pair_config_.port;
+  spec.channel = this->pair_config_.forward;
+  spec.clock = this->pair_config_.clock;
+  spec.delay_us = this->pair_config_.delay_us;
+  snprintf(spec.name, sizeof(spec.name), "%s", this->pair_name_.c_str());
+  spec.standalone = this->pair_config_.role == PeerRole::SECONDARY && this->pair_config_.on_demand;
+  char text[GROUP_SPEC_MAX_LEN + 1];
+  const size_t len = group_spec_format(spec, text, sizeof(text));
+  return std::string(text, len);
 }
 
 void AirPlayReceiver::set_pair(int role, const char *peer_ip, int port, int forward, int clock, int delay_us,

@@ -345,6 +345,22 @@ See [STEREO-PAIR-PLAN.md](STEREO-PAIR-PLAN.md). Complete configs:
 Both boards log a `peer tx:` / `peer rx:` line every 5 s while audio flows: blocks and datagrams,
 loss, frames that arrived incomplete or late, the clock in use, and the relay's round trip and rate.
 
+### Changing the role at runtime
+
+`set_group_spec(text)` stores a role in NVS that overrides `pair:` from the next boot, and reboots
+the board a second later to apply it (the pair identity, mDNS record and second RTSP port are set up
+once). `get_group_spec()` returns the running role. Text form:
+
+```
+standalone
+role=primary;peer=10.0.40.146;channel=stereo;name=Kitchen
+role=secondary;peer=10.0.40.90;clock=auto;delay=0;standalone=1
+yaml        # forget the stored role, use pair: again
+```
+
+Wire it to a template `text` entity with `lambda: return id(airplay).get_group_spec();` and a
+`set_action` that calls `set_group_spec(x)`. Invalid text is refused without a reboot.
+
 ## Entities
 
 The component registers one `media_player` supporting play, pause, stop, volume set, volume step and

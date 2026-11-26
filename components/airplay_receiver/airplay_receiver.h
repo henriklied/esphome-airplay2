@@ -98,6 +98,15 @@ class AirPlayReceiver : public Component, public media_player::MediaPlayer {
   void set_dsp_filter_q(int index, float q);
   void set_dsp_filter_gain(int index, float gain_db);
 
+  /// Set the pair/group role from its text form (audio/group_spec.h). Saved
+  /// to NVS and applied by a reboot a second later, because the pair identity,
+  /// its mDNS record and RTSP port exist only from boot. "yaml" (or empty)
+  /// drops the stored role and returns to the YAML `pair:` block. Returns false,
+  /// changing nothing, when the text does not parse; true without a reboot when
+  /// it matches what runs.
+  bool set_group_spec(const std::string &spec);
+  /// The role this boot runs with, in the same text form.
+  std::string get_group_spec() const;
   /// Replace the whole cascade from its text form (audio/dsp_spec.h), e.g. from
   /// a Home Assistant `text` entity. Type and count can change, unlike the
   /// positional setters above. An empty string keeps the current filters.
@@ -237,6 +246,9 @@ class AirPlayReceiver : public Component, public media_player::MediaPlayer {
   /// setup() has designed the cascade for the output rate; edits before that
   /// only update dsp_filters_, which setup() then publishes.
   bool dsp_started_{false};
+  /// The role stored by set_group_spec(); read at the top of setup().
+  ESPPreferenceObject group_pref_;
+  void load_group_from_nvs_();
   float dsp_preamp_db_{0.0f};
   bool dsp_enabled_{true};
 
