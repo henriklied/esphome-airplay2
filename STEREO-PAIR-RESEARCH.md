@@ -9,6 +9,10 @@ measured one is how a future pass gets misled twice.
 
 Written to answer: what would it take for our board to be treated as part of a speaker group?
 
+The October 7 persistent-group experiment produced one picker entry, but playback failed. The
+[implementation plan for two Sonocotta boards](STEREO-PAIR-PLAN.md) uses one AirPlay receiver and
+forwards one channel to the second board.
+
 ## 0. What the house actually advertises (measured 2026-09-16)
 
 Captured with a stdlib mDNS query run **on devbox** (192.168.0.94). mDNS does not cross Tailscale,
@@ -415,10 +419,9 @@ That is a large piece of work and should not be started casually:
   (`CONFLICTS_WITH: [sendspin]`; both claim I2S_NUM_0).
 - The leader becomes a single point of failure for all three speakers.
 
-**Order of attack is unchanged: run the TXT experiment in section 3 first.** If iOS refuses, the
-fallback is not this relay — it is living with separate icons selected together in Control Center,
-which already plays correctly and in sync. The relay is only worth building if that becomes
-genuinely intolerable.
+For the two-board stereo case, the primary plays one channel locally and sends one mono stream to
+the secondary. See the [implementation plan](STEREO-PAIR-PLAN.md) for the resource budget and
+hardware verification. Selecting both boards in Control Center remains available today.
 
 ## 6. Apple TV as the source, and default audio output
 
@@ -470,7 +473,7 @@ buffered (`transport/transport_module.cpp:1026`) — so the Apple TV has what it
 to match. Separately, tvOS 26 drew widespread lip-sync complaints on AirPlay audio output in
 general, so budget for that being an Apple-side variable rather than a fault here.
 
-## 7. Order of attack
+## 7. Earlier test sequence for Apple group discovery
 
 0. **Look for the board in Audio Output on `hjemmekinoen` or `Barnas`** (both tvOS 26.6, both on
    the boards' own subnet — see section 6). Costs one menu visit and decides whether a custom
