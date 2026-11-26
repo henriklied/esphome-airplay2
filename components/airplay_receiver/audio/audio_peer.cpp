@@ -35,10 +35,18 @@ static const char *const TAG = "airplay_peer";
 // at least this often regardless so a lost one is repaired.
 static constexpr uint32_t STATE_POLL_MS = 10;
 static constexpr int64_t STATE_HEARTBEAT_US = 250000;
-// Forwarded blocks the primary can hold while the link catches up: ~3 s of
-// AAC. A buffered stream's opening burst is paced by the decoder (~3 ms a
-// frame), far slower than the link drains it.
-static constexpr uint32_t RING_SLOTS = 128;
+// Forwarded blocks the primary can hold while the pacing below drains them:
+// a whole timeline, so a buffered stream's opening burst (the sender refills
+// ~4.5 s of AAC in about a second after a skip) fits without a drop.
+static constexpr uint32_t RING_SLOTS = AUDIO_V2_TIMELINE_BLOCKS + 32;
+// Forward at most this many times real time. Unpaced, that burst went out at
+// ~900 datagrams/s; lwIP and Wi-Fi TX buffers come from the same internal RAM
+// the decode queue allocates from, so the primary's own decoder lost frames
+// (DQ1 allocation drop, 2026-11-26). Block k of a burst is needed k frames
+// after it starts, so any rate above 1x stays ahead of playout.
+static constexpr uint32_t PACE_SPEEDUP = 2;
+// Credit the pacer may bank while idle, so a short catch-up is not throttled.
+static constexpr int64_t PACE_BURST_US = 100000;
 // Yield after this many datagrams in a row, so a backlog cannot monopolise
 // the Wi-Fi TX queue or the core.
 static constexpr int DATAGRAMS_PER_YIELD = 16;
@@ -46,7 +54,8 @@ static constexpr int DATAGRAMS_PER_YIELD = 16;
 // sent is seconds ahead of its playout: wait rather than drop. Measured
 // 2026-11-26: 5 one-tick retries still dropped up to 27 datagrams per 5 s
 // with a stereo forward beside the incoming AirPlay stream.
-static constexpr int SEND_RETRIES = 50;
+static constexpr int SEND_RETRIES = 20;
+static constexpr TickType_t SEND_RETRY_TICKS = 2;
 
 // Secondary.
 static constexpr uint32_t RX_TIMEOUT_MS = 50;
@@ -147,7 +156,7 @@ static bool send_datagram(int fd, const sockaddr_in &to, const uint8_t *data, si
     if (errno != ENOMEM && errno != EAGAIN) {
       return false;
     }
-    vTaskDelay(1);
+    vTaskDelay(SEND_RETRY_TICKS);
   }
   return false;
 }
@@ -336,6 +345,7 @@ static void primary_task(void *arg) {
   bool sent_once = false;
   int64_t last_state_us = 0;
   int64_t last_stats_us = esp_timer_get_time();
+  int64_t pace_next_us = 0;
 
   for (;;) {
     ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(STATE_POLL_MS));
@@ -348,6 +358,7 @@ static void primary_task(void *arg) {
     }
 
     int burst = 0;
+    const uint32_t pace_rate = state.sample_rate > 0 ? state.sample_rate : 44100;
     for (;;) {
       portENTER_CRITICAL(&g_ring_lock);
       const bool empty = g_ring_tail == g_ring_head;
@@ -366,6 +377,14 @@ static void primary_task(void *arg) {
       // A block from an epoch the primary has already left is gone from its
       // own timeline too; the secondary would only drop it.
       if (!sent_once || !peer::serial_newer(last.epoch, slot->epoch)) {
+        const int64_t pace_now_us = esp_timer_get_time();
+        if (pace_now_us < pace_next_us) {
+          break;  // next wake: a tap notification or STATE_POLL_MS
+        }
+        if (pace_next_us < pace_now_us - PACE_BURST_US) {
+          pace_next_us = pace_now_us - PACE_BURST_US;
+        }
+        pace_next_us += (int64_t) slot->samples * 1000000LL / ((int64_t) pace_rate * PACE_SPEEDUP);
         send_slot(fd, to, *slot, &burst);
       }
       portENTER_CRITICAL(&g_ring_lock);
