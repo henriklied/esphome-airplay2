@@ -239,6 +239,41 @@ id(airplay).set_dsp_preamp(-3.0f);
 id(airplay).set_dsp_enabled(false);
 ```
 
+To change the type or number of filters at runtime, replace the whole cascade from text instead.
+One section per `;`, fields `type,frequency_hz,q,gain_db`, types `pk ls hs hp lp no`; `flat` is an
+empty cascade. Eight sections fit in a 255-character `text` entity, which also gives you restore
+across reboots:
+
+```yaml
+text:
+  - platform: template
+    name: "EQ filters"
+    id: dsp_filters
+    mode: text
+    max_length: 255
+    optimistic: true
+    restore_value: true
+    initial_value: ""          # empty: keep the YAML filters
+    on_value:
+      then:
+        - lambda: |-
+            if (!id(airplay).set_dsp_filters_spec(x)) {   // refused: show what runs
+              id(dsp_filters).publish_state(id(airplay).get_dsp_filters_spec());
+            }
+esphome:
+  on_boot:
+    priority: -100             # after setup(), so the restored text wins over YAML
+    then:
+      - lambda: |-
+          if (id(dsp_filters).state.empty() ||
+              !id(airplay).set_dsp_filters_spec(id(dsp_filters).state)) {
+            id(dsp_filters).publish_state(id(airplay).get_dsp_filters_spec());
+          }
+```
+
+The positional setters still work, but they address `dsp_filters_` by index, which a text edit can
+reorder; use one style per board.
+
 These recompute coefficients and must run on the main loop, which is exactly where a YAML lambda
 runs. See [examples/dsp-speaker-correction.yaml](examples/dsp-speaker-correction.yaml) for the whole
 set wired up as Home Assistant sliders.

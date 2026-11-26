@@ -5,6 +5,7 @@
 #include <cstring>
 #include <string>
 
+#include "audio/dsp_spec.h"
 #include "timing/ptp_clock.h"
 #include "transport/rtsp_conn.h"
 #include "transport/rtsp_events.h"
@@ -80,6 +81,7 @@ void AirPlayReceiver::setup() {
     audio_dsp_set_filters(this->dsp_filters_.data(), this->dsp_filters_.size());
     this->warn_if_dsp_clips_();
   }
+  this->dsp_started_ = true;
   // At INFO, not CONFIG: these boards run `logger: level: INFO` to keep log
   // formatting off the core that feeds I2S, and INFO is below CONFIG -- logging
   // the cascade only from dump_config would hide it on every board that matters.
@@ -495,6 +497,31 @@ void AirPlayReceiver::set_dsp_filter_gain(int index, float gain_db) {
   }
   this->dsp_filters_[(size_t) index].gain_db = gain_db;
   this->publish_dsp_filter_(index);
+}
+
+bool AirPlayReceiver::set_dsp_filters_spec(const std::string &spec) {
+  if (spec.empty()) {
+    return true;
+  }
+  AirPlayDspFilter parsed[AIRPLAY_DSP_MAX_FILTERS];
+  size_t count = 0;
+  if (!dsp_spec_parse(spec.c_str(), parsed, AIRPLAY_DSP_MAX_FILTERS, &count)) {
+    ESP_LOGW(TAG, "DSP filters: cannot parse \"%s\", keeping the current cascade", spec.c_str());
+    return false;
+  }
+  this->dsp_filters_.assign(parsed, parsed + count);
+  if (this->dsp_started_) {
+    audio_dsp_set_filters(this->dsp_filters_.data(), this->dsp_filters_.size());
+    this->warn_if_dsp_clips_();
+  }
+  ESP_LOGI(TAG, "DSP filters set: %s", spec.c_str());
+  return true;
+}
+
+std::string AirPlayReceiver::get_dsp_filters_spec() const {
+  char text[256];
+  const size_t len = dsp_spec_format(this->dsp_filters_.data(), this->dsp_filters_.size(), text, sizeof(text));
+  return std::string(text, len);
 }
 
 float AirPlayReceiver::get_dsp_filter_frequency(int index) const {

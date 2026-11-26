@@ -98,6 +98,13 @@ class AirPlayReceiver : public Component, public media_player::MediaPlayer {
   void set_dsp_filter_q(int index, float q);
   void set_dsp_filter_gain(int index, float gain_db);
 
+  /// Replace the whole cascade from its text form (audio/dsp_spec.h), e.g. from
+  /// a Home Assistant `text` entity. Type and count can change, unlike the
+  /// positional setters above. An empty string keeps the current filters.
+  /// Returns false, changing nothing, when the text does not parse.
+  bool set_dsp_filters_spec(const std::string &spec);
+  /// The current cascade in the same text form.
+  std::string get_dsp_filters_spec() const;
   float get_dsp_filter_frequency(int index) const;
   float get_dsp_filter_q(int index) const;
   float get_dsp_filter_gain(int index) const;
@@ -227,6 +234,9 @@ class AirPlayReceiver : public Component, public media_player::MediaPlayer {
   // Output DSP cascade, in YAML order. Mirrored here (rather than read back
   // from audio_dsp) so a runtime edit of one parameter keeps the rest.
   std::vector<AirPlayDspFilter> dsp_filters_;
+  /// setup() has designed the cascade for the output rate; edits before that
+  /// only update dsp_filters_, which setup() then publishes.
+  bool dsp_started_{false};
   float dsp_preamp_db_{0.0f};
   bool dsp_enabled_{true};
 
