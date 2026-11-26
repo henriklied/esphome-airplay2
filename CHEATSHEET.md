@@ -48,6 +48,7 @@ that adds one fails validation (`Platform not found`), which prevents two RTSP s
 | `sample_rate` | `44100` | output sample rate |
 | `audio_channel_mode` | `"stereo"` | `stereo \| mono \| left \| right` (AuMONO modes) |
 | `dsp` | — | output biquad cascade, see below |
+| `pair` | — | stereo pair: `role` (primary\|secondary), `peer` (IPv4), `port` 7011, `channel` (primary: left\|right\|mono\|stereo, default right), `clock` (secondary: auto\|ptp\|relay), `delay` (secondary, ≤100ms). See README "Stereo pair" |
 
 ### `dsp:` — output EQ (`audio/audio_dsp.{h,cpp}`)
 
@@ -120,7 +121,8 @@ Host tests: `uv run tests/test_dsp_stages.py`.
 - **Generic ESP32 + PCM5102A:** BCLK=GPIO26, LRCLK=GPIO25, DOUT=GPIO22, no amp-enable (line out).
 
 `examples/` carries a validated, compiled config for each: `amped-s3.yaml`, `generic-esp32.yaml`,
-`dsp-speaker-correction.yaml`, `buttons.yaml`, `display.yaml`.
+`dsp-speaker-correction.yaml`, `buttons.yaml`, `display.yaml`, and the pair
+`stereo-pair-primary.yaml` + `stereo-pair-secondary.yaml`.
 
 ## Build / verify on this host
 ```bash
@@ -159,6 +161,12 @@ cd .check && esphome compile amped-s3.yaml
   successes/failures, exposed as `udp_ok`, `udp_drop` and `udp_drop_total` on
   `rxpath:`. `udp_watch=1` confirms installation. Works without `LWIP_STATS`.
   Host checks for both changes run with `uv run tests/test_realtime_audio.py`.
+- `audio/audio_peer.{h,cpp}` — stereo pair. The primary taps `audio_engine_v2_push_pcm()` and
+  `audio_engine_v2_deferred_flush()` into a PSRAM ring and sends PCM + an engine STATE snapshot over
+  UDP; the secondary (no transport, no decoder) replays them into its own engine via the
+  `audio_receiver_peer_*` entry points and renders against `audio_peer_secondary_offset_ns()`.
+  Wire format `audio/peer_protocol.h`, relayed clock `audio/peer_clock.h` (least-squares line through
+  min-RTT-gated PING/PONG exchanges). Host tests: `uv run tests/test_peer_link.py`.
 - `airplay_receiver.{h,cpp}` — the component class (`: cg.Component, media_player::MediaPlayer`),
   setup/loop, transport-event handling (incl. the METADATA → track-title wiring), media_player callbacks.
 - `transport/` — RTSP server/control + Bonjour/mDNS glue + binary-plist + sockets. The sender's
@@ -228,6 +236,8 @@ ESPHome 2026.8.2 on ESP32-S3, at roughly 33% RAM and 28% flash. Every config in 
 validated and compiled.
 
 Multi-room works well, including two boards as a stereo pair (`audio_channel_mode: left` / `right`).
+`pair:` makes the two one AirPlay destination; that path compiles and passes its host tests but is
+not yet measured on hardware (`STEREO-PAIR-PLAN.md`).
 Note that the local-anchor fallback gives up group sync by design: a board that loses its network
 clock keeps playing on its own clock instead of going silent, and drifts from the group until it
 re-locks. That is the trade, not a bug.

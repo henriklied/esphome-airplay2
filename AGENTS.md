@@ -16,6 +16,8 @@ AirPlay 2 receiver. The component lives in `components/airplay_receiver/`.
    reference board.
 5. `STEREO-PAIR-RESEARCH.md` — only if the task touches mDNS grouping, stereo pairs or a multi-board
    2.1. Desk research, unverified on hardware, and explicitly labelled as such.
+   `STEREO-PAIR-PLAN.md` is the `pair:` implementation (one destination, two boards): what is built,
+   and what the first hardware run has to measure.
 
 ## Non-negotiable rules
 - **Single entry point:** the component is the media_player. Only configure `airplay_receiver:`.

@@ -10,6 +10,45 @@ The local `group-experiment` commit `e0f40fd` records that approach. In the desi
 one ordinary receiver and the two boards handle audio distribution and synchronization themselves.
 [Stereo-pair research](STEREO-PAIR-RESEARCH.md#5-the-other-architecture-the-sonos-model)
 
+## Status (2026-11-26)
+
+Steps 1-4 below are built as `pair:` (`components/airplay_receiver/audio/audio_peer.{h,cpp}`).
+Both pair examples and the standalone gate compile, and the host tests pass. **Nothing has run on
+hardware yet.**
+
+What the build does, and where it departs from the steps:
+
+- **Tap.** `audio_engine_v2_push_pcm()` forwards each block after it commits to the primary's
+  timeline, so it has already passed the seek gates and the epoch check. A 128-slot PSRAM ring
+  (~256 KiB mono) feeds a separate task. The ring drops when full and never blocks decode.
+- **Mirror, not replay.** The secondary does not replay RTSP events. It copies the primary's engine
+  state: epoch, frame length, rate, clock map, play state, output on/off and volume. A STATE
+  snapshot goes out on change and every 250 ms. Each PCM chunk also carries the epoch and the
+  latest deferred-flush boundary, so losing one STATE cannot leave stale audio in place.
+- **Clock: both options, chosen per board.** The plan wanted measurements before choosing between
+  the sender's PTP and a peer clock, so `clock:` offers both. `ptp` uses the secondary's own
+  passive listener, pinned to the master in the forwarded anchor. `relay` uses the primary's
+  network time, fitted from 10 Hz PING/PONG on its own port. `relay` also follows the primary's
+  local-clock fallback. `auto` uses PTP when it is locked to the right master and falls back to
+  the relay. In simulation over a busy link (2 ms mean queueing each way, 5% 40 ms stalls), the
+  relay holds 70 us RMS and 270 us worst. On a calm link it holds 15 us RMS
+  (`tests/host/peer_harness.cpp`).
+- **Loss and rejoin.** After 1.5 s without a datagram the secondary withdraws its clock map and
+  goes quiet. The next STATE puts it back at the right sample. It only has audio decoded after it
+  (re)joined, so it is silent for up to one primary buffer, about 4.5 s buffered.
+- **Scoped cost.** A standalone board allocates nothing for the link. Its added cost is a few
+  hundred bytes of static state and one role check per pushed block.
+
+Still open, in order:
+
+1. Hardware verification below. The first run should A/B `clock: ptp` against `clock: relay` for
+   output skew. Whether the secondary hears the sender's PTP at all on `10.0.40.0/24` is unmeasured
+   (research section 3.5).
+2. CPU, internal heap and largest block with the link active, during stream start and reconnects.
+   The two peer tasks take 7 KiB of internal stack on each board.
+3. The join gap. Resending the primary's queued timeline on (re)join would close it.
+4. The secondary's own `media_player` ignores commands. Forwarding them to the primary is not built.
+
 ## Firmware roles
 
 Use the existing `airplay_receiver:` configuration entry point, with the role selected in YAML.

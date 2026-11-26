@@ -43,8 +43,10 @@ that the plain ESP32 does not.
 
 PSRAM is not optional on either. The DAC is expected to be a PCM5100-class I2S part.
 
-Multi-room works well. Two boards play as a stereo pair with `audio_channel_mode: left` and
-`right`, and a group of boards stays in sync off the shared PTP clock.
+Multi-room works well, and a group of boards stays in sync off the shared PTP clock. Two boards
+can be a stereo pair two ways: as two AirPlay destinations with `audio_channel_mode: left` and
+`right`, selected together, or as **one** destination with [`pair:`](#stereo-pair), where the
+second board plays what the first forwards.
 
 ## Base configuration
 
@@ -102,6 +104,7 @@ airplay_receiver:
 * **audio_channel_mode** (Optional, string): `stereo`, `mono`, `left` or `right`. Use `left`/`right` for a stereo pair of boards (default: stereo);
 * **buffer_size** (Optional, int): Internal buffer size in bytes (default: 1000000);
 * **dsp** (Optional): Output filter cascade and dynamic stages, see [Output DSP](#output-dsp).
+* **pair** (Optional): Stereo-pair role, see [Stereo pair](#stereo-pair).
 
 Leaving the three I2S pins unset is valid. You get a receiver that pairs and plays silently, which is
 occasionally useful for testing pairing on a board with no DAC attached.
@@ -237,6 +240,61 @@ These recompute coefficients and must run on the main loop, which is exactly whe
 runs. See [examples/dsp-speaker-correction.yaml](examples/dsp-speaker-correction.yaml) for the whole
 set wired up as Home Assistant sliders.
 
+## Stereo pair
+
+`pair:` makes two boards one AirPlay destination. The **primary** is an ordinary receiver: it
+advertises, decodes, plays one channel, and forwards the other over UDP to the **secondary**, which
+runs no AirPlay at all. Volume, pause, seek and track changes follow the primary.
+
+```yaml
+# Primary: plays left, sends right.
+airplay_receiver:
+  name: "Living Room"
+  audio_channel_mode: left
+  pair:
+    role: primary
+    peer: 192.168.1.51
+    channel: right
+
+# Secondary: plays what arrives.
+airplay_receiver:
+  name: "Living Room Right"
+  pair:
+    role: secondary
+    peer: 192.168.1.50
+```
+
+* **role** (Required, string): `primary` or `secondary`;
+* **peer** (Optional, IPv4): Primary: the secondary's address (required). Secondary: the only
+  primary to accept (default: the first that speaks);
+* **port** (Optional, int): UDP port for audio and state; the clock exchange uses the one above it
+  (default: 7011);
+* **channel** (Optional, string, primary): What the secondary plays: `left`, `right`, `mono`, or
+  `stereo` to send both, for stereo-dependent DSP on the secondary (default: right);
+* **clock** (Optional, string, secondary): `ptp` plays against the secondary's own PTP lock to the
+  sender, `relay` against the primary's network time measured over the link, `auto` uses PTP when
+  it is locked to the right master and otherwise the relay (default: auto);
+* **delay** (Optional, time, secondary): Plays this much later, up to 100 ms, for output paths that
+  differ acoustically. Each board's own DAC and DSP latency is already accounted for (default: 0us).
+
+Only the primary decodes. It sends 16-bit PCM, about 0.7 Mbit/s for one channel at 44.1 kHz. Give the secondary a fixed address, and set `wifi: power_save_mode: none` on both,
+because modem sleep delays the clock exchange unevenly. The secondary's `media_player` entity
+mirrors the pair's state and ignores commands.
+
+The secondary joins a stream already playing, and rejoins after a dropout, at the correct sample,
+but it only receives audio decoded after it joined, so it is silent for up to the length of the
+primary's buffer (about 4.5 s on a buffered stream). If it loses the link or its clock, it goes
+quiet and the primary keeps playing.
+
+**Status: prototype, not yet measured on hardware.** Output skew between the boards, and whether
+`ptp` or `relay` aligns better on a given network, are what the first hardware run has to settle.
+See [STEREO-PAIR-PLAN.md](STEREO-PAIR-PLAN.md). Complete configs:
+[examples/stereo-pair-primary.yaml](examples/stereo-pair-primary.yaml) and
+[examples/stereo-pair-secondary.yaml](examples/stereo-pair-secondary.yaml).
+
+Both boards log a `peer tx:` / `peer rx:` line every 5 s while audio flows: blocks and datagrams,
+loss, frames that arrived incomplete or late, the clock in use, and the relay's round trip and rate.
+
 ## Entities
 
 The component registers one `media_player` supporting play, pause, stop, volume set, volume step and
@@ -267,6 +325,8 @@ id(airplay).diag_ptp_quiet_event_ms();  // age of the last datagram, per socket
 id(airplay).diag_ptp_quiet_general_ms();
 id(airplay).diag_holes();               // concealed packets
 id(airplay).diag_underruns();           // I2S underruns
+id(airplay).diag_peer_link_up();        // pair secondary: hearing the primary
+id(airplay).diag_peer_clock();          // pair secondary: "ptp", "relay" or "none"
 ```
 
 Every one is a rarely-changing state or a counter that only moves during a fault, so they are safe on
