@@ -279,6 +279,18 @@ airplay_receiver:
   it is locked to the right master and otherwise the relay (default: auto);
 * **delay** (Optional, time, secondary): Plays this much later, up to 100 ms, for output paths that
   differ acoustically. Each board's own DAC and DSP latency is already accounted for (default: 0us).
+* **name** (Optional, string, primary): Advertise the pair as a destination of its own, under this
+  name, and forward only sessions on it. The board's own `name` then plays on this board alone
+  (default: none, every session is forwarded);
+* **standalone** (Optional, bool, secondary): Keep this board's own AirPlay destination and play the
+  primary's only while it forwards. Pairs with a primary `name:` (default: false).
+
+With both set, one board pair gives three picker entries: each board on its own, and both together.
+A new forwarded session takes the secondary over from a local session. A local session started on
+the secondary yields it until the primary's next forwarded session. Only one session plays per
+board, and the newest supersedes. The pair destination has its own deviceid (the Wi-Fi MAC with
+the locally-administered bit flipped), pairing key, `pi` and port (7001), so senders pair with it
+separately. Start volume is kept per destination.
 
 Only the primary decodes. It sends 16-bit PCM, about 0.7 Mbit/s for one channel at 44.1 kHz. Give the secondary a fixed address, and set `wifi: power_save_mode: none` on both,
 because modem sleep delays the clock exchange unevenly. The secondary's `media_player` entity

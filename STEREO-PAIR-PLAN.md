@@ -60,13 +60,23 @@ What the build does, and where it departs from the steps:
 - **Scoped cost.** A standalone board allocates nothing for the link. Its added cost is a few
   hundred bytes of static state and one role check per pushed block.
 
+**Three destinations (branch `multi-destination`).** `pair: name:` on the primary and
+`standalone: true` on the secondary give "Boston X90" (X90 board alone), "Geneva Model M" (Geneva
+alone) and "Kjøkkenet" (both). Takeover and hand-back were exercised on hardware with no holes.
+Short underrun bursts appear at session starts and handovers on both boards, never in steady
+playback. The same bursts appeared at starts and skips before this branch.
+
 Still open, in order:
 
 1. Acoustic skew, with both speakers in one room and one microphone.
 2. CPU, internal heap and largest block with the link active, during stream start and reconnects.
    The two peer tasks take 7 KiB of internal stack on each board.
 3. The join gap. Resending the primary's queued timeline on (re)join would close it.
-4. The secondary's own `media_player` ignores commands. Forwarding them to the primary is not built.
+4. The secondary's own `media_player` ignores commands while it mirrors. Forwarding them to the
+   primary is not built.
+5. Underrun bursts at session start and handover (see above).
+6. Opening the picker may connect to a second destination just to look, and any new connection
+   supersedes the active session. Not seen in the first test; worth watching.
 
 ## Firmware roles
 

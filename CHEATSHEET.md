@@ -49,7 +49,7 @@ that adds one fails validation (`Platform not found`), which prevents two RTSP s
 | `sample_rate` | `44100` | output sample rate |
 | `audio_channel_mode` | `"stereo"` | `stereo \| mono \| left \| right` (AuMONO modes) |
 | `dsp` | — | output biquad cascade, see below |
-| `pair` | — | stereo pair: `role` (primary\|secondary), `peer` (IPv4), `port` 7011, `channel` (primary: left\|right\|mono\|stereo, default right), `clock` (secondary: auto\|ptp\|relay), `delay` (secondary, ≤100ms). See README "Stereo pair" |
+| `pair` | — | stereo pair: `role` (primary\|secondary), `peer` (IPv4), `port` 7011, `channel` (primary: left\|right\|mono\|stereo, default right), `clock` (secondary: auto\|ptp\|relay), `delay` (secondary, ≤100ms), `name` (primary: pair destination on port 7001, forward only its sessions), `standalone` (secondary: keep own destination, play the primary's on demand). See README "Stereo pair" |
 
 ### `dsp:` — output EQ (`audio/audio_dsp.{h,cpp}`)
 
