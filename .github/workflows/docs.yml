@@ -23,8 +23,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
-      - name: Build (strict, so broken links fail the build)
-        run: uvx --with mkdocs-material mkdocs build --strict
+      # Zensical reads mkdocs.yml (Material for MkDocs' successor). Pinned: it is
+      # 0.x, so bump deliberately. --strict fails on missing pages and anchors.
+      - name: Build
+        run: uvx zensical@0.1.3 build --strict
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site

@@ -1,3 +1,5 @@
+# Built with Zensical (`uvx zensical build --strict`, `uvx zensical serve`), which reads
+# this MkDocs-format file.
 site_name: airplay_receiver for ESPHome
 site_description: AirPlay 2 receiver component for ESP32-S3 boards running ESPHome
 site_url: https://henriklied.github.io/esphome-airplay2/
