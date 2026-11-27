@@ -448,7 +448,8 @@ Three constraints shaped it, and each one is a real failure if ignored:
 
 The stage clamps on output, so a boost without a matching negative `preamp`
 distorts peaks rather than wrapping. `warn_if_dsp_clips_()` names the preamp it
-wants at boot. There is no limiter.
+wants at boot. (Superseded: there is now a `limiter:` stage, and the boot warning is skipped
+when it is on.)
 
 ## The opening of each track was dropped (fixed 2026-10-06, unverified)
 

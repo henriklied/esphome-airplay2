@@ -240,8 +240,8 @@ ESPHome 2026.8.2 on ESP32-S3, at roughly 33% RAM and 28% flash. Every config in 
 validated and compiled.
 
 Multi-room works well, including two boards as a stereo pair (`audio_channel_mode: left` / `right`).
-`pair:` makes the two one AirPlay destination; that path compiles and passes its host tests but is
-not yet measured on hardware (`STEREO-PAIR-PLAN.md`).
+`pair:` makes the two one AirPlay destination; it runs on two boards, with output skew between the
+speakers not yet measured (`STEREO-PAIR-PLAN.md`).
 Note that the local-anchor fallback gives up group sync by design: a board that loses its network
 clock keeps playing on its own clock instead of going silent, and drifts from the group until it
 re-locks. That is the trade, not a bug.

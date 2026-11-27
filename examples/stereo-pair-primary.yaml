@@ -5,9 +5,9 @@
 # nothing. Senders see one "Living Room"; volume, pause and seek act on both.
 #
 # The secondary's address must not change: give it a DHCP reservation or a
-# `manual_ip:` in its wifi block. Both boards should sit on the same subnet,
-# so the secondary can hear the sender's PTP too (see `clock:` on the other
-# side).
+# `manual_ip:` in its wifi block. The sender's PTP reaches only the board
+# the session is on, so the secondary follows this board's relayed clock
+# (`clock: auto` on the other side).
 
 esphome:
   name: airplay-living-room-l
@@ -55,8 +55,8 @@ ota:
     password: !secret ota_password
 
 logger:
-  # The receiver logs a playout line every second at DEBUG. Useful while
-  # bringing a board up, noisy afterwards.
+  # INFO keeps the one-line playout summary the receiver logs every second.
+  # DEBUG formats far more lines on the core that feeds I2S.
   level: INFO
 
 external_components:

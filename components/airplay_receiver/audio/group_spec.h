@@ -10,7 +10,7 @@
 // Keys: role (standalone|primary|secondary), peer (dotted IPv4; required for a
 // primary, the only primary accepted for a secondary), port, channel
 // (left|right|mono|stereo, what a primary forwards), clock (auto|ptp|relay),
-// delay (secondary playout offset in microseconds), name (a primary's group
+// delay (secondary playout offset, 0-100000 microseconds, as in YAML), name (a primary's group
 // destination; no `;`), standalone (0|1, a secondary keeps its own destination).
 // Missing keys take the defaults below, which match the YAML schema.
 //

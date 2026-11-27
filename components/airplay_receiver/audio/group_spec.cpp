@@ -10,7 +10,8 @@ namespace airplay_receiver {
 namespace {
 
 constexpr const char *STANDALONE_TEXT = "standalone";
-constexpr int32_t MAX_ABS_DELAY_US = 1000000;
+/// Same bound as the YAML `delay:` (0-100 ms): a board cannot play earlier than its pipeline.
+constexpr int32_t MAX_DELAY_US = 100000;
 constexpr long MAX_PORT = 65534;
 constexpr int IPV4_OCTETS = 4;
 constexpr int MAX_OCTET = 255;
@@ -111,7 +112,7 @@ bool apply_pair(GroupSpec *spec, const char *key, const char *value) {
     return lookup(CLOCKS, value, &spec->clock);
   }
   if (strcmp(key, "delay") == 0) {
-    if (!parse_long(value, -MAX_ABS_DELAY_US, MAX_ABS_DELAY_US, &number)) {
+    if (!parse_long(value, 0, MAX_DELAY_US, &number)) {
       return false;
     }
     spec->delay_us = (int32_t) number;

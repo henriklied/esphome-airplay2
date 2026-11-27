@@ -348,9 +348,10 @@ but it only receives audio decoded after it joined, so it is silent for up to th
 primary's buffer (about 4.5 s on a buffered stream). If it loses the link or its clock, it goes
 quiet and the primary keeps playing.
 
-**Status: prototype, not yet measured on hardware.** Output skew between the boards, and whether
-`ptp` or `relay` aligns better on a given network, are what the first hardware run has to settle.
-See [STEREO-PAIR-PLAN.md](STEREO-PAIR-PLAN.md). Complete configs:
+**Status: running on two boards since November 2026.** Output skew between the speakers is not
+measured yet. On the boards tested, the secondary never received the sender's PTP (it reaches only
+the board the session is on), so `clock: auto` runs on the relay. See
+[STEREO-PAIR-PLAN.md](STEREO-PAIR-PLAN.md). Complete configs:
 [examples/stereo-pair-primary.yaml](examples/stereo-pair-primary.yaml) and
 [examples/stereo-pair-secondary.yaml](examples/stereo-pair-secondary.yaml).
 

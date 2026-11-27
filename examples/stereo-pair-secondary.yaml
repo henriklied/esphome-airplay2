@@ -51,8 +51,8 @@ ota:
     password: !secret ota_password
 
 logger:
-  # The receiver logs a playout line every second at DEBUG. Useful while
-  # bringing a board up, noisy afterwards.
+  # INFO keeps the one-line playout summary the receiver logs every second.
+  # DEBUG formats far more lines on the core that feeds I2S.
   level: INFO
 
 external_components:
