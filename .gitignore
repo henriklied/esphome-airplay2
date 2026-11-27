@@ -19,3 +19,4 @@ secrets.yaml
 # Host harness builds (tests/)
 tests/.cache/
 
+site/

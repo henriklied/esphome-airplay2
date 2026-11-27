@@ -1,0 +1,80 @@
+site_name: airplay_receiver for ESPHome
+site_description: AirPlay 2 receiver component for ESP32-S3 boards running ESPHome
+site_url: https://henriklied.github.io/esphome-airplay2/
+repo_url: https://github.com/henriklied/esphome-airplay2
+repo_name: henriklied/esphome-airplay2
+edit_uri: edit/main/docs/
+docs_dir: docs
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: black
+      accent: deep orange
+      toggle:
+        icon: material/brightness-7
+        name: Dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: deep orange
+      toggle:
+        icon: material/brightness-4
+        name: Light mode
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.action.edit
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+
+nav:
+  - Getting started:
+      - Introduction: index.md
+      - Installation: installation.md
+      - Quick start: quick-start.md
+  - Configuration:
+      - Overview: configuration/index.md
+      - Boards and pins: configuration/hardware.md
+      - Output DSP: configuration/output-dsp.md
+      - Dynamic stages: configuration/dynamic-stages.md
+      - Tuning from Home Assistant: configuration/runtime-tuning.md
+      - Stereo pair and groups: configuration/stereo-pair.md
+      - Entities: configuration/entities.md
+  - Guides:
+      - Correct a speaker by ear: guides/speaker-correction.md
+      - Measure a room: guides/room-measurement.md
+      - Set up two boards as a pair: guides/two-boards.md
+  - Help:
+      - Troubleshooting: help/troubleshooting.md
+      - FAQ: help/faq.md
+      - Limitations: help/limitations.md
+  - Reference:
+      - YAML reference: reference/yaml.md
+      - Text formats: reference/text-formats.md
+      - Credits and license: reference/credits-license.md
+
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
