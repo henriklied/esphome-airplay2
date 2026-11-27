@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.4.0
       # Zensical reads mkdocs.yml (Material for MkDocs' successor). Pinned: it is
       # 0.x, so bump deliberately. --strict fails on missing pages and anchors.
       - name: Build
