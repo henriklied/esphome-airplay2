@@ -274,6 +274,18 @@ esphome:
 The positional setters still work, but they address `dsp_filters_` by index, which a text edit can
 reorder; use one style per board.
 
+**Switching an existing board to the text form.** If your HA sliders call the positional setters
+with `restore_value: true`, the values you tuned in HA live only in those entities. When the
+reflashed board stops reporting them, Home Assistant removes the entities and the values are gone.
+The board then plays the `dsp: filters:` block from YAML until the text is set. So, before you
+reflash:
+
+1. Read the current values off the HA sliders (or the cascade the component logs at boot).
+2. Write them into the `dsp: filters:` block, in the same order.
+3. Remove the slider entities from your YAML, add the `text` entity above, and flash.
+
+The text starts empty, so the board keeps playing the YAML filters, now with your tuned values.
+
 These recompute coefficients and must run on the main loop, which is exactly where a YAML lambda
 runs. See [examples/dsp-speaker-correction.yaml](examples/dsp-speaker-correction.yaml) for the whole
 set wired up as Home Assistant sliders.
